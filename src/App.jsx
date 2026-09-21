@@ -6,19 +6,54 @@ import { collection, onSnapshot, addDoc } from 'firebase/firestore';
 
 const MAX_SESSIONS = 5;
 
-// Request notification permissions safely
-const requestNotificationPermission = async () => {
-  if ('Notification' in window && Notification.permission === 'default') {
-    try {
-      await Notification.requestPermission();
-    } catch (err) {
-      console.log('Notification permission error:', err);
-    }
+// دالة توليد صوت تنبيه قوي ومباشر عبر Web Audio API
+const playAlarmSound = () => {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // تشغيل 3 صفارات متتالية
+    [0, 0.2, 0.4].forEach((delay) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(880, audioCtx.currentTime + delay); // نغمة مرتفعة (A5)
+      osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + delay + 0.15);
+
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime + delay);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + delay + 0.15);
+
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+
+      osc.start(audioCtx.currentTime + delay);
+      osc.stop(audioCtx.currentTime + delay + 0.15);
+    });
+  } catch (e) {
+    console.log("Web Audio Playback error:", e);
   }
 };
 
 // 1. Mobile-Optimized CEONotificationListener Component
 function CEONotificationListener({ user }) {
+  const [audioEnabled, setAudioEnabled] = useState(false);
+
+  // طلب الصلاحيات وتفعيل الصوت بلمسة واحدة
+  const enableAudioAndNotifications = async () => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch (err) {
+        console.log('Notification permission error:', err);
+      }
+    }
+    
+    // تشغيل نغمة خفيفة لتفعيل الـ AudioContext
+    playAlarmSound();
+    setAudioEnabled(true);
+    alert("✅ Sound & Notifications Activated Successfully!");
+  };
+
   useEffect(() => {
     const pageStartTimestamp = Date.now();
 
@@ -27,16 +62,15 @@ function CEONotificationListener({ user }) {
         if (change.type === 'added') {
           const newRequest = change.doc.data();
 
-          // Match CEO or ADMIN role triggers
           const isManagement = 
             newRequest.createdByRole === 'CEO' || 
             newRequest.role === 'CEO' || 
             newRequest.createdByRole === 'ADMIN' || 
-            newRequest.role === 'ADMIN';
+            newRequest.role === 'ADMIN' ||
+            newRequest.type === 'SUMMON';
 
           if (!isManagement) return;
 
-          // Standardize created date
           let requestTime = pageStartTimestamp;
           if (newRequest.createdAt) {
             if (typeof newRequest.createdAt.toMillis === 'function') {
@@ -46,12 +80,12 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // Ignore older requests (5-second window)
-          if (requestTime < pageStartTimestamp - 5000) {
+          // تجاهل الطلبات القديمة (خلال 10 ثوانٍ)
+          if (requestTime < pageStartTimestamp - 10000) {
             return;
           }
 
-          // 1. Mobile Haptic Vibration
+          // 1. تشغيل الهزاز
           if ('vibrate' in navigator) {
             try {
               navigator.vibrate([500, 200, 500, 200, 500]);
@@ -60,27 +94,22 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // 2. Play Audio Alert
-          try {
-            const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
-            audio.play().catch(e => console.log("Mobile autoplay restricted:", e));
-          } catch (e) {
-            console.log("Audio play error:", e);
-          }
+          // 2. تشغيل صوت التنبيه المباشر
+          playAlarmSound();
 
-          // 3. System Push Notification
+          // 3. إرسال إشعار النظام (Push Notification)
           if ('Notification' in window && Notification.permission === 'granted') {
             try {
               new Notification('🚨 URGENT CALL!', {
-                body: newRequest.details || `Branch Call: ${newRequest.targetBranch || ''}`,
+                body: newRequest.details || `Target Branch: ${newRequest.targetBranch || ''}`,
                 requireInteraction: true
               });
             } catch (e) {
-              console.log("Mobile Notification Constructor Error:", e);
+              console.log("Notification Constructor Error:", e);
             }
           }
 
-          // 4. Fallback Timeout for Mobile Screen Modal
+          // 4. عرض التنبيه على الشاشة
           const alertMsg = newRequest.type === 'SUMMON'
             ? `🚨 URGENT CALL FROM MANAGEMENT!\nTarget Branch: ${newRequest.targetBranch}\nSender: ${newRequest.senderName || 'Admin/CEO'}`
             : `🔔 NEW MANAGEMENT REQUEST!\n${newRequest.title || newRequest.details || 'A new request has been submitted.'}`;
@@ -97,7 +126,42 @@ function CEONotificationListener({ user }) {
     return () => unsubscribe();
   }, []);
 
-  return null;
+  return (
+    {!audioEnabled && (
+      <div style={{
+        position: 'fixed',
+        bottom: '20px',
+        right: '20px',
+        zIndex: 9999,
+        backgroundColor: '#1e293b',
+        color: '#fff',
+        padding: '12px 18px',
+        borderRadius: '16px',
+        boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '12px',
+        border: '1px solid #f59e0b'
+      }}>
+        <span style={{ fontSize: '12px', fontWeight: 'bold' }}>🔔 Enable Instant Sound & Alerts</span>
+        <button 
+          onClick={enableAudioAndNotifications}
+          style={{
+            backgroundColor: '#f59e0b',
+            color: '#0f172a',
+            border: 'none',
+            padding: '6px 12px',
+            borderRadius: '10px',
+            fontWeight: '900',
+            fontSize: '11px',
+            cursor: 'pointer'
+          }}
+        >
+          ACTIVATE NOW
+        </button>
+      </div>
+    )}
+  );
 }
 
 // 2. Dynamic Summon Branch Widget (For CEO and ADMIN)
@@ -106,12 +170,11 @@ export function SummonBranchWidget({ user }) {
   const [selectedBranch, setSelectedBranch] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Fetch branches dynamically from Firestore & sort alphabetically
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const branchList = snapshot.docs.map(doc => doc.data().name || doc.data().branchName || doc.id);
       
-      // Sort alphabetically A-Z
+      // ترتيب أبجدي A-Z
       branchList.sort((a, b) => a.localeCompare(b));
 
       setBranches(branchList);
@@ -178,7 +241,7 @@ export function SummonBranchWidget({ user }) {
         Select a branch to trigger an instant sound, vibration & screen alert on active mobile/desktop devices.
       </p>
 
-      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: '12px', itemsCenter: 'center' }}>
         <select
           value={selectedBranch}
           onChange={(e) => setSelectedBranch(e.target.value)}
@@ -235,12 +298,9 @@ export function LiveAttendancePortal({
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState('');
 
-  // Fetch branches dynamically from Firestore & sort alphabetically
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const branchList = snapshot.docs.map(doc => doc.data().name || doc.data().branchName || doc.id);
-      
-      // Sort alphabetically A-Z
       branchList.sort((a, b) => a.localeCompare(b));
 
       setBranches(branchList);
@@ -465,14 +525,11 @@ export default function App() {
     if (savedUser) {
       setUser(JSON.parse(savedUser));
     }
-
-    requestNotificationPermission();
   }, []);
 
   const handleLoginSuccess = (userData) => {
     localStorage.setItem('befit_user', JSON.stringify(userData));
     setUser(userData);
-    requestNotificationPermission();
   };
 
   const handleLogout = () => {
