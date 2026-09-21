@@ -2,67 +2,27 @@ import React, { useState, useEffect } from 'react';
 import Login from './Login';
 import Dashboard from './Dashboard';
 import { db } from './firebase';
-import { collection, onSnapshot, addDoc } from 'firebase/firestore';
+import { collection, onSnapshot, addDoc, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 
 const MAX_SESSIONS = 5;
 
-// دالة توليد صوت تنبيه قوي ومباشر عبر Web Audio API
-const playAlarmSound = () => {
-  try {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    
-    [0, 0.2, 0.4].forEach((delay) => {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(880, audioCtx.currentTime + delay);
-      osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + delay + 0.15);
-
-      gain.gain.setValueAtTime(0.3, audioCtx.currentTime + delay);
-      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + delay + 0.15);
-
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-
-      osc.start(audioCtx.currentTime + delay);
-      osc.stop(audioCtx.currentTime + delay + 0.15);
-    });
-  } catch (e) {
-    console.log("Web Audio Playback error:", e);
-  }
-};
-
-// 1. Target Branch Specific CEONotificationListener Component
+// 1. Target Branch Specific CEONotificationListener Component (Fixed Notification Logic)
 function CEONotificationListener({ user }) {
   const [audioEnabled, setAudioEnabled] = useState(false);
-  const [userCurrentBranch, setUserCurrentBranch] = useState(null);
 
-  const currentUserIdentifier = user?.username || user?.displayName || user?.email || '';
+  const currentUserIdentifier = user?.username || user?.displayName || user?.email || user?.name || '';
   const userRole = (user?.role || '').toUpperCase();
   const isAdminOrCEO = userRole === 'ADMIN' || userRole === 'CEO';
 
-  // متابعة فرع المستخدم الحالي المعتمد على الـ Check-In
-  useEffect(() => {
-    if (!currentUserIdentifier) return;
+  const playOriginalAudio = () => {
+    try {
+      const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+      audio.play().catch(e => console.log("Audio autoplay restricted:", e));
+    } catch (e) {
+      console.log("Audio play error:", e);
+    }
+  };
 
-    const todayStr = new Date().toISOString().split('T')[0];
-    const unsubAttendance = onSnapshot(collection(db, 'attendance'), (snapshot) => {
-      const activeRecord = snapshot.docs
-        .map(doc => doc.data())
-        .find(a => a.username === currentUserIdentifier && a.dateStr === todayStr && !a.checkOutTime);
-
-      if (activeRecord) {
-        setUserCurrentBranch(activeRecord.branch);
-      } else {
-        setUserCurrentBranch(null);
-      }
-    });
-
-    return () => unsubAttendance();
-  }, [currentUserIdentifier]);
-
-  // تفعيل الصوت والتنبيهات
   const enableAudioAndNotifications = async () => {
     if ('Notification' in window && Notification.permission === 'default') {
       try {
@@ -72,17 +32,18 @@ function CEONotificationListener({ user }) {
       }
     }
     
-    playAlarmSound();
+    playOriginalAudio();
     setAudioEnabled(true);
     alert("✅ Sound & Notifications Activated Successfully!");
   };
 
-  // الاستماع للنداءات الموجهة لفرع المستخدم فقط
   useEffect(() => {
+    if (!currentUserIdentifier && !isAdminOrCEO) return;
+
     const pageStartTimestamp = Date.now();
 
-    const unsubscribe = onSnapshot(collection(db, 'requests'), (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
+    const unsubscribe = onSnapshot(collection(db, 'requests'), async (snapshot) => {
+      for (const change of snapshot.docChanges()) {
         if (change.type === 'added') {
           const newRequest = change.doc.data();
 
@@ -93,15 +54,7 @@ function CEONotificationListener({ user }) {
             newRequest.role === 'ADMIN' ||
             newRequest.type === 'SUMMON';
 
-          if (!isManagement) return;
-
-          // 🎯 التنبيه يصل فقط للمستخدم المتواجد في الفرع المستهدف
-          const targetBranch = newRequest.targetBranch;
-          const isTargetedUser = isAdminOrCEO || (userCurrentBranch && userCurrentBranch === targetBranch);
-
-          if (!isTargetedUser) {
-            return;
-          }
+          if (!isManagement) continue;
 
           let requestTime = pageStartTimestamp;
           if (newRequest.createdAt) {
@@ -113,10 +66,45 @@ function CEONotificationListener({ user }) {
           }
 
           if (requestTime < pageStartTimestamp - 10000) {
-            return;
+            continue;
           }
 
-          // تشغيل الهزاز
+          const targetBranch = newRequest.targetBranch;
+
+          let shouldNotify = isAdminOrCEO;
+
+          // 🎯 فحص الحضور المرن للفرع المستهدف للموظفين
+          if (!shouldNotify && currentUserIdentifier && targetBranch) {
+            try {
+              const attSnapshot = await getDocs(collection(db, 'attendance'));
+              
+              const activeSession = attSnapshot.docs
+                .map(doc => doc.data())
+                .find(a => {
+                  const matchesUser = 
+                    a.username === currentUserIdentifier || 
+                    a.email === currentUserIdentifier || 
+                    a.name === currentUserIdentifier ||
+                    a.userId === user?.id;
+
+                  const isActive = !a.checkOutTime && !a.checkOut;
+                  const matchesBranch = a.branch === targetBranch || a.branchName === targetBranch;
+
+                  return matchesUser && isActive && matchesBranch;
+                });
+
+              if (activeSession) {
+                shouldNotify = true;
+              }
+            } catch (err) {
+              console.error("Error verifying active attendance branch:", err);
+            }
+          }
+
+          if (!shouldNotify) {
+            continue;
+          }
+
           if ('vibrate' in navigator) {
             try {
               navigator.vibrate([500, 200, 500, 200, 500]);
@@ -125,10 +113,8 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // تشغيل الصوت
-          playAlarmSound();
+          playOriginalAudio();
 
-          // إشعار النظام
           if ('Notification' in window && Notification.permission === 'granted') {
             try {
               new Notification('🚨 URGENT CALL FOR YOUR BRANCH!', {
@@ -140,7 +126,6 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // تنبيه الشاشة
           const alertMsg = newRequest.type === 'SUMMON'
             ? `🚨 URGENT CALL FROM MANAGEMENT!\nTarget Branch: ${newRequest.targetBranch}\nSender: ${newRequest.senderName || 'Admin/CEO'}`
             : `🔔 NEW MANAGEMENT REQUEST!\n${newRequest.title || newRequest.details || 'A new request has been submitted.'}`;
@@ -149,13 +134,13 @@ function CEONotificationListener({ user }) {
             alert(alertMsg);
           }, 200);
         }
-      });
+      }
     }, (error) => {
       console.error("Firestore Notification Listener Error:", error);
     });
 
     return () => unsubscribe();
-  }, [userCurrentBranch, isAdminOrCEO]);
+  }, [currentUserIdentifier, isAdminOrCEO, user]);
 
   if (audioEnabled) return null;
 
@@ -195,32 +180,42 @@ function CEONotificationListener({ user }) {
   );
 }
 
-// 2. Dynamic Summon Branch Widget (For CEO and ADMIN)
+// 2. Dynamic Summon Branch Widget & Universal Requests Viewer Component
 export function SummonBranchWidget({ user }) {
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [requestsList, setRequestsList] = useState([]);
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(collection(db, 'branches'), (snapshot) => {
+    const unsubBranches = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const branchList = snapshot.docs.map(doc => doc.data().name || doc.data().branchName || doc.id);
       branchList.sort((a, b) => a.localeCompare(b));
 
       setBranches(branchList);
-      if (branchList.length > 0) {
+      if (branchList.length > 0 && !selectedBranch) {
         setSelectedBranch(branchList[0]);
       }
-    }, (error) => {
-      console.error("Error fetching branches:", error);
     });
 
-    return () => unsubscribe();
+    const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
+      const list = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      list.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setRequestsList(list);
+    });
+
+    return () => {
+      unsubBranches();
+      unsubRequests();
+    };
   }, []);
 
   const roleUpper = user?.role?.toUpperCase() || user?.createdByRole?.toUpperCase() || '';
   const canSummon = roleUpper === 'CEO' || roleUpper === 'ADMIN';
-
-  if (!canSummon) return null;
 
   const handleSummon = async () => {
     if (!selectedBranch) {
@@ -240,6 +235,7 @@ export function SummonBranchWidget({ user }) {
         createdByRole: user.role || 'CEO',
         senderName: user.name || user.role || 'Management',
         type: 'SUMMON',
+        status: 'NEW',
         createdAt: new Date().toISOString()
       });
 
@@ -252,67 +248,189 @@ export function SummonBranchWidget({ user }) {
     }
   };
 
+  const handleStatusChange = async (requestId, newStatus) => {
+    try {
+      const reqRef = doc(db, 'requests', requestId);
+      await updateDoc(reqRef, { status: newStatus });
+    } catch (error) {
+      console.error("Error updating request status:", error);
+      alert("Failed to update status!");
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch ((status || 'NEW').toUpperCase()) {
+      case 'IN PROGRESS':
+        return { bg: '#fef3c7', text: '#d97706', border: '#fcd34d' };
+      case 'COMPLETED':
+        return { bg: '#d1fae5', text: '#059669', border: '#6ee7b7' };
+      default:
+        return { bg: '#fee2e2', text: '#dc2626', border: '#fca5a5' };
+    }
+  };
+
+  const getAvailableStatuses = (currentStatus = 'NEW') => {
+    const statusUpper = currentStatus.toUpperCase();
+    if (statusUpper === 'COMPLETED') return ['COMPLETED'];
+    if (statusUpper === 'IN PROGRESS') return ['IN PROGRESS', 'COMPLETED'];
+    return ['NEW', 'IN PROGRESS', 'COMPLETED'];
+  };
+
   return (
     <div style={{
-      backgroundColor: '#fff1f2',
-      border: '1px solid #fecdd3',
-      borderRadius: '20px',
-      padding: '20px 24px',
-      maxWidth: '520px',
-      margin: '0 auto 20px auto',
-      boxShadow: '0 4px 12px rgba(225, 29, 72, 0.05)',
+      maxWidth: '680px',
+      margin: '0 auto 24px auto',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '20px',
       fontFamily: 'system-ui, -apple-system, sans-serif'
     }}>
-      <h3 style={{ margin: '0 0 6px 0', color: '#9f1239', fontSize: '18px', fontWeight: '800' }}>
-        📢 Urgent Branch Summon (CEO / Admin)
-      </h3>
-      <p style={{ fontSize: '12px', color: '#881337', margin: '0 0 16px 0' }}>
-        Select a branch to trigger an instant sound, vibration & screen alert on active mobile/desktop devices.
-      </p>
+      {canSummon && (
+        <div style={{
+          backgroundColor: '#fff1f2',
+          border: '1px solid #fecdd3',
+          borderRadius: '20px',
+          padding: '20px 24px',
+          boxShadow: '0 4px 12px rgba(225, 29, 72, 0.05)'
+        }}>
+          <h3 style={{ margin: '0 0 6px 0', color: '#9f1239', fontSize: '18px', fontWeight: '800' }}>
+            📢 Urgent Branch Summon (CEO / Admin)
+          </h3>
+          <p style={{ fontSize: '12px', color: '#881337', margin: '0 0 16px 0' }}>
+            Select a branch to trigger an instant sound, vibration & screen alert on active devices.
+          </p>
 
-      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-        <select
-          value={selectedBranch}
-          onChange={(e) => setSelectedBranch(e.target.value)}
-          style={{
-            flex: 1,
-            padding: '12px',
-            borderRadius: '12px',
-            border: '1px solid #fda4af',
-            backgroundColor: '#ffffff',
-            fontSize: '14px',
-            fontWeight: '600',
-            color: '#1f2937',
-            outline: 'none'
-          }}
-        >
-          {branches.length === 0 ? (
-            <option value="">No branches found</option>
-          ) : (
-            branches.map(branch => (
-              <option key={branch} value={branch}>{branch}</option>
-            ))
-          )}
-        </select>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            <select
+              value={selectedBranch}
+              onChange={(e) => setSelectedBranch(e.target.value)}
+              style={{
+                flex: 1,
+                padding: '12px',
+                borderRadius: '12px',
+                border: '1px solid #fda4af',
+                backgroundColor: '#ffffff',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#1f2937',
+                outline: 'none'
+              }}
+            >
+              {branches.length === 0 ? (
+                <option value="">No branches found</option>
+              ) : (
+                branches.map(branch => (
+                  <option key={branch} value={branch}>{branch}</option>
+                ))
+              )}
+            </select>
 
-        <button
-          onClick={handleSummon}
-          disabled={loading || branches.length === 0}
-          style={{
-            backgroundColor: '#e11d48',
-            color: '#ffffff',
-            border: 'none',
-            borderRadius: '12px',
-            padding: '12px 20px',
-            fontWeight: '800',
-            fontSize: '13px',
-            cursor: (loading || branches.length === 0) ? 'not-allowed' : 'pointer',
-            boxShadow: '0 4px 12px rgba(225, 29, 72, 0.25)',
-            whiteSpace: 'nowrap'
-          }}
-        >
-          {loading ? 'Sending...' : '🚨 Summon Now'}
-        </button>
+            <button
+              onClick={handleSummon}
+              disabled={loading || branches.length === 0}
+              style={{
+                backgroundColor: '#e11d48',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '12px',
+                padding: '12px 20px',
+                fontWeight: '800',
+                fontSize: '13px',
+                cursor: (loading || branches.length === 0) ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(225, 29, 72, 0.25)',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {loading ? 'Sending...' : '🚨 Summon Now'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{
+        backgroundColor: '#ffffff',
+        border: '1px solid #e5e7eb',
+        borderRadius: '20px',
+        padding: '20px 24px',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.03)'
+      }}>
+        <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', fontWeight: '800', color: '#1f2937' }}>
+          📋 Live Requests & Branch Calls
+        </h4>
+
+        {requestsList.length === 0 ? (
+          <p style={{ fontSize: '12px', color: '#9ca3af', textAlign: 'center', margin: '20px 0' }}>
+            No active summons or requests found.
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '350px', overflowY: 'auto' }}>
+            {requestsList.map((req) => {
+              const colors = getStatusColor(req.status);
+              const currentStatus = (req.status || 'NEW').toUpperCase();
+
+              return (
+                <div key={req.id} style={{
+                  border: '1px solid #f3f4f6',
+                  borderRadius: '14px',
+                  padding: '12px 16px',
+                  backgroundColor: '#fafafa',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '12px'
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: '800', color: '#111827' }}>
+                        {req.title || 'Urgent Request'}
+                      </span>
+                      <span style={{
+                        fontSize: '10px',
+                        fontWeight: '800',
+                        backgroundColor: '#e0f2fe',
+                        color: '#0369a1',
+                        padding: '2px 8px',
+                        borderRadius: '6px'
+                      }}>
+                        {req.targetBranch || 'All Branches'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#6b7280' }}>
+                      {req.details}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <select
+                      value={currentStatus}
+                      onChange={(e) => handleStatusChange(req.id, e.target.value)}
+                      disabled={currentStatus === 'COMPLETED'}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: '8px',
+                        border: `1px solid ${colors.border}`,
+                        backgroundColor: colors.bg,
+                        color: colors.text,
+                        fontWeight: '800',
+                        fontSize: '11px',
+                        outline: 'none',
+                        cursor: currentStatus === 'COMPLETED' ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      {getAvailableStatuses(currentStatus).map((statusOption) => (
+                        <option key={statusOption} value={statusOption}>
+                          {statusOption === 'NEW' && '🔴 NEW'}
+                          {statusOption === 'IN PROGRESS' && '🟡 IN PROGRESS'}
+                          {statusOption === 'COMPLETED' && '🟢 COMPLETED'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
