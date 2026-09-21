@@ -163,6 +163,30 @@ export default function Dashboard({ user, onLogout }) {
     return { bg: '#e11d48', color: '#ffffff' }; 
   };
 
+  // --- LOG DELETION ACTIONS (EXCLUSIVE TO ADMIN) ---
+  const handleDeleteLog = async (logId) => {
+    if (!isAdmin) return alert("Only Admin can delete activity logs.");
+    try {
+      await deleteDoc(doc(db, 'logs', logId));
+    } catch (err) {
+      alert("Error deleting log: " + err.message);
+    }
+  };
+
+  const handleClearAllLogs = async () => {
+    if (!isAdmin) return alert("Only Admin can clear all logs.");
+    if (activityLogs.length === 0) return alert("Logs list is already empty.");
+
+    if (window.confirm("Are you sure you want to clear all activity notifications logs?")) {
+      try {
+        await Promise.all(activityLogs.map(log => deleteDoc(doc(db, 'logs', log.id))));
+        alert("All activity logs cleared successfully!");
+      } catch (err) {
+        alert("Error clearing logs: " + err.message);
+      }
+    }
+  };
+
   // --- BULK & ARCHIVE ACTIONS (MAINTENANCE REQUESTS) ---
   const handleToggleSelectReq = (id) => {
     setSelectedReqIds(prev => 
@@ -1048,7 +1072,7 @@ export default function Dashboard({ user, onLogout }) {
             {currentUserIdentifier.charAt(0).toUpperCase()}
           </div>
           <div>
-            <h1 className="text-lg font-bold text-slate-900">Welcome, <span className="text-indigo-600">{currentUserIdentifier}</span></h1>
+            <h1 className="text-lg font-bold text-slate-900">BeFit Eye • Welcome, <span className="text-indigo-600">{currentUserIdentifier}</span></h1>
             <div className="flex items-center gap-2 mt-1">
               <span className="inline-block text-[10px] uppercase font-black px-3 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
                 ROLE: {userRole}
@@ -1129,7 +1153,7 @@ export default function Dashboard({ user, onLogout }) {
           )}
         </div>
 
-        <button onClick={onLogout} className="bg-slate-100 hover:bg-rose-600 hover:text-white border border-slate-300 text-slate-700 px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm">
+        <button onClick={onLogout} className="bg-slate-100 hover:bg-rose-600 hover:text-white border border-slate-300 text-slate-700 px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer">
           Logout
         </button>
       </header>
@@ -1196,31 +1220,56 @@ export default function Dashboard({ user, onLogout }) {
               </div>
 
               <textarea rows="3" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description..." className="w-full p-3 bg-slate-50 border rounded-xl text-sm"></textarea>
-              <button type="submit" disabled={loading} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl text-sm shadow-md hover:bg-indigo-700 transition">
+              <button type="submit" disabled={loading} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl text-sm shadow-md hover:bg-indigo-700 transition cursor-pointer">
                 {loading ? 'Submitting...' : 'Submit Request'}
               </button>
             </form>
           </div>
 
           <div className="lg:col-span-2 space-y-6">
+            
+            {/* ACTIVITY NOTIFICATIONS LOG (WITH ADMIN CLEAR & DELETE) */}
             <div className="bg-white border border-slate-200 p-5 rounded-3xl shadow-sm space-y-3">
-              <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                <span>🔔</span> Activity Notifications Log
-              </h3>
+              <div className="flex justify-between items-center">
+                <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <span>🔔</span> Activity Notifications Log
+                </h3>
+                {isAdmin && activityLogs.length > 0 && (
+                  <button 
+                    onClick={handleClearAllLogs}
+                    className="text-[11px] bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white font-extrabold px-2.5 py-1 rounded-xl border border-rose-200 transition cursor-pointer"
+                  >
+                    Clear All Logs 🗑️
+                  </button>
+                )}
+              </div>
+
               <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
                 {activityLogs.length === 0 ? (
                   <p className="text-xs text-slate-400 italic">No recent status updates logged.</p>
                 ) : (
                   activityLogs.map((log) => (
-                    <div key={log.id} className="p-2.5 bg-slate-50 border border-slate-100 rounded-xl text-xs flex justify-between items-center gap-2">
-                      <div>
+                    <div key={log.id} className="p-2.5 bg-slate-50 border border-slate-100 rounded-xl text-xs flex justify-between items-center gap-2 hover:bg-slate-100/80 transition">
+                      <div className="flex-1">
                         <span className="font-bold text-slate-800">{log.performedBy}</span> updated{' '}
                         <span className="font-bold text-indigo-600">"{log.title}"</span> from{' '}
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: getStatusBadgeStyle(log.fromStatus).bg }}>{log.fromStatus}</span> to{' '}
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: getStatusBadgeStyle(log.toStatus).bg }}>{log.toStatus}</span>
                         {log.assignedTo && <span className="font-bold text-amber-600 ml-1">(Assigned: {log.assignedTo})</span>}
                       </div>
-                      <span className="text-[10px] text-slate-400 shrink-0 font-medium">{formatDate(log.timestamp)}</span>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-[10px] text-slate-400 font-medium">{formatDate(log.timestamp)}</span>
+                        {isAdmin && (
+                          <button 
+                            onClick={() => handleDeleteLog(log.id)}
+                            className="text-slate-400 hover:text-rose-600 font-bold px-1.5 py-0.5 hover:bg-rose-50 rounded transition cursor-pointer"
+                            title="Delete log"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))
                 )}
@@ -1365,7 +1414,7 @@ export default function Dashboard({ user, onLogout }) {
                           <>
                             <button 
                               onClick={() => handleArchiveReq(req.id, req.isArchived)}
-                              className="bg-amber-500 hover:bg-amber-600 text-slate-900 px-2.5 py-1.5 rounded-xl text-xs font-extrabold shadow-sm"
+                              className="bg-amber-500 hover:bg-amber-600 text-slate-900 px-2.5 py-1.5 rounded-xl text-xs font-extrabold shadow-sm cursor-pointer"
                               title="Archive Request"
                             >
                               {req.isArchived ? 'Unarchive' : 'Archive 📁'}
@@ -2133,6 +2182,13 @@ export default function Dashboard({ user, onLogout }) {
           </div>
         </div>
       )}
+
+      {/* FOOTER BRANDING */}
+      <footer className="mt-12 py-6 border-t border-slate-200 text-center print:hidden">
+        <p className="text-xs font-black text-slate-400 uppercase tracking-widest">
+          POWERED BY Amr Shata
+        </p>
+      </footer>
 
     </div>
   );
