@@ -11,13 +11,12 @@ const playAlarmSound = () => {
   try {
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     
-    // تشغيل 3 صفارات متتالية
     [0, 0.2, 0.4].forEach((delay) => {
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
 
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(880, audioCtx.currentTime + delay); // نغمة مرتفعة (A5)
+      osc.frequency.setValueAtTime(880, audioCtx.currentTime + delay);
       osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + delay + 0.15);
 
       gain.gain.setValueAtTime(0.3, audioCtx.currentTime + delay);
@@ -34,11 +33,36 @@ const playAlarmSound = () => {
   }
 };
 
-// 1. Mobile-Optimized CEONotificationListener Component
+// 1. Target Branch Specific CEONotificationListener Component
 function CEONotificationListener({ user }) {
   const [audioEnabled, setAudioEnabled] = useState(false);
+  const [userCurrentBranch, setUserCurrentBranch] = useState(null);
 
-  // طلب الصلاحيات وتفعيل الصوت بلمسة واحدة
+  const currentUserIdentifier = user?.username || user?.displayName || user?.email || '';
+  const userRole = (user?.role || '').toUpperCase();
+  const isAdminOrCEO = userRole === 'ADMIN' || userRole === 'CEO';
+
+  // 1. متابعة فرع المستخدم الحالي المعتمد على الـ Check-In للوفاء بالشرط
+  useEffect(() => {
+    if (!currentUserIdentifier) return;
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const unsubAttendance = onSnapshot(collection(db, 'attendance'), (snapshot) => {
+      const activeRecord = snapshot.docs
+        .map(doc => doc.data())
+        .find(a => a.username === currentUserIdentifier && a.dateStr === todayStr && !a.checkOutTime);
+
+      if (activeRecord) {
+        setUserCurrentBranch(activeRecord.branch);
+      } else {
+        setUserCurrentBranch(null); // المستخدم ليس مسجلاً دخوله في أي فرع حالياً
+      }
+    });
+
+    return () => unsubAttendance();
+  }, [currentUserIdentifier]);
+
+  // تفعيل الصوت والتنبيهات
   const enableAudioAndNotifications = async () => {
     if ('Notification' in window && Notification.permission === 'default') {
       try {
@@ -48,12 +72,12 @@ function CEONotificationListener({ user }) {
       }
     }
     
-    // تشغيل نغمة خفيفة لتفعيل الـ AudioContext
     playAlarmSound();
     setAudioEnabled(true);
     alert("✅ Sound & Notifications Activated Successfully!");
   };
 
+  // 2. الاستماع للنداءات الموجهة لفرع المستخدم المقتصر عليها فقط
   useEffect(() => {
     const pageStartTimestamp = Date.now();
 
@@ -71,6 +95,14 @@ function CEONotificationListener({ user }) {
 
           if (!isManagement) return;
 
+          // 🎯 تصفية الاستلام: التنبيه يصل فقط إذا كان المستخدم أدمن/CEO أو متواجد (Checked-in) في الفرع المستهدف
+          const targetBranch = newRequest.targetBranch;
+          const isTargetedUser = isAdminOrCEO || (userCurrentBranch && userCurrentBranch === targetBranch);
+
+          if (!isTargetedUser) {
+            return; // تجاهل التنبيه للأنظمة/المستخدمين في الفروع الأخرى
+          }
+
           let requestTime = pageStartTimestamp;
           if (newRequest.createdAt) {
             if (typeof newRequest.createdAt.toMillis === 'function') {
@@ -80,12 +112,11 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // تجاهل الطلبات القديمة (خلال 10 ثوانٍ)
           if (requestTime < pageStartTimestamp - 10000) {
             return;
           }
 
-          // 1. تشغيل الهزاز
+          // تشغيل الهزاز
           if ('vibrate' in navigator) {
             try {
               navigator.vibrate([500, 200, 500, 200, 500]);
@@ -94,13 +125,13 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // 2. تشغيل صوت التنبيه المباشر
+          // تشغيل الصوت
           playAlarmSound();
 
-          // 3. إرسال إشعار النظام (Push Notification)
+          // إشعار النظام (Push Notification)
           if ('Notification' in window && Notification.permission === 'granted') {
             try {
-              new Notification('🚨 URGENT CALL!', {
+              new Notification('🚨 URGENT CALL FOR YOUR BRANCH!', {
                 body: newRequest.details || `Target Branch: ${newRequest.targetBranch || ''}`,
                 requireInteraction: true
               });
@@ -109,7 +140,7 @@ function CEONotificationListener({ user }) {
             }
           }
 
-          // 4. عرض التنبيه على الشاشة
+          // تنبيه الشاشة
           const alertMsg = newRequest.type === 'SUMMON'
             ? `🚨 URGENT CALL FROM MANAGEMENT!\nTarget Branch: ${newRequest.targetBranch}\nSender: ${newRequest.senderName || 'Admin/CEO'}`
             : `🔔 NEW MANAGEMENT REQUEST!\n${newRequest.title || newRequest.details || 'A new request has been submitted.'}`;
@@ -124,7 +155,7 @@ function CEONotificationListener({ user }) {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [userCurrentBranch, isAdminOrCEO]);
 
   return (
     {!audioEnabled && (
@@ -173,8 +204,6 @@ export function SummonBranchWidget({ user }) {
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const branchList = snapshot.docs.map(doc => doc.data().name || doc.data().branchName || doc.id);
-      
-      // ترتيب أبجدي A-Z
       branchList.sort((a, b) => a.localeCompare(b));
 
       setBranches(branchList);
@@ -241,7 +270,7 @@ export function SummonBranchWidget({ user }) {
         Select a branch to trigger an instant sound, vibration & screen alert on active mobile/desktop devices.
       </p>
 
-      <div style={{ display: 'flex', gap: '12px', itemsCenter: 'center' }}>
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
         <select
           value={selectedBranch}
           onChange={(e) => setSelectedBranch(e.target.value)}
