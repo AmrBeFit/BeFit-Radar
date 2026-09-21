@@ -42,7 +42,7 @@ function CEONotificationListener({ user }) {
   const userRole = (user?.role || '').toUpperCase();
   const isAdminOrCEO = userRole === 'ADMIN' || userRole === 'CEO';
 
-  // 1. متابعة فرع المستخدم الحالي المعتمد على الـ Check-In للوفاء بالشرط
+  // متابعة فرع المستخدم الحالي المعتمد على الـ Check-In
   useEffect(() => {
     if (!currentUserIdentifier) return;
 
@@ -55,7 +55,7 @@ function CEONotificationListener({ user }) {
       if (activeRecord) {
         setUserCurrentBranch(activeRecord.branch);
       } else {
-        setUserCurrentBranch(null); // المستخدم ليس مسجلاً دخوله في أي فرع حالياً
+        setUserCurrentBranch(null);
       }
     });
 
@@ -77,7 +77,7 @@ function CEONotificationListener({ user }) {
     alert("✅ Sound & Notifications Activated Successfully!");
   };
 
-  // 2. الاستماع للنداءات الموجهة لفرع المستخدم المقتصر عليها فقط
+  // الاستماع للنداءات الموجهة لفرع المستخدم فقط
   useEffect(() => {
     const pageStartTimestamp = Date.now();
 
@@ -95,12 +95,12 @@ function CEONotificationListener({ user }) {
 
           if (!isManagement) return;
 
-          // 🎯 تصفية الاستلام: التنبيه يصل فقط إذا كان المستخدم أدمن/CEO أو متواجد (Checked-in) في الفرع المستهدف
+          // 🎯 التنبيه يصل فقط للمستخدم المتواجد في الفرع المستهدف
           const targetBranch = newRequest.targetBranch;
           const isTargetedUser = isAdminOrCEO || (userCurrentBranch && userCurrentBranch === targetBranch);
 
           if (!isTargetedUser) {
-            return; // تجاهل التنبيه للأنظمة/المستخدمين في الفروع الأخرى
+            return;
           }
 
           let requestTime = pageStartTimestamp;
@@ -128,7 +128,7 @@ function CEONotificationListener({ user }) {
           // تشغيل الصوت
           playAlarmSound();
 
-          // إشعار النظام (Push Notification)
+          // إشعار النظام
           if ('Notification' in window && Notification.permission === 'granted') {
             try {
               new Notification('🚨 URGENT CALL FOR YOUR BRANCH!', {
@@ -157,41 +157,41 @@ function CEONotificationListener({ user }) {
     return () => unsubscribe();
   }, [userCurrentBranch, isAdminOrCEO]);
 
+  if (audioEnabled) return null;
+
   return (
-    {!audioEnabled && (
-      <div style={{
-        position: 'fixed',
-        bottom: '20px',
-        right: '20px',
-        zIndex: 9999,
-        backgroundColor: '#1e293b',
-        color: '#fff',
-        padding: '12px 18px',
-        borderRadius: '16px',
-        boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '12px',
-        border: '1px solid #f59e0b'
-      }}>
-        <span style={{ fontSize: '12px', fontWeight: 'bold' }}>🔔 Enable Instant Sound & Alerts</span>
-        <button 
-          onClick={enableAudioAndNotifications}
-          style={{
-            backgroundColor: '#f59e0b',
-            color: '#0f172a',
-            border: 'none',
-            padding: '6px 12px',
-            borderRadius: '10px',
-            fontWeight: '900',
-            fontSize: '11px',
-            cursor: 'pointer'
-          }}
-        >
-          ACTIVATE NOW
-        </button>
-      </div>
-    )}
+    <div style={{
+      position: 'fixed',
+      bottom: '20px',
+      right: '20px',
+      zIndex: 9999,
+      backgroundColor: '#1e293b',
+      color: '#fff',
+      padding: '12px 18px',
+      borderRadius: '16px',
+      boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '12px',
+      border: '1px solid #f59e0b'
+    }}>
+      <span style={{ fontSize: '12px', fontWeight: 'bold' }}>🔔 Enable Instant Sound & Alerts</span>
+      <button 
+        onClick={enableAudioAndNotifications}
+        style={{
+          backgroundColor: '#f59e0b',
+          color: '#0f172a',
+          border: 'none',
+          padding: '6px 12px',
+          borderRadius: '10px',
+          fontWeight: '900',
+          fontSize: '11px',
+          cursor: 'pointer'
+        }}
+      >
+        ACTIVATE NOW
+      </button>
+    </div>
   );
 }
 
