@@ -23,7 +23,7 @@ export default function Login({ onLoginSuccess }) {
     setLoading(true);
 
     try {
-      console.log("🔍 جارٍ البحث عن:", cleanInput);
+      console.log("🔍 Searching for user:", cleanInput);
 
       let foundUser = null;
       const collectionsToTry = ['Users', 'users'];
@@ -34,11 +34,8 @@ export default function Login({ onLoginSuccess }) {
         const colRef = collection(db, colName);
         const snap = await getDocs(colRef);
         
-        console.log(`📂 عدد المستندات في المجموعة '${colName}':`, snap.size);
-
         snap.forEach(doc => {
           const data = doc.data();
-          console.log("📄 بيانات المستند الجاري فحصه:", data);
 
           const email = String(data.email || '').trim().toLowerCase();
           const username = String(data.username || '').trim().toLowerCase();
@@ -51,22 +48,21 @@ export default function Login({ onLoginSuccess }) {
       }
 
       if (!foundUser) {
-        setError('User not found. Check Console (F12) for details.');
+        setError('User not found. Please check your credentials.');
         return;
       }
 
-      // قراءة كلمة السر سواء كانت مكتوبة password أو passwordText
       const dbPassword = String(foundUser.passwordText || foundUser.password || '').trim();
 
       if (dbPassword === cleanPassword) {
-        console.log("✅ تم تسجيل الدخول بنجاح للمستخدم:", foundUser);
+        console.log("✅ Logged in successfully:", foundUser);
         onLoginSuccess(foundUser);
       } else {
         setError('Incorrect password. Please try again.');
       }
 
     } catch (err) {
-      console.error('❌ خطأ في الاتصال بقاعدة البيانات:', err);
+      console.error('❌ Database error:', err);
       setError('Database Error: ' + err.message);
     } finally {
       setLoading(false);
@@ -74,11 +70,11 @@ export default function Login({ onLoginSuccess }) {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4" dir="ltr">
+    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4" dir="ltr">
       <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full space-y-6 border">
         
         <div className="text-center">
-          <h1 className="text-2xl font-bold text-gray-800">Maintenance System</h1>
+          <h1 className="text-3xl font-black text-gray-900 tracking-tight">BeFit Eye</h1>
           <p className="text-xs text-gray-500 mt-1">Please log in to continue</p>
         </div>
 
@@ -120,11 +116,17 @@ export default function Login({ onLoginSuccess }) {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-sm transition shadow disabled:bg-blue-300"
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-sm transition shadow disabled:bg-blue-300 cursor-pointer"
           >
             {loading ? 'Logging in...' : 'Log In'}
           </button>
         </form>
+
+        <div className="pt-4 border-t text-center">
+          <p className="text-[11px] font-extrabold text-gray-400 uppercase tracking-wider">
+            POWERED BY Amr Shata
+          </p>
+        </div>
 
       </div>
     </div>

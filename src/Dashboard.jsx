@@ -688,7 +688,7 @@ export default function Dashboard({ user, onLogout }) {
     return () => unsubUserSelf();
   }, [user?.id, onLogout]);
 
-  // FIRESTORE LISTENERS
+  // FIRESTORE LISTENERS WITH ALPHABETICAL SORTING
   useEffect(() => {
     const unsubReq = onSnapshot(collection(db, 'requests'), (snapshot) => {
       setRequests(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
@@ -700,13 +700,17 @@ export default function Dashboard({ user, onLogout }) {
       setCeoRequests(data);
     });
 
+    // Fetch and Sort Branches Alphabetically (A-Z)
     const unsubBranches = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const list = snapshot.docs.map(item => ({ id: item.id, name: item.data().name || item.data().title || 'Unnamed' }));
+      list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
       setBranches(list);
     });
 
+    // Fetch and Sort Categories Alphabetically (A-Z)
     const unsubCategories = onSnapshot(collection(db, 'categories'), (snapshot) => {
       const list = snapshot.docs.map(item => ({ id: item.id, name: item.data().name || item.data().title || 'Unnamed' }));
+      list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
       setCategories(list);
     });
 
@@ -852,7 +856,7 @@ export default function Dashboard({ user, onLogout }) {
     e.preventDefault();
     if (!title.trim()) return;
 
-    // Strict Branch Validation (IS A MUST)
+    // Strict Branch Validation
     if (!selectedBranch || selectedBranch === "") {
       alert("Please select a branch before submitting the request.");
       return;
@@ -1146,7 +1150,7 @@ export default function Dashboard({ user, onLogout }) {
               <input type="text" required value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className="w-full p-3 bg-slate-50 border rounded-xl text-sm" />
               
               <div className="grid grid-cols-2 gap-3">
-                {/* Branch Selection Dropdown (Empty by Default & Required) */}
+                {/* Branch Selection Dropdown */}
                 <select 
                   required
                   value={selectedBranch} 
@@ -1157,7 +1161,7 @@ export default function Dashboard({ user, onLogout }) {
                   {branches.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
                 </select>
 
-                {/* Category Selection Dropdown (Empty by Default & Required) */}
+                {/* Category Selection Dropdown */}
                 <select 
                   required
                   value={selectedCategory} 
