@@ -106,10 +106,14 @@ export function SummonBranchWidget({ user }) {
   const [selectedBranch, setSelectedBranch] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Fetch branches dynamically from Firestore
+  // Fetch branches dynamically from Firestore & sort alphabetically
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const branchList = snapshot.docs.map(doc => doc.data().name || doc.data().branchName || doc.id);
+      
+      // Sort alphabetically A-Z
+      branchList.sort((a, b) => a.localeCompare(b));
+
       setBranches(branchList);
       if (branchList.length > 0) {
         setSelectedBranch(branchList[0]);
@@ -231,10 +235,14 @@ export function LiveAttendancePortal({
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState('');
 
-  // Fetch branches dynamically from Firestore
+  // Fetch branches dynamically from Firestore & sort alphabetically
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const branchList = snapshot.docs.map(doc => doc.data().name || doc.data().branchName || doc.id);
+      
+      // Sort alphabetically A-Z
+      branchList.sort((a, b) => a.localeCompare(b));
+
       setBranches(branchList);
       if (branchList.length > 0) {
         setSelectedBranch(branchList[0]);
