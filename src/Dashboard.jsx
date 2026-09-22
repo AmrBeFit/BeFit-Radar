@@ -44,8 +44,8 @@ export default function Dashboard({ user, onLogout }) {
   // Form states (Maintenance)
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [selectedBranch, setSelectedBranch] = useState(''); // Empty by default
-  const [selectedCategory, setSelectedCategory] = useState(''); // Empty by default
+  const [selectedBranch, setSelectedBranch] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('');
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [noImageChecked, setNoImageChecked] = useState(false);
@@ -77,6 +77,7 @@ export default function Dashboard({ user, onLogout }) {
   const [editUsername, setEditUsername] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [editUserPhone, setEditUserPhone] = useState('');
+  const [editUserRole, setEditUserRole] = useState('User');
   const [editUserBranches, setEditUserBranches] = useState([]);
 
   // Branch & Category Management States
@@ -163,7 +164,7 @@ export default function Dashboard({ user, onLogout }) {
     return { bg: '#e11d48', color: '#ffffff' }; 
   };
 
-  // --- LOG DELETION ACTIONS (EXCLUSIVE TO ADMIN) ---
+  // LOG DELETION ACTIONS
   const handleDeleteLog = async (logId) => {
     if (!isAdmin) return alert("Only Admin can delete activity logs.");
     try {
@@ -187,7 +188,7 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
-  // --- BULK & ARCHIVE ACTIONS (MAINTENANCE REQUESTS) ---
+  // BULK & ARCHIVE ACTIONS (MAINTENANCE REQUESTS)
   const handleToggleSelectReq = (id) => {
     setSelectedReqIds(prev => 
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
@@ -225,7 +226,7 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
-  // --- BULK & ARCHIVE ACTIONS (ATTENDANCE) ---
+  // BULK & ARCHIVE ACTIONS (ATTENDANCE)
   const handleToggleSelectAttendance = (id) => {
     setSelectedAttendanceIds(prev => 
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
@@ -263,7 +264,7 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
-  // --- BULK & ARCHIVE ACTIONS (CEO REQUESTS) ---
+  // BULK & ARCHIVE ACTIONS (CEO REQUESTS)
   const handleToggleSelectCeo = (id) => {
     setSelectedCeoIds(prev => 
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
@@ -542,7 +543,8 @@ export default function Dashboard({ user, onLogout }) {
         username: editUsername.trim(),
         password: editPassword.trim(),
         phone: editUserPhone.trim(),
-        assignedBranches: editUserBranches
+        role: editUserRole,
+        assignedBranches: (editUserRole === 'Supervisor' || editUserRole === 'Branch Manager') ? editUserBranches : []
       });
       alert('User updated successfully!');
       setEditingUser(null);
@@ -880,13 +882,11 @@ export default function Dashboard({ user, onLogout }) {
     e.preventDefault();
     if (!title.trim()) return;
 
-    // Strict Branch Validation
     if (!selectedBranch || selectedBranch === "") {
       alert("Please select a branch before submitting the request.");
       return;
     }
 
-    // Strict Category Validation
     if (!selectedCategory || selectedCategory === "") {
       alert("Please select a category before submitting the request.");
       return;
@@ -943,6 +943,12 @@ export default function Dashboard({ user, onLogout }) {
 
   const toggleBranchSelectionForUser = (bName) => {
     setNewUserBranches(prev => 
+      prev.includes(bName) ? prev.filter(b => b !== bName) : [...prev, bName]
+    );
+  };
+
+  const toggleBranchSelectionForEditUser = (bName) => {
+    setEditUserBranches(prev => 
       prev.includes(bName) ? prev.filter(b => b !== bName) : [...prev, bName]
     );
   };
@@ -1174,7 +1180,6 @@ export default function Dashboard({ user, onLogout }) {
               <input type="text" required value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className="w-full p-3 bg-slate-50 border rounded-xl text-sm" />
               
               <div className="grid grid-cols-2 gap-3">
-                {/* Branch Selection Dropdown */}
                 <select 
                   required
                   value={selectedBranch} 
@@ -1185,7 +1190,6 @@ export default function Dashboard({ user, onLogout }) {
                   {branches.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
                 </select>
 
-                {/* Category Selection Dropdown */}
                 <select 
                   required
                   value={selectedCategory} 
@@ -1228,7 +1232,6 @@ export default function Dashboard({ user, onLogout }) {
 
           <div className="lg:col-span-2 space-y-6">
             
-            {/* ACTIVITY NOTIFICATIONS LOG (WITH ADMIN CLEAR & DELETE) */}
             <div className="bg-white border border-slate-200 p-5 rounded-3xl shadow-sm space-y-3">
               <div className="flex justify-between items-center">
                 <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -1326,7 +1329,6 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
               </div>
 
-              {/* BAR FOR ADMIN BULK ACTIONS */}
               {isAdmin && filteredRequests.length > 0 && (
                 <div className="flex items-center justify-between p-3 bg-slate-100 border rounded-2xl text-xs font-bold">
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -1449,7 +1451,6 @@ export default function Dashboard({ user, onLogout }) {
               <p className="text-xs text-slate-500">Record your daily Check-In and Check-Out with live photo capture.</p>
             </div>
 
-            {/* Branch Selection Dropdown for Attendance */}
             <div className="text-left bg-slate-50 p-4 rounded-2xl border border-slate-200">
               <label className="block text-xs font-bold text-slate-700 mb-1">Select Branch for Attendance</label>
               <select
@@ -2001,6 +2002,7 @@ export default function Dashboard({ user, onLogout }) {
                     <th className="p-3">Username</th>
                     <th className="p-3">Phone</th>
                     <th className="p-3">Role</th>
+                    <th className="p-3">Assigned Branches</th>
                     <th className="p-3 text-right">Action</th>
                   </tr>
                 </thead>
@@ -2010,6 +2012,7 @@ export default function Dashboard({ user, onLogout }) {
                     .map((u) => {
                       const canEditThisUser = isAdmin || isCEO || (isFacilityManager && u.role === 'Facility Member');
                       const canDeleteThisUser = isAdmin || (isFacilityManager && u.role === 'Facility Member');
+                      const userBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
 
                       return (
                         <tr key={u.id} className="hover:bg-slate-50">
@@ -2026,6 +2029,9 @@ export default function Dashboard({ user, onLogout }) {
                               {u.role || 'User'}
                             </span>
                           </td>
+                          <td className="p-3 text-slate-600">
+                            {userBranches.length > 0 ? userBranches.join(', ') : <span className="text-slate-400 italic">None</span>}
+                          </td>
                           <td className="p-3 text-right">
                             <div className="flex items-center justify-end gap-2">
                               {canEditThisUser && (
@@ -2035,6 +2041,7 @@ export default function Dashboard({ user, onLogout }) {
                                     setEditUsername(u.username || '');
                                     setEditPassword(u.password || '');
                                     setEditUserPhone(u.phone || '');
+                                    setEditUserRole(u.role || 'User');
                                     setEditUserBranches(Array.isArray(u.assignedBranches) ? u.assignedBranches : []);
                                   }}
                                   className="bg-indigo-50 hover:bg-indigo-600 text-indigo-600 hover:text-white border border-indigo-200 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
@@ -2152,10 +2159,10 @@ export default function Dashboard({ user, onLogout }) {
         </div>
       )}
 
-      {/* EDIT USER MODAL */}
+      {/* EDIT USER MODAL WITH BRANCH ASSIGNMENT SELECTION */}
       {editingUser && canManageUsers && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center border-b pb-3">
               <h3 className="font-bold text-slate-900 text-sm">Edit User: {editingUser.username}</h3>
               <button onClick={() => setEditingUser(null)} className="text-slate-400 font-bold">✕</button>
@@ -2173,6 +2180,43 @@ export default function Dashboard({ user, onLogout }) {
                 <label className="block text-xs font-bold text-slate-600 mb-1">Phone Number</label>
                 <input type="text" value={editUserPhone} onChange={(e) => setEditUserPhone(e.target.value)} className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs font-semibold" />
               </div>
+
+              {isAdmin && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1">User Role</label>
+                  <select
+                    value={editUserRole}
+                    onChange={(e) => setEditUserRole(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs"
+                  >
+                    <option value="User">User (Staff)</option>
+                    <option value="Supervisor">Supervisor</option>
+                    <option value="Branch Manager">Branch Manager</option>
+                    <option value="Facility Manager">Facility Manager</option>
+                    <option value="Facility Member">Facility Member</option>
+                    <option value="CEO">CEO</option>
+                    <option value="Admin">Admin</option>
+                  </select>
+                </div>
+              )}
+
+              {(editUserRole === 'Supervisor' || editUserRole === 'Branch Manager') && (
+                <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
+                  <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
+                  <div className="space-y-1 max-h-36 overflow-y-auto">
+                    {branches.map(b => (
+                      <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={editUserBranches.includes(b.name)} 
+                          onChange={() => toggleBranchSelectionForEditUser(b.name)} 
+                        />
+                        <span>{b.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setEditingUser(null)} className="px-4 py-2 bg-slate-100 rounded-xl text-xs font-bold">Cancel</button>

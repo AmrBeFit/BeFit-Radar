@@ -6,7 +6,7 @@ import { collection, onSnapshot, addDoc, query, where, getDocs, doc, updateDoc }
 
 const MAX_SESSIONS = 5;
 
-// 1. Target Branch Specific CEONotificationListener Component (Fixed Notification Logic)
+// 1. Target Branch Specific CEONotificationListener Component
 function CEONotificationListener({ user }) {
   const [audioEnabled, setAudioEnabled] = useState(false);
 
@@ -73,7 +73,6 @@ function CEONotificationListener({ user }) {
 
           let shouldNotify = isAdminOrCEO;
 
-          // 🎯 فحص الحضور المرن للفرع المستهدف للموظفين
           if (!shouldNotify && currentUserIdentifier && targetBranch) {
             try {
               const attSnapshot = await getDocs(collection(db, 'attendance'));
@@ -180,12 +179,11 @@ function CEONotificationListener({ user }) {
   );
 }
 
-// 2. Dynamic Summon Branch Widget & Universal Requests Viewer Component
+// 2. Dynamic Summon Branch Widget (Without Live Requests Viewer)
 export function SummonBranchWidget({ user }) {
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState('');
   const [loading, setLoading] = useState(false);
-  const [requestsList, setRequestsList] = useState([]);
 
   useEffect(() => {
     const unsubBranches = onSnapshot(collection(db, 'branches'), (snapshot) => {
@@ -198,20 +196,7 @@ export function SummonBranchWidget({ user }) {
       }
     });
 
-    const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
-      const list = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-
-      list.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-      setRequestsList(list);
-    });
-
-    return () => {
-      unsubBranches();
-      unsubRequests();
-    };
+    return () => unsubBranches();
   }, []);
 
   const roleUpper = user?.role?.toUpperCase() || user?.createdByRole?.toUpperCase() || '';
@@ -248,33 +233,7 @@ export function SummonBranchWidget({ user }) {
     }
   };
 
-  const handleStatusChange = async (requestId, newStatus) => {
-    try {
-      const reqRef = doc(db, 'requests', requestId);
-      await updateDoc(reqRef, { status: newStatus });
-    } catch (error) {
-      console.error("Error updating request status:", error);
-      alert("Failed to update status!");
-    }
-  };
-
-  const getStatusColor = (status) => {
-    switch ((status || 'NEW').toUpperCase()) {
-      case 'IN PROGRESS':
-        return { bg: '#fef3c7', text: '#d97706', border: '#fcd34d' };
-      case 'COMPLETED':
-        return { bg: '#d1fae5', text: '#059669', border: '#6ee7b7' };
-      default:
-        return { bg: '#fee2e2', text: '#dc2626', border: '#fca5a5' };
-    }
-  };
-
-  const getAvailableStatuses = (currentStatus = 'NEW') => {
-    const statusUpper = currentStatus.toUpperCase();
-    if (statusUpper === 'COMPLETED') return ['COMPLETED'];
-    if (statusUpper === 'IN PROGRESS') return ['IN PROGRESS', 'COMPLETED'];
-    return ['NEW', 'IN PROGRESS', 'COMPLETED'];
-  };
+  if (!canSummon) return null;
 
   return (
     <div style={{
@@ -285,158 +244,154 @@ export function SummonBranchWidget({ user }) {
       gap: '20px',
       fontFamily: 'system-ui, -apple-system, sans-serif'
     }}>
-      {canSummon && (
-        <div style={{
-          backgroundColor: '#fff1f2',
-          border: '1px solid #fecdd3',
-          borderRadius: '20px',
-          padding: '20px 24px',
-          boxShadow: '0 4px 12px rgba(225, 29, 72, 0.05)'
-        }}>
-          <h3 style={{ margin: '0 0 6px 0', color: '#9f1239', fontSize: '18px', fontWeight: '800' }}>
-            📢 Urgent Branch Summon (CEO / Admin)
-          </h3>
-          <p style={{ fontSize: '12px', color: '#881337', margin: '0 0 16px 0' }}>
-            Select a branch to trigger an instant sound, vibration & screen alert on active devices.
-          </p>
-
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-            <select
-              value={selectedBranch}
-              onChange={(e) => setSelectedBranch(e.target.value)}
-              style={{
-                flex: 1,
-                padding: '12px',
-                borderRadius: '12px',
-                border: '1px solid #fda4af',
-                backgroundColor: '#ffffff',
-                fontSize: '14px',
-                fontWeight: '600',
-                color: '#1f2937',
-                outline: 'none'
-              }}
-            >
-              {branches.length === 0 ? (
-                <option value="">No branches found</option>
-              ) : (
-                branches.map(branch => (
-                  <option key={branch} value={branch}>{branch}</option>
-                ))
-              )}
-            </select>
-
-            <button
-              onClick={handleSummon}
-              disabled={loading || branches.length === 0}
-              style={{
-                backgroundColor: '#e11d48',
-                color: '#ffffff',
-                border: 'none',
-                borderRadius: '12px',
-                padding: '12px 20px',
-                fontWeight: '800',
-                fontSize: '13px',
-                cursor: (loading || branches.length === 0) ? 'not-allowed' : 'pointer',
-                boxShadow: '0 4px 12px rgba(225, 29, 72, 0.25)',
-                whiteSpace: 'nowrap'
-              }}
-            >
-              {loading ? 'Sending...' : '🚨 Summon Now'}
-            </button>
-          </div>
-        </div>
-      )}
-
       <div style={{
-        backgroundColor: '#ffffff',
-        border: '1px solid #e5e7eb',
+        backgroundColor: '#fff1f2',
+        border: '1px solid #fecdd3',
         borderRadius: '20px',
         padding: '20px 24px',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.03)'
+        boxShadow: '0 4px 12px rgba(225, 29, 72, 0.05)'
       }}>
-        <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', fontWeight: '800', color: '#1f2937' }}>
-          📋 Live Requests & Branch Calls
-        </h4>
+        <h3 style={{ margin: '0 0 6px 0', color: '#9f1239', fontSize: '18px', fontWeight: '800' }}>
+          📢 Urgent Branch Summon (CEO / Admin)
+        </h3>
+        <p style={{ fontSize: '12px', color: '#881337', margin: '0 0 16px 0' }}>
+          Select a branch to trigger an instant sound, vibration & screen alert on active devices.
+        </p>
 
-        {requestsList.length === 0 ? (
-          <p style={{ fontSize: '12px', color: '#9ca3af', textAlign: 'center', margin: '20px 0' }}>
-            No active summons or requests found.
-          </p>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '350px', overflowY: 'auto' }}>
-            {requestsList.map((req) => {
-              const colors = getStatusColor(req.status);
-              const currentStatus = (req.status || 'NEW').toUpperCase();
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          <select
+            value={selectedBranch}
+            onChange={(e) => setSelectedBranch(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '12px',
+              borderRadius: '12px',
+              border: '1px solid #fda4af',
+              backgroundColor: '#ffffff',
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#1f2937',
+              outline: 'none'
+            }}
+          >
+            {branches.length === 0 ? (
+              <option value="">No branches found</option>
+            ) : (
+              branches.map(branch => (
+                <option key={branch} value={branch}>{branch}</option>
+              ))
+            )}
+          </select>
 
-              return (
-                <div key={req.id} style={{
-                  border: '1px solid #f3f4f6',
-                  borderRadius: '14px',
-                  padding: '12px 16px',
-                  backgroundColor: '#fafafa',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '12px'
-                }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: '800', color: '#111827' }}>
-                        {req.title || 'Urgent Request'}
-                      </span>
-                      <span style={{
-                        fontSize: '10px',
-                        fontWeight: '800',
-                        backgroundColor: '#e0f2fe',
-                        color: '#0369a1',
-                        padding: '2px 8px',
-                        borderRadius: '6px'
-                      }}>
-                        {req.targetBranch || 'All Branches'}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '11px', color: '#6b7280' }}>
-                      {req.details}
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <select
-                      value={currentStatus}
-                      onChange={(e) => handleStatusChange(req.id, e.target.value)}
-                      disabled={currentStatus === 'COMPLETED'}
-                      style={{
-                        padding: '6px 10px',
-                        borderRadius: '8px',
-                        border: `1px solid ${colors.border}`,
-                        backgroundColor: colors.bg,
-                        color: colors.text,
-                        fontWeight: '800',
-                        fontSize: '11px',
-                        outline: 'none',
-                        cursor: currentStatus === 'COMPLETED' ? 'not-allowed' : 'pointer'
-                      }}
-                    >
-                      {getAvailableStatuses(currentStatus).map((statusOption) => (
-                        <option key={statusOption} value={statusOption}>
-                          {statusOption === 'NEW' && '🔴 NEW'}
-                          {statusOption === 'IN PROGRESS' && '🟡 IN PROGRESS'}
-                          {statusOption === 'COMPLETED' && '🟢 COMPLETED'}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+          <button
+            onClick={handleSummon}
+            disabled={loading || branches.length === 0}
+            style={{
+              backgroundColor: '#e11d48',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: '12px',
+              padding: '12px 20px',
+              fontWeight: '800',
+              fontSize: '13px',
+              cursor: (loading || branches.length === 0) ? 'not-allowed' : 'pointer',
+              boxShadow: '0 4px 12px rgba(225, 29, 72, 0.25)',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {loading ? 'Sending...' : '🚨 Summon Now'}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-// 3. Dynamic Live Attendance Portal Component
+// 3. Maintenance Status Selector Helper (Strict Control Logic)
+export function MaintenanceStatusSelector({ request, user, onStatusChange }) {
+  const roleUpper = (user?.role || '').toUpperCase();
+  const isAdmin = roleUpper === 'ADMIN';
+  const isFacilityManager = roleUpper === 'FACILITY MANAGER' || roleUpper === 'FACILITY_MANAGER';
+
+  // 1. Only Admin and Facility Manager can change status
+  if (!isAdmin && !isFacilityManager) {
+    return (
+      <span style={{
+        padding: '6px 10px',
+        borderRadius: '8px',
+        fontWeight: '800',
+        fontSize: '11px',
+        backgroundColor: request.status === 'COMPLETED' ? '#d1fae5' : request.status === 'IN PROGRESS' ? '#fef3c7' : '#fee2e2',
+        color: request.status === 'COMPLETED' ? '#059669' : request.status === 'IN PROGRESS' ? '#d97706' : '#dc2626'
+      }}>
+        {request.status || 'NEW'}
+      </span>
+    );
+  }
+
+  const currentStatus = (request.status || 'NEW').toUpperCase();
+
+  // 2. Determine allowed status choices
+  const getAvailableStatuses = () => {
+    if (isAdmin) {
+      // Admin has full control in all directions
+      return ['NEW', 'IN PROGRESS', 'COMPLETED'];
+    }
+
+    if (isFacilityManager) {
+      // Facility Manager can only move forward
+      if (currentStatus === 'COMPLETED') return ['COMPLETED'];
+      if (currentStatus === 'IN PROGRESS') return ['IN PROGRESS', 'COMPLETED'];
+      return ['NEW', 'IN PROGRESS', 'COMPLETED'];
+    }
+
+    return [currentStatus];
+  };
+
+  const availableStatuses = getAvailableStatuses();
+
+  const getStatusStyle = (status) => {
+    switch (status) {
+      case 'IN PROGRESS':
+        return { bg: '#fef3c7', text: '#d97706', border: '#fcd34d' };
+      case 'COMPLETED':
+        return { bg: '#d1fae5', text: '#059669', border: '#6ee7b7' };
+      default:
+        return { bg: '#fee2e2', text: '#dc2626', border: '#fca5a5' };
+    }
+  };
+
+  const style = getStatusStyle(currentStatus);
+
+  return (
+    <select
+      value={currentStatus}
+      onChange={(e) => onStatusChange(request.id, e.target.value)}
+      disabled={isFacilityManager && currentStatus === 'COMPLETED'}
+      style={{
+        padding: '6px 10px',
+        borderRadius: '8px',
+        border: `1px solid ${style.border}`,
+        backgroundColor: style.bg,
+        color: style.text,
+        fontWeight: '800',
+        fontSize: '11px',
+        outline: 'none',
+        cursor: (isFacilityManager && currentStatus === 'COMPLETED') ? 'not-allowed' : 'pointer'
+      }}
+    >
+      {availableStatuses.map((statusOption) => (
+        <option key={statusOption} value={statusOption}>
+          {statusOption === 'NEW' && '🔴 NEW'}
+          {statusOption === 'IN PROGRESS' && '🟡 IN PROGRESS'}
+          {statusOption === 'COMPLETED' && '🟢 COMPLETED'}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// 4. Dynamic Live Attendance Portal Component
 export function LiveAttendancePortal({ 
   todaySessions = [], 
   onCheckIn, 
@@ -663,7 +618,7 @@ export function LiveAttendancePortal({
   );
 }
 
-// 4. Main App Component
+// 5. Main App Component
 export default function App() {
   const [user, setUser] = useState(null);
 
