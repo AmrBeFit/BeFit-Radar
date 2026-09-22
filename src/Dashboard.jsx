@@ -101,6 +101,19 @@ export default function Dashboard({ user, onLogout }) {
   const [branchFilter, setBranchFilter] = useState('All');
   const [sortOrder, setSortOrder] = useState('desc');
 
+  // Sort states (Users table)
+  const [userSortField, setUserSortField] = useState(null); // 'username' | 'role' | null
+  const [userSortDirection, setUserSortDirection] = useState('asc'); // 'asc' | 'desc'
+
+  const handleUserSort = (field) => {
+    if (userSortField === field) {
+      setUserSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setUserSortField(field);
+      setUserSortDirection('asc');
+    }
+  };
+
   // User identity & Role Checks
   const currentUserIdentifier = user?.username || user?.displayName || user?.email || '';
   const userRole = user?.role || 'User';
@@ -114,7 +127,8 @@ export default function Dashboard({ user, onLogout }) {
   const isFacilityMember = userRole === 'Facility Member';
   const isStaff = userRole === 'User' || userRole === 'Staff';
 
-  const canManageStatus = isAdmin || isSupervisor || isBranchManager || isFacilityManager;
+  // ✅ تحديث: تغيير حالة طلب الصيانة أصبح مقصورًا على مدير الصيانة (Facility Manager) والـ Admin فقط
+  const canManageStatus = isAdmin || isFacilityManager;
   const canViewReports = isAdmin || isCEO || isBranchManager || isSupervisor;
   const canManageUsers = isAdmin || isCEO || isBranchManager || isFacilityManager;
 
@@ -125,6 +139,16 @@ export default function Dashboard({ user, onLogout }) {
   const branchesNamesList = useMemo(() => {
     return branches.map(b => b.name);
   }, [branches]);
+
+  // ✅ تحديث: قايمة الفروع اللي تظهر للمستخدم في اختيار الفرع (مقصورة على الفروع المتخصص لها فقط)
+  // الـ Admin والـ Facility Manager مستثنيين ودايمًا بيشوفوا كل الفروع
+  const visibleBranchesForUser = useMemo(() => {
+    if (isAdmin || isFacilityManager) return branches;
+    if (assignedBranches.length > 0) {
+      return branches.filter(b => assignedBranches.includes(b.name));
+    }
+    return branches;
+  }, [branches, assignedBranches, isAdmin, isFacilityManager]);
 
   // Active users currently present in branches
   const currentlyPresentUsers = useMemo(() => {
@@ -958,6 +982,10 @@ export default function Dashboard({ user, onLogout }) {
 
       {/* COMPACT PRINT STYLES */}
       <style>{`
+        select option {
+          background-color: #ffffff !important;
+          color: #0f172a !important;
+        }
         @media print {
           @page { size: A4 portrait; margin: 6mm; }
           body { background: #ffffff !important; color: #000000 !important; font-size: 9px !important; }
@@ -1028,11 +1056,11 @@ export default function Dashboard({ user, onLogout }) {
               <select
                 value={selectedAssigneeId}
                 onChange={(e) => setSelectedAssigneeId(e.target.value)}
-                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900"
+                className="w-full p-3 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
               >
-                <option value="">-- Select Member --</option>
+                <option value="" className="bg-white text-slate-900">-- Select Member --</option>
                 {facilityMembers.map(m => (
-                  <option key={m.id} value={m.id}>
+                  <option key={m.id} value={m.id} className="bg-white text-slate-900">
                     {m.username} ({m.phone || 'No Phone'})
                   </option>
                 ))}
@@ -1184,20 +1212,20 @@ export default function Dashboard({ user, onLogout }) {
                   required
                   value={selectedBranch} 
                   onChange={(e) => setSelectedBranch(e.target.value)} 
-                  className="p-3 bg-slate-50 border rounded-xl text-xs font-semibold text-slate-700"
+                  className="p-3 bg-white text-slate-900 border rounded-xl text-xs font-semibold"
                 >
-                  <option value="" disabled>Select Branch...</option>
-                  {branches.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
+                  <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
+                  {visibleBranchesForUser.map(b => <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>)}
                 </select>
 
                 <select 
                   required
                   value={selectedCategory} 
                   onChange={(e) => setSelectedCategory(e.target.value)} 
-                  className="p-3 bg-slate-50 border rounded-xl text-xs font-semibold text-slate-700"
+                  className="p-3 bg-white text-slate-900 border rounded-xl text-xs font-semibold"
                 >
-                  <option value="" disabled>Select Category...</option>
-                  {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                  <option value="" disabled className="bg-white text-slate-900">Select Category...</option>
+                  {categories.map(c => <option key={c.id} value={c.name} className="bg-white text-slate-900">{c.name}</option>)}
                 </select>
               </div>
 
@@ -1299,32 +1327,32 @@ export default function Dashboard({ user, onLogout }) {
                   <select 
                     value={statusFilter} 
                     onChange={(e) => setStatusFilter(e.target.value)} 
-                    className="p-2 bg-slate-50 border rounded-xl text-xs font-semibold focus:outline-none"
+                    className="p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
                   >
-                    <option value="All">All Statuses</option>
-                    <option value="New">New</option>
-                    <option value="In Progress">In Progress</option>
-                    <option value="Completed">Completed</option>
+                    <option value="All" className="bg-white text-slate-900">All Statuses</option>
+                    <option value="New" className="bg-white text-slate-900">New</option>
+                    <option value="In Progress" className="bg-white text-slate-900">In Progress</option>
+                    <option value="Completed" className="bg-white text-slate-900">Completed</option>
                   </select>
 
                   <select 
                     value={branchFilter} 
                     onChange={(e) => setBranchFilter(e.target.value)} 
-                    className="p-2 bg-slate-50 border rounded-xl text-xs font-semibold focus:outline-none"
+                    className="p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
                   >
-                    <option value="All">All Branches</option>
+                    <option value="All" className="bg-white text-slate-900">All Branches</option>
                     {branches.map(b => (
-                      <option key={b.id} value={b.name}>{b.name}</option>
+                      <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
                     ))}
                   </select>
 
                   <select 
                     value={sortOrder} 
                     onChange={(e) => setSortOrder(e.target.value)} 
-                    className="p-2 bg-slate-50 border rounded-xl text-xs font-semibold focus:outline-none"
+                    className="p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
                   >
-                    <option value="desc">Newest First</option>
-                    <option value="asc">Oldest First</option>
+                    <option value="desc" className="bg-white text-slate-900">Newest First</option>
+                    <option value="asc" className="bg-white text-slate-900">Oldest First</option>
                   </select>
                 </div>
               </div>
@@ -1402,9 +1430,9 @@ export default function Dashboard({ user, onLogout }) {
                             style={{ backgroundColor: statusStyle.bg, color: statusStyle.color }}
                             className="text-xs font-bold px-3 py-1.5 rounded-xl border-0 cursor-pointer shadow-sm focus:outline-none"
                           >
-                            <option value="New" style={{ backgroundColor: '#ffffff', color: '#000000' }}>New</option>
-                            <option value="In Progress" style={{ backgroundColor: '#ffffff', color: '#000000' }}>In Progress</option>
-                            <option value="Completed" style={{ backgroundColor: '#ffffff', color: '#000000' }}>Completed</option>
+                            <option value="New" className="bg-white text-slate-900">New</option>
+                            <option value="In Progress" className="bg-white text-slate-900">In Progress</option>
+                            <option value="Completed" className="bg-white text-slate-900">Completed</option>
                           </select>
                         ) : (
                           <span className="px-3 py-1 text-xs font-bold text-white rounded-xl" style={{ backgroundColor: statusStyle.bg, color: statusStyle.color }}>
@@ -1458,9 +1486,9 @@ export default function Dashboard({ user, onLogout }) {
                 onChange={(e) => setAttendanceBranch(e.target.value)}
                 className="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-none"
               >
-                <option value="" disabled>Select Branch...</option>
+                <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
                 {branches.map(b => (
-                  <option key={b.id} value={b.name}>{b.name}</option>
+                  <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
                 ))}
               </select>
             </div>
@@ -1528,10 +1556,10 @@ export default function Dashboard({ user, onLogout }) {
                   <select 
                     value={ceoSelectedBranch} 
                     onChange={(e) => setCeoSelectedBranch(e.target.value)} 
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900"
+                    className="w-full p-3 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
                   >
-                    <option value="" disabled>Select Branch...</option>
-                    {branches.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
+                    <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
+                    {branches.map(b => <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>)}
                   </select>
                 </div>
 
@@ -1562,13 +1590,13 @@ export default function Dashboard({ user, onLogout }) {
                   <select 
                     value={ceoServiceType} 
                     onChange={(e) => setCeoServiceType(e.target.value)} 
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900"
+                    className="w-full p-3 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
                   >
-                    <option value="Drink">☕ Drink / Beverage</option>
-                    <option value="Food">🍽️ Food</option>
-                    <option value="Water">💧 Water</option>
-                    <option value="Cleaning">🧹 Cleaning Service</option>
-                    <option value="Others">⚙️ Others</option>
+                    <option value="Drink" className="bg-white text-slate-900">☕ Drink / Beverage</option>
+                    <option value="Food" className="bg-white text-slate-900">🍽️ Food</option>
+                    <option value="Water" className="bg-white text-slate-900">💧 Water</option>
+                    <option value="Cleaning" className="bg-white text-slate-900">🧹 Cleaning Service</option>
+                    <option value="Others" className="bg-white text-slate-900">⚙️ Others</option>
                   </select>
                 </div>
 
@@ -1757,7 +1785,7 @@ export default function Dashboard({ user, onLogout }) {
                 type="date" 
                 value={reportStartDate} 
                 onChange={(e) => setReportStartDate(e.target.value)}
-                className="w-full p-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
               />
             </div>
             <div>
@@ -1766,7 +1794,7 @@ export default function Dashboard({ user, onLogout }) {
                 type="date" 
                 value={reportEndDate} 
                 onChange={(e) => setReportEndDate(e.target.value)}
-                className="w-full p-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
               />
             </div>
             <div>
@@ -1774,11 +1802,11 @@ export default function Dashboard({ user, onLogout }) {
               <select 
                 value={reportUserFilter} 
                 onChange={(e) => setReportUserFilter(e.target.value)}
-                className="w-full p-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
               >
-                <option value="All">All Users</option>
+                <option value="All" className="bg-white text-slate-900">All Users</option>
                 {usersList.map(u => (
-                  <option key={u.id} value={u.username}>{u.username}</option>
+                  <option key={u.id} value={u.username} className="bg-white text-slate-900">{u.username}</option>
                 ))}
               </select>
             </div>
@@ -1787,11 +1815,11 @@ export default function Dashboard({ user, onLogout }) {
               <select 
                 value={reportBranchFilter} 
                 onChange={(e) => setReportBranchFilter(e.target.value)}
-                className="w-full p-2 bg-white border border-slate-200 rounded-xl text-xs font-medium"
+                className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
               >
-                <option value="All">All Branches</option>
+                <option value="All" className="bg-white text-slate-900">All Branches</option>
                 {branches.map(b => (
-                  <option key={b.id} value={b.name}>{b.name}</option>
+                  <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
                 ))}
               </select>
             </div>
@@ -1943,21 +1971,21 @@ export default function Dashboard({ user, onLogout }) {
                 <select
                   value={newUserRole}
                   onChange={(e) => setNewUserRole(e.target.value)}
-                  className="w-full p-3 bg-slate-50 border rounded-xl text-sm"
+                  className="w-full p-3 bg-white text-slate-900 border rounded-xl text-sm"
                 >
                   {isFacilityManager ? (
-                    <option value="Facility Member">Facility Member</option>
+                    <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                   ) : isBranchManager ? (
-                    <option value="User">User (Staff)</option>
+                    <option value="User" className="bg-white text-slate-900">User (Staff)</option>
                   ) : (
                     <>
-                      <option value="User">User (Staff)</option>
-                      <option value="Supervisor">Supervisor</option>
-                      <option value="Branch Manager">Branch Manager</option>
-                      <option value="Facility Manager">Facility Manager</option>
-                      <option value="Facility Member">Facility Member</option>
-                      <option value="CEO">CEO</option>
-                      <option value="Admin">Admin</option>
+                      <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                      <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
+                      <option value="Branch Manager" className="bg-white text-slate-900">Branch Manager</option>
+                      <option value="Facility Manager" className="bg-white text-slate-900">Facility Manager</option>
+                      <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
+                      <option value="CEO" className="bg-white text-slate-900">CEO</option>
+                      <option value="Admin" className="bg-white text-slate-900">Admin</option>
                     </>
                   )}
                 </select>
@@ -1999,9 +2027,19 @@ export default function Dashboard({ user, onLogout }) {
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-100 border-b border-slate-300 text-slate-800 text-xs font-black uppercase tracking-wider">
-                    <th className="p-3">Username</th>
+                    <th
+                      className="p-3 cursor-pointer select-none hover:bg-slate-200 transition-colors"
+                      onClick={() => handleUserSort('username')}
+                    >
+                      Username {userSortField === 'username' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
+                    </th>
                     <th className="p-3">Phone</th>
-                    <th className="p-3">Role</th>
+                    <th
+                      className="p-3 cursor-pointer select-none hover:bg-slate-200 transition-colors"
+                      onClick={() => handleUserSort('role')}
+                    >
+                      Role {userSortField === 'role' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
+                    </th>
                     <th className="p-3">Assigned Branches</th>
                     <th className="p-3 text-right">Action</th>
                   </tr>
@@ -2009,6 +2047,14 @@ export default function Dashboard({ user, onLogout }) {
                 <tbody className="divide-y divide-slate-200 text-xs font-medium">
                   {usersList
                     .filter(u => isFacilityManager ? u.role === 'Facility Member' : true)
+                    .sort((a, b) => {
+                      if (!userSortField) return 0;
+                      const valA = String(a[userSortField] || '').toLowerCase();
+                      const valB = String(b[userSortField] || '').toLowerCase();
+                      if (valA < valB) return userSortDirection === 'asc' ? -1 : 1;
+                      if (valA > valB) return userSortDirection === 'asc' ? 1 : -1;
+                      return 0;
+                    })
                     .map((u) => {
                       const canEditThisUser = isAdmin || isCEO || (isFacilityManager && u.role === 'Facility Member');
                       const canDeleteThisUser = isAdmin || (isFacilityManager && u.role === 'Facility Member');
@@ -2187,15 +2233,15 @@ export default function Dashboard({ user, onLogout }) {
                   <select
                     value={editUserRole}
                     onChange={(e) => setEditUserRole(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs"
+                    className="w-full p-2.5 bg-white text-slate-900 border rounded-xl text-xs"
                   >
-                    <option value="User">User (Staff)</option>
-                    <option value="Supervisor">Supervisor</option>
-                    <option value="Branch Manager">Branch Manager</option>
-                    <option value="Facility Manager">Facility Manager</option>
-                    <option value="Facility Member">Facility Member</option>
-                    <option value="CEO">CEO</option>
-                    <option value="Admin">Admin</option>
+                    <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                    <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
+                    <option value="Branch Manager" className="bg-white text-slate-900">Branch Manager</option>
+                    <option value="Facility Manager" className="bg-white text-slate-900">Facility Manager</option>
+                    <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
+                    <option value="CEO" className="bg-white text-slate-900">CEO</option>
+                    <option value="Admin" className="bg-white text-slate-900">Admin</option>
                   </select>
                 </div>
               )}
