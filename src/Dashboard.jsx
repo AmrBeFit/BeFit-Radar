@@ -84,6 +84,13 @@ export default function Dashboard({ user, onLogout }) {
   const [newBranchName, setNewBranchName] = useState('');
   const [newCategoryName, setNewCategoryName] = useState('');
 
+  // Live "now" ticker - used to recompute Online/Offline status every few seconds
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const tickInterval = setInterval(() => setNowTick(Date.now()), 20000);
+    return () => clearInterval(tickInterval);
+  }, []);
+
   // Live Camera Modal States
   const [showWebcam, setShowWebcam] = useState(false);
   const [cameraMode, setCameraMode] = useState('request');
@@ -155,6 +162,17 @@ export default function Dashboard({ user, onLogout }) {
     const todayStr = new Date().toISOString().split('T')[0];
     return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime);
   }, [attendanceRecords]);
+
+  // ✅ تحديث: مافيش حد يشوف الحسابات إلا اللي عمل إنشاءها بنفسه، إلا الـ Admin اللي بيشوف الكل دايمًا
+  const manageableUsersList = useMemo(() => {
+    return usersList.filter(u => {
+      if (isAdmin) return true;
+      if (isFacilityManager) return u.role === 'Facility Member' && u.createdBy === user?.id;
+      if (isBranchManager) return ['Supervisor', 'User'].includes(u.role) && u.createdBy === user?.id;
+      // أي دور تاني ليه صلاحية إدارة المستخدمين (مثل CEO) بيشوف بس الحسابات اللي هو عملها
+      return u.createdBy === user?.id;
+    });
+  }, [usersList, isAdmin, isFacilityManager, isBranchManager, user?.id]);
 
   // Active users present in selected CEO branch
   const activeUsersInCeoBranch = useMemo(() => {
@@ -525,8 +543,13 @@ export default function Dashboard({ user, onLogout }) {
       }
     }
 
-    if (isBranchManager && targetRole !== 'User') {
-      return alert("Branch Managers are only allowed to create standard User accounts.");
+    if (isBranchManager && !['Supervisor', 'User'].includes(targetRole)) {
+      return alert("Branch Managers are only allowed to create Supervisor or Staff (User) accounts.");
+    }
+
+    // Branch Manager لازم يحدد فرع/فروع لكل حساب بينشئه
+    if (isBranchManager && newUserBranches.length === 0) {
+      return alert("Please assign at least one branch to this account.");
     }
 
     setLoading(true);
@@ -536,14 +559,16 @@ export default function Dashboard({ user, onLogout }) {
         password: newPassword.trim(),
         phone: newUserPhone.trim() || '',
         role: targetRole,
-        assignedBranches: (targetRole === 'Supervisor' || targetRole === 'Branch Manager') ? newUserBranches : [],
+        assignedBranches: ['Supervisor', 'Branch Manager', 'User'].includes(targetRole) ? newUserBranches : [],
+        createdBy: user?.id || null,
+        createdByUsername: user?.username || '',
         createdAt: serverTimestamp()
       });
 
       setNewUsername('');
       setNewPassword('');
       setNewUserPhone('');
-      setNewUserRole(isFacilityManager ? 'Facility Member' : 'User');
+      setNewUserRole(isFacilityManager ? 'Facility Member' : isBranchManager ? 'User' : 'User');
       setNewUserBranches([]);
       alert('User added successfully!');
     } catch (err) {
@@ -558,8 +583,21 @@ export default function Dashboard({ user, onLogout }) {
     if (!canManageUsers) return alert("Permission denied.");
     if (!editingUser) return;
 
+    // مافيش حد يعدّل حساب إلا اللي أنشأه، إلا الـ Admin اللي ليه كل الصلاحيات دايمًا
+    if (!isAdmin && editingUser.createdBy !== user?.id) {
+      return alert("You can only edit accounts that you created yourself.");
+    }
+
     if (isFacilityManager && editingUser.role !== 'Facility Member') {
       return alert("Facility Managers can only edit Facility Members.");
+    }
+
+    if (isBranchManager && !['Supervisor', 'User'].includes(editingUser.role)) {
+      return alert("Branch Managers can only edit Supervisor or Staff (User) accounts.");
+    }
+
+    if (isBranchManager && editUserBranches.length === 0) {
+      return alert("Please assign at least one branch to this account.");
     }
 
     try {
@@ -568,7 +606,7 @@ export default function Dashboard({ user, onLogout }) {
         password: editPassword.trim(),
         phone: editUserPhone.trim(),
         role: editUserRole,
-        assignedBranches: (editUserRole === 'Supervisor' || editUserRole === 'Branch Manager') ? editUserBranches : []
+        assignedBranches: ['Supervisor', 'Branch Manager', 'User'].includes(editUserRole) ? editUserBranches : []
       });
       alert('User updated successfully!');
       setEditingUser(null);
@@ -579,6 +617,11 @@ export default function Dashboard({ user, onLogout }) {
 
   const handleDeleteUser = async (targetUser) => {
     if (!canManageUsers) return alert("Permission denied.");
+
+    // مافيش حد يحذف حساب إلا اللي أنشأه، إلا الـ Admin
+    if (!isAdmin && targetUser.createdBy !== user?.id) {
+      return alert("You can only delete accounts that you created yourself.");
+    }
 
     if (isFacilityManager && targetUser.role !== 'Facility Member') {
       return alert("Facility Managers can only delete Facility Members.");
@@ -737,6 +780,53 @@ export default function Dashboard({ user, onLogout }) {
 
     return () => unsubUserSelf();
   }, [user?.id, onLogout]);
+
+  // ONLINE PRESENCE HEARTBEAT - marks this account as online and refreshes lastActive periodically
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const sendHeartbeat = () => {
+      updateDoc(doc(db, 'users', user.id), {
+        isOnline: true,
+        lastActive: serverTimestamp()
+      }).catch(() => {});
+    };
+
+    sendHeartbeat(); // فوراً عند فتح الداشبورد
+    const heartbeatInterval = setInterval(sendHeartbeat, 45000); // كل 45 ثانية
+
+    return () => clearInterval(heartbeatInterval);
+  }, [user?.id]);
+
+  // Helper: determine if a user is currently Online based on lastActive freshness
+  const isUserOnline = (u) => {
+    if (!u) return false;
+    if (u.isOnline === false) return false; // تم تسجيل الخروج صراحةً
+    if (!u.lastActive) return false;
+    const lastMs = u.lastActive.toDate ? u.lastActive.toDate().getTime() : new Date(u.lastActive).getTime();
+    return (nowTick - lastMs) < 90000; // آخر نبضة خلال آخر 90 ثانية
+  };
+
+  const handleForceLogout = async (targetUser) => {
+    if (!window.confirm(`متأكد إنك عايز تعمل Force Logout للمستخدم "${targetUser.username}"؟`)) return;
+    try {
+      await updateDoc(doc(db, 'users', targetUser.id), { forceLogout: true });
+      alert(`تم إرسال أمر تسجيل الخروج لـ ${targetUser.username}.`);
+    } catch (err) {
+      alert('خطأ أثناء تنفيذ Force Logout: ' + err.message);
+    }
+  };
+
+  const handleLogoutClick = async () => {
+    if (user?.id) {
+      try {
+        await updateDoc(doc(db, 'users', user.id), { isOnline: false });
+      } catch (err) {
+        // تجاهل أي خطأ هنا - الأهم إن المستخدم يقدر يسجل خروج برضو
+      }
+    }
+    onLogout();
+  };
 
   // FIRESTORE LISTENERS WITH ALPHABETICAL SORTING
   useEffect(() => {
@@ -1187,7 +1277,7 @@ export default function Dashboard({ user, onLogout }) {
           )}
         </div>
 
-        <button onClick={onLogout} className="bg-slate-100 hover:bg-rose-600 hover:text-white border border-slate-300 text-slate-700 px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer">
+        <button onClick={handleLogoutClick} className="bg-slate-100 hover:bg-rose-600 hover:text-white border border-slate-300 text-slate-700 px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer">
           Logout
         </button>
       </header>
@@ -1976,7 +2066,10 @@ export default function Dashboard({ user, onLogout }) {
                   {isFacilityManager ? (
                     <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                   ) : isBranchManager ? (
-                    <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                    <>
+                      <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                      <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
+                    </>
                   ) : (
                     <>
                       <option value="User" className="bg-white text-slate-900">User (Staff)</option>
@@ -1991,11 +2084,11 @@ export default function Dashboard({ user, onLogout }) {
                 </select>
               </div>
 
-              {(newUserRole === 'Supervisor' || newUserRole === 'Branch Manager') && (
+              {(newUserRole === 'Supervisor' || newUserRole === 'Branch Manager' || newUserRole === 'User') && (
                 <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
                   <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
                   <div className="space-y-1 max-h-32 overflow-y-auto">
-                    {branches.map(b => (
+                    {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                       <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                         <input 
                           type="checkbox" 
@@ -2021,7 +2114,7 @@ export default function Dashboard({ user, onLogout }) {
 
           <div className="lg:col-span-2 bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
             <h2 className="text-lg font-bold text-slate-900">
-              {isFacilityManager ? 'Facility Team Members' : `System Users (${usersList.length})`}
+              {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
             </h2>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
@@ -2040,13 +2133,13 @@ export default function Dashboard({ user, onLogout }) {
                     >
                       Role {userSortField === 'role' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
                     </th>
+                    <th className="p-3">Status</th>
                     <th className="p-3">Assigned Branches</th>
                     <th className="p-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-xs font-medium">
-                  {usersList
-                    .filter(u => isFacilityManager ? u.role === 'Facility Member' : true)
+                  {[...manageableUsersList]
                     .sort((a, b) => {
                       if (!userSortField) return 0;
                       const valA = String(a[userSortField] || '').toLowerCase();
@@ -2056,9 +2149,10 @@ export default function Dashboard({ user, onLogout }) {
                       return 0;
                     })
                     .map((u) => {
-                      const canEditThisUser = isAdmin || isCEO || (isFacilityManager && u.role === 'Facility Member');
-                      const canDeleteThisUser = isAdmin || (isFacilityManager && u.role === 'Facility Member');
+                      const canEditThisUser = isAdmin || u.createdBy === user?.id;
+                      const canDeleteThisUser = isAdmin || u.createdBy === user?.id;
                       const userBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+                      const online = isUserOnline(u);
 
                       return (
                         <tr key={u.id} className="hover:bg-slate-50">
@@ -2075,11 +2169,33 @@ export default function Dashboard({ user, onLogout }) {
                               {u.role || 'User'}
                             </span>
                           </td>
+                          <td className="p-3">
+                            {online ? (
+                              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-black uppercase border border-emerald-300">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Online
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-black uppercase border border-slate-300">
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Offline
+                              </span>
+                            )}
+                          </td>
                           <td className="p-3 text-slate-600">
                             {userBranches.length > 0 ? userBranches.join(', ') : <span className="text-slate-400 italic">None</span>}
                           </td>
                           <td className="p-3 text-right">
                             <div className="flex items-center justify-end gap-2">
+                              {canEditThisUser && u.id !== user?.id && (
+                                <button
+                                  onClick={() => handleForceLogout(u)}
+                                  disabled={!online}
+                                  title={online ? 'Force log this user out now' : 'User is already offline'}
+                                  className="bg-amber-50 hover:bg-amber-600 hover:text-white border border-amber-300 text-amber-700 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-50 disabled:hover:text-amber-700"
+                                >
+                                  🔒 Force Logout
+                                </button>
+                              )}
+
                               {canEditThisUser && (
                                 <button 
                                   onClick={() => {
@@ -2246,11 +2362,11 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
               )}
 
-              {(editUserRole === 'Supervisor' || editUserRole === 'Branch Manager') && (
+              {(editUserRole === 'Supervisor' || editUserRole === 'Branch Manager' || editUserRole === 'User') && (
                 <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
                   <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
                   <div className="space-y-1 max-h-36 overflow-y-auto">
-                    {branches.map(b => (
+                    {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                       <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                         <input 
                           type="checkbox" 
