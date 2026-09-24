@@ -7,7 +7,8 @@ import {
   updateDoc, 
   deleteDoc,
   doc, 
-  serverTimestamp 
+  serverTimestamp,
+  getDocs
 } from 'firebase/firestore';
 
 // Excel export libraries
@@ -226,21 +227,97 @@ export default function Dashboard({ user, onLogout }) {
     });
   }, [usersList, isAdmin, isFacilityManager, isBranchManager, user?.id]);
 
-  // Update: device/browser info modal + shared-device detection (Admin only)
+  // Update: device/browser login history log (Admin only) - a real report with date/time filtering + clearable history
   const [viewingDeviceInfoUser, setViewingDeviceInfoUser] = useState(null);
+  const [deviceLogs, setDeviceLogs] = useState([]);
+  const [deviceLogStartDate, setDeviceLogStartDate] = useState('');
+  const [deviceLogEndDate, setDeviceLogEndDate] = useState('');
 
+  // Write one login/device entry per session (once per Dashboard mount) into a permanent history log
+  useEffect(() => {
+    if (!user?.id) return;
+    const deviceId = getOrCreateDeviceId();
+    const { deviceType, browser, os, userAgent } = parseDeviceInfo();
+
+    addDoc(collection(db, 'deviceLogs'), {
+      userId: user.id,
+      username: user.username || '',
+      role: user.role || '',
+      deviceId,
+      deviceType,
+      browser,
+      os,
+      userAgent,
+      timestamp: serverTimestamp()
+    }).catch(() => {});
+  }, [user?.id]);
+
+  // Admin-only live listener on the full device login history
+  useEffect(() => {
+    if (!isAdmin) return;
+    const unsubDeviceLogs = onSnapshot(collection(db, 'deviceLogs'), (snapshot) => {
+      setDeviceLogs(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsubDeviceLogs();
+  }, [isAdmin]);
+
+  // Apply the date/time range filter chosen by the Admin
+  const filteredDeviceLogs = useMemo(() => {
+    let logs = [...deviceLogs];
+
+    if (deviceLogStartDate) {
+      const start = new Date(deviceLogStartDate).getTime();
+      logs = logs.filter(l => {
+        const t = l.timestamp?.toDate ? l.timestamp.toDate().getTime() : 0;
+        return t >= start;
+      });
+    }
+
+    if (deviceLogEndDate) {
+      const end = new Date(deviceLogEndDate).setHours(23, 59, 59, 999);
+      logs = logs.filter(l => {
+        const t = l.timestamp?.toDate ? l.timestamp.toDate().getTime() : 0;
+        return t <= end;
+      });
+    }
+
+    return logs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+  }, [deviceLogs, deviceLogStartDate, deviceLogEndDate]);
+
+  // Group the filtered history by Device ID, keeping only devices shared by 2+ distinct accounts
   const sharedDeviceGroups = useMemo(() => {
     if (!isAdmin) return [];
     const map = {};
-    usersList.forEach(u => {
-      if (!u.lastDeviceId || u.lastDeviceId === 'unknown-device') return;
-      if (!map[u.lastDeviceId]) map[u.lastDeviceId] = [];
-      map[u.lastDeviceId].push(u);
+    filteredDeviceLogs.forEach(log => {
+      if (!log.deviceId || log.deviceId === 'unknown-device') return;
+      if (!map[log.deviceId]) map[log.deviceId] = [];
+      map[log.deviceId].push(log);
     });
     return Object.entries(map)
-      .filter(([, groupUsers]) => groupUsers.length > 1)
-      .map(([deviceId, groupUsers]) => ({ deviceId, users: groupUsers }));
-  }, [usersList, isAdmin]);
+      .map(([deviceId, logs]) => ({
+        deviceId,
+        logs,
+        usernames: [...new Set(logs.map(l => l.username))]
+      }))
+      .filter(g => g.usernames.length > 1)
+      .sort((a, b) => b.logs.length - a.logs.length);
+  }, [filteredDeviceLogs, isAdmin]);
+
+  const handleClearDeviceHistory = async () => {
+    if (!window.confirm('This will permanently delete ALL device login history for every account. Continue?')) return;
+    try {
+      const snap = await getDocs(collection(db, 'deviceLogs'));
+      await Promise.all(snap.docs.map(d => deleteDoc(doc(db, 'deviceLogs', d.id))));
+      alert('Device login history cleared.');
+    } catch (err) {
+      alert('Error clearing device history: ' + err.message);
+    }
+  };
+
+  const formatLogDateTime = (ts) => {
+    if (!ts?.toDate) return '—';
+    return ts.toDate().toLocaleString();
+  };
 
   // Active users present in selected CEO branch
   const activeUsersInCeoBranch = useMemo(() => {
@@ -1061,6 +1138,35 @@ export default function Dashboard({ user, onLogout }) {
     return map;
   }, [usersList]);
 
+  // Update: which usernames are allowed to appear in the Reports "User Filter" dropdown, following the same hierarchy rules
+  const visibleReportUsers = useMemo(() => {
+    if (isAdmin || isCEO || isHR) return usersList;
+
+    if (isBranchManager) {
+      return usersList.filter(u => {
+        if (u.id === user?.id) return true;
+        const role = (u.role || 'User').trim().toUpperCase();
+        if (role !== 'USER' && role !== 'STAFF' && role !== 'SUPERVISOR') return false;
+        if (assignedBranches.length === 0) return true;
+        const uBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+        return uBranches.some(b => assignedBranches.includes(b));
+      });
+    }
+
+    if (isSupervisor) {
+      return usersList.filter(u => {
+        if (u.id === user?.id) return true;
+        const role = (u.role || 'User').trim().toUpperCase();
+        if (role !== 'USER' && role !== 'STAFF') return false;
+        if (assignedBranches.length === 0) return true;
+        const uBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+        return uBranches.some(b => assignedBranches.includes(b));
+      });
+    }
+
+    return usersList.filter(u => u.id === user?.id);
+  }, [usersList, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, user?.id]);
+
   const filteredAttendanceReports = useMemo(() => {
     let list = [...attendanceRecords];
 
@@ -1085,8 +1191,8 @@ export default function Dashboard({ user, onLogout }) {
       }
       list = list.filter(a => {
         if (a.username === currentUserIdentifier) return true;
-        const role = usernameToRole[a.username];
-        return role === 'User' || role === 'Staff' || role === 'Supervisor';
+        const role = (usernameToRole[a.username] || 'User').trim().toUpperCase();
+        return role === 'USER' || role === 'STAFF' || role === 'SUPERVISOR';
       });
     } else if (isSupervisor) {
       if (assignedBranches.length > 0) {
@@ -1096,8 +1202,8 @@ export default function Dashboard({ user, onLogout }) {
       }
       list = list.filter(a => {
         if (a.username === currentUserIdentifier) return true;
-        const role = usernameToRole[a.username];
-        return role === 'User' || role === 'Staff';
+        const role = (usernameToRole[a.username] || 'User').trim().toUpperCase();
+        return role === 'USER' || role === 'STAFF';
       });
     } else {
       list = list.filter(a => a.username === currentUserIdentifier);
@@ -2136,7 +2242,7 @@ export default function Dashboard({ user, onLogout }) {
                 className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
               >
                 <option value="All" className="bg-white text-slate-900">All Users</option>
-                {usersList.map(u => (
+                {visibleReportUsers.map(u => (
                   <option key={u.id} value={u.username} className="bg-white text-slate-900">{u.username}</option>
                 ))}
               </select>
@@ -2354,27 +2460,72 @@ export default function Dashboard({ user, onLogout }) {
           </div>
 
           <div className="lg:col-span-2 space-y-4">
-            {/* Update: Shared Device Alerts - shows when two or more accounts have logged in from the same physical device/browser */}
-            {isAdmin && sharedDeviceGroups.length > 0 && (
+            {/* Update: Shared Device Alerts report - filterable by date/time, with per-login history and a Clear History control */}
+            {isAdmin && (
               <div className="bg-amber-50 border border-amber-300 p-5 rounded-3xl shadow-sm space-y-3">
-                <h3 className="text-sm font-black text-amber-900 flex items-center gap-2">
-                  ⚠️ Shared Device Alerts ({sharedDeviceGroups.length})
-                </h3>
-                <p className="text-[11px] text-amber-800">
-                  These accounts were last seen logging in from the exact same browser/device. This may indicate account sharing.
-                </p>
-                <div className="space-y-2">
-                  {sharedDeviceGroups.map(group => (
-                    <div key={group.deviceId} className="bg-white border border-amber-200 rounded-2xl p-3 text-xs">
-                      <p className="font-bold text-slate-700 mb-1">
-                        {group.users.map(u => u.username).join('  •  ')}
-                      </p>
-                      <p className="text-slate-400 text-[10px]">
-                        Device: {group.users[0]?.lastDeviceType || 'Unknown'} • {group.users[0]?.lastBrowser || 'Unknown'} • {group.users[0]?.lastOS || 'Unknown'}
-                      </p>
-                    </div>
-                  ))}
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-black text-amber-900 flex items-center gap-2">
+                    ⚠️ Shared Device Alerts ({sharedDeviceGroups.length})
+                  </h3>
+                  <button
+                    onClick={handleClearDeviceHistory}
+                    className="bg-white hover:bg-rose-600 hover:text-white border border-rose-300 text-rose-600 px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer"
+                  >
+                    🗑️ Clear History
+                  </button>
                 </div>
+                <p className="text-[11px] text-amber-800">
+                  Accounts that logged in from the exact same browser/device within the selected date range. This may indicate account sharing.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-extrabold uppercase text-amber-700 mb-1">From</label>
+                    <input
+                      type="date"
+                      value={deviceLogStartDate}
+                      onChange={(e) => setDeviceLogStartDate(e.target.value)}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-xl text-xs font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-extrabold uppercase text-amber-700 mb-1">To</label>
+                    <input
+                      type="date"
+                      value={deviceLogEndDate}
+                      onChange={(e) => setDeviceLogEndDate(e.target.value)}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-xl text-xs font-medium"
+                    />
+                  </div>
+                </div>
+
+                {sharedDeviceGroups.length === 0 ? (
+                  <p className="text-[11px] text-amber-700 italic">No shared-device activity found for the selected range.</p>
+                ) : (
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {sharedDeviceGroups.map(group => (
+                      <div key={group.deviceId} className="bg-white border border-amber-200 rounded-2xl p-3 text-xs space-y-2">
+                        <p className="font-bold text-slate-700">
+                          {group.usernames.join('  •  ')}
+                        </p>
+                        <p className="text-slate-400 text-[10px]">
+                          Device: {group.logs[0]?.deviceType || 'Unknown'} • {group.logs[0]?.browser || 'Unknown'} • {group.logs[0]?.os || 'Unknown'}
+                        </p>
+                        <div className="border-t border-slate-100 pt-2 space-y-1">
+                          {group.logs.slice(0, 8).map(log => (
+                            <div key={log.id} className="flex justify-between text-[10px] text-slate-500">
+                              <span className="font-semibold text-slate-700">{log.username}</span>
+                              <span>{formatLogDateTime(log.timestamp)}</span>
+                            </div>
+                          ))}
+                          {group.logs.length > 8 && (
+                            <p className="text-[10px] text-slate-400 italic">+ {group.logs.length - 8} more login(s)</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
