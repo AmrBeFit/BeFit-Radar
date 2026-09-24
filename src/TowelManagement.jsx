@@ -2,6 +2,13 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 
+// -------------------------------------------------------------
+// ⚙️ CLOUDINARY CONFIGURATION (إعدادات كلاوديناري)
+// -------------------------------------------------------------
+// ⚠️ تم التحديث: ضع اسم الـ Cloud Name الخاص بك في المتغير الأول
+const CLOUDINARY_CLOUD_NAME = 'dvnz134gg'; // ⬅️ استبدل 'dvnz134gg' باسم الـ Cloud Name المكتوب في أعلى dashboard حسابك
+const CLOUDINARY_UPLOAD_PRESET = 'ggwrpeyx'; // ⬅️ الـ Unsigned Preset الجاهز في حسابك
+
 const DEFAULT_BRANCHES = ['Main Branch', 'Downtown Branch', 'VIP Branch'];
 
 // Initial dummy transaction logs
@@ -25,11 +32,8 @@ const INITIAL_TRANSACTIONS = [
 
 export default function TowelManagement({ currentUser, branchesList }) {
   const allowedRoles = ['ADMIN', 'BRANCH MANAGER', 'FACILITY MANAGER', 'FACILITY MEMBER', 'USER'];
-  
-  // Dynamic user role extraction
   const userRole = (typeof currentUser === 'object' ? currentUser?.role : '')?.toUpperCase() || '';
 
-  // Enhanced dynamic user name extraction to prevent "Unknown User"
   const currentUsername = useMemo(() => {
     if (!currentUser) return 'Guest User';
     if (typeof currentUser === 'string') return currentUser;
@@ -43,10 +47,12 @@ export default function TowelManagement({ currentUser, branchesList }) {
     );
   }, [currentUser]);
 
-  const hasAccess = allowedRoles.includes(userRole) || true; // Fallback access
+  const hasAccess = allowedRoles.includes(userRole) || true;
   const isAdmin = userRole === 'ADMIN';
 
-  // Filter allowed branches for the current user
+  // التحقق مما إذا كان المستخدم يملك صلاحية رؤية كافة الفروع (ADMIN أو FACILITY MANAGER)
+  const canSeeAllBranches = userRole === 'ADMIN' || userRole === 'FACILITY MANAGER';
+
   const userAllowedBranches = useMemo(() => {
     if (currentUser && typeof currentUser === 'object' && Array.isArray(currentUser.assignedBranches) && currentUser.assignedBranches.length > 0) {
       return currentUser.assignedBranches;
@@ -54,7 +60,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     return branchesList && branchesList.length > 0 ? branchesList : DEFAULT_BRANCHES;
   }, [currentUser, branchesList]);
 
-  // Towel Pricing Settings
   const [pricing, setPricing] = useState(() => {
     const saved = localStorage.getItem('towel_pricing_settings_v4');
     return saved
@@ -73,49 +78,26 @@ export default function TowelManagement({ currentUser, branchesList }) {
   });
 
   const [activeTab, setActiveTab] = useState('report');
-
-  // Filters - Mandatory Branch Selection (Starts Empty)
   const [selectedBranchFilter, setSelectedBranchFilter] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
-  // Image Preview Modal State ({ url, txId })
   const [previewImageObj, setPreviewImageObj] = useState(null);
 
-  // Live Camera Modal State
+  // Live Camera Modal & Upload Loading State
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [cameraCallback, setCameraCallback] = useState(null);
   const [facingMode, setFacingMode] = useState('environment');
+  const [isUploading, setIsUploading] = useState(false);
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
 
-  // Forms State - Branch set to empty by default to force manual selection
-  const [supplierForm, setSupplierForm] = useState({
-    branch: '',
-    small: '',
-    large: '',
-    supplierName: '',
-    docImage: null
-  });
-
-  const [laundryOutForm, setLaundryOutForm] = useState({
-    branch: '',
-    smallSent: '',
-    largeSent: '',
-    notes: '',
-    docImage: null
-  });
-
-  const [laundryInForm, setLaundryInForm] = useState({
-    branch: '',
-    smallReturnedClean: '',
-    smallDamaged: '',
-    largeReturnedClean: '',
-    largeDamaged: '',
-    notes: '',
-    docImage: null
-  });
+  // Forms State
+  const [supplierForm, setSupplierForm] = useState({ branch: '', small: '', large: '', supplierName: '', docImage: null });
+  const [laundryOutForm, setLaundryOutForm] = useState({ branch: '', smallSent: '', largeSent: '', notes: '', docImage: null });
+  const [laundryInForm, setLaundryInForm] = useState({ branch: '', smallReturnedClean: '', smallDamaged: '', largeReturnedClean: '', largeDamaged: '', notes: '', docImage: null });
 
   useEffect(() => {
     localStorage.setItem('towel_pricing_settings_v4', JSON.stringify(pricing));
@@ -124,6 +106,37 @@ export default function TowelManagement({ currentUser, branchesList }) {
   useEffect(() => {
     localStorage.setItem('towel_transactions_v7', JSON.stringify(transactions));
   }, [transactions]);
+
+  // ☁️ HELPER FUNCTION: Upload Base64 Image to Cloudinary API with Fallback
+  const uploadToCloudinary = async (base64Data) => {
+    try {
+      setIsUploading(true);
+      const formData = new FormData();
+      formData.append('file', base64Data);
+      formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+
+      const response = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+        {
+          method: 'POST',
+          body: formData,
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Cloudinary Upload Failed');
+      }
+
+      const data = await response.json();
+      setIsUploading(false);
+      return data.secure_url;
+    } catch (error) {
+      console.warn('Cloudinary upload failed. Saving image locally as fallback.', error);
+      setIsUploading(false);
+      // في حال وجود مشكلة في الاتصال يتم إرجاع الـ Base64 لكي تستمر الدورة دون توقف
+      return base64Data;
+    }
+  };
 
   // LIVE CAMERA CONTROLLER
   const openCamera = (onCaptureCallback) => {
@@ -171,7 +184,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
     setCameraCallback(null);
   };
 
-  const capturePhoto = () => {
+  const capturePhoto = async () => {
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
@@ -181,10 +194,15 @@ export default function TowelManagement({ currentUser, branchesList }) {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
 
-      if (cameraCallback) {
-        cameraCallback(dataUrl);
+      closeCameraStream();
+
+      const imageUrl = await uploadToCloudinary(dataUrl);
+
+      if (imageUrl && cameraCallback) {
+        cameraCallback(imageUrl);
       }
-      closeCamera();
+      setIsCameraOpen(false);
+      setCameraCallback(null);
     }
   };
 
@@ -201,7 +219,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     });
   };
 
-  // ADMIN-ONLY IMAGE DELETE FUNCTION
   const handleDeleteImage = (txId) => {
     if (!isAdmin) {
       alert('Permission Denied: Only Administrators can delete receipt images.');
@@ -213,7 +230,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
         prev.map((t) => (t.id === txId ? { ...t, documentImage: null } : t))
       );
       setPreviewImageObj(null);
-      alert('Photo deleted successfully.');
+      alert('Photo removed from record successfully.');
     }
   };
 
@@ -225,12 +242,15 @@ export default function TowelManagement({ currentUser, branchesList }) {
     );
   }
 
-  // Filtered Transactions - Returns empty array if no branch is selected
+  // Filtered Transactions
   const filteredTransactions = useMemo(() => {
     if (!selectedBranchFilter) return [];
 
     return transactions.filter((tx) => {
-      if (tx.branch !== selectedBranchFilter) return false;
+      if (selectedBranchFilter !== 'ALL_BRANCHES' && tx.branch !== selectedBranchFilter) {
+        return false;
+      }
+      
       const txTime = new Date(tx.createdAt).getTime();
       if (startDate) {
         const start = new Date(startDate).setHours(0, 0, 0, 0);
@@ -244,7 +264,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     });
   }, [transactions, selectedBranchFilter, startDate, endDate]);
 
-  // Aggregate quantity metrics
   const metrics = useMemo(() => {
     return filteredTransactions.reduce(
       (acc, tx) => {
@@ -265,33 +284,25 @@ export default function TowelManagement({ currentUser, branchesList }) {
         return acc;
       },
       {
-        purchasedSmall: 0,
-        purchasedLarge: 0,
-        sentToLaundrySmall: 0,
-        sentToLaundryLarge: 0,
-        returnedFromLaundrySmall: 0,
-        returnedFromLaundryLarge: 0,
-        lostSmall: 0,
-        lostLarge: 0,
-        damagedSmall: 0,
-        damagedLarge: 0
+        purchasedSmall: 0, purchasedLarge: 0,
+        sentToLaundrySmall: 0, sentToLaundryLarge: 0,
+        returnedFromLaundrySmall: 0, returnedFromLaundryLarge: 0,
+        lostSmall: 0, lostLarge: 0,
+        damagedSmall: 0, damagedLarge: 0
       }
     );
   }, [filteredTransactions]);
 
-  // Balance at Laundry
   const currentlyInLaundry = {
     small: Math.max(0, metrics.sentToLaundrySmall - (metrics.returnedFromLaundrySmall + metrics.lostSmall + metrics.damagedSmall)),
     large: Math.max(0, metrics.sentToLaundryLarge - (metrics.returnedFromLaundryLarge + metrics.lostLarge + metrics.damagedLarge))
   };
 
-  // Clean stock available in branch
   const availableCleanStock = {
     small: Math.max(0, metrics.purchasedSmall - currentlyInLaundry.small - metrics.lostSmall - metrics.damagedSmall),
     large: Math.max(0, metrics.purchasedLarge - currentlyInLaundry.large - metrics.lostLarge - metrics.damagedLarge)
   };
 
-  // Auto-calculated fields for Laundry Receiving Form
   const activeBranchLaundryOut = useMemo(() => {
     if (!laundryInForm.branch) return { pendingSmall: 0, pendingLarge: 0 };
 
@@ -308,7 +319,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     };
   }, [transactions, laundryInForm.branch]);
 
-  // Automatic Calculation of Missing Towels
   const autoSmallLost = Math.max(
     0,
     activeBranchLaundryOut.pendingSmall - (Number(laundryInForm.smallReturnedClean) || 0) - (Number(laundryInForm.smallDamaged) || 0)
@@ -319,7 +329,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     activeBranchLaundryOut.pendingLarge - (Number(laundryInForm.largeReturnedClean) || 0) - (Number(laundryInForm.largeDamaged) || 0)
   );
 
-  // Financial calculations
   const financialSettlement = useMemo(() => {
     const laundryServiceFeeSmall = metrics.returnedFromLaundrySmall * Number(pricing.smallWashPrice || 0);
     const laundryServiceFeeLarge = metrics.returnedFromLaundryLarge * Number(pricing.largeWashPrice || 0);
@@ -331,11 +340,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
 
     const netPayableToLaundry = totalGrossLaundryFee - totalLostDeduction;
 
-    return {
-      totalGrossLaundryFee,
-      totalLostDeduction,
-      netPayableToLaundry
-    };
+    return { totalGrossLaundryFee, totalLostDeduction, netPayableToLaundry };
   }, [metrics, pricing]);
 
   // Form Handlers
@@ -372,7 +377,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
 
     if (!laundryOutForm.docImage) {
-      alert('⚠️ MANDATORY REQUIREMENT: You must open the camera and capture a photo of the handover document before submitting!');
+      alert('⚠️ MANDATORY REQUIREMENT: You must capture a photo before submitting!');
       return;
     }
 
@@ -389,7 +394,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
       createdAt: new Date().toISOString()
     };
     setTransactions([newTx, ...transactions]);
-    alert(`Laundry handover logged and photo verified successfully by ${currentUsername}!`);
+    alert(`Laundry handover logged and attached successfully by ${currentUsername}!`);
     setLaundryOutForm({ branch: '', smallSent: '', largeSent: '', notes: '', docImage: null });
   };
 
@@ -402,7 +407,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
 
     if (!laundryInForm.docImage) {
-      alert('⚠️ MANDATORY REQUIREMENT: You must open the camera and capture a photo of the receipt document before submitting!');
+      alert('⚠️ MANDATORY REQUIREMENT: You must capture a photo before submitting!');
       return;
     }
 
@@ -434,7 +439,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
       largeLost: autoLargeLost,
       smallDamaged: damagedSmall,
       largeDamaged: damagedLarge,
-      notes: laundryInForm.notes || 'Laundry received & settled with direct camera capture.',
+      notes: laundryInForm.notes || 'Laundry received & settled with receipt image.',
       documentImage: laundryInForm.docImage,
       addedBy: currentUsername,
       createdAt: new Date().toISOString()
@@ -458,19 +463,18 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
   };
 
-  // EXCEL EXPORT FUNCTION
   const exportToExcel = async () => {
     if (!selectedBranchFilter) {
       alert('Please select a branch first before exporting report.');
       return;
     }
 
+    const branchLabel = selectedBranchFilter === 'ALL_BRANCHES' ? 'All Permitted Branches' : selectedBranchFilter;
     const workbook = new ExcelJS.Workbook();
     
-    // Sheet 1: Summary Report
     const summarySheet = workbook.addWorksheet('Laundry Settlement Summary');
     summarySheet.columns = [
-      { header: 'Branch View', key: 'branch', width: 22 },
+      { header: 'Branch View', key: 'branch', width: 25 },
       { header: 'Status / Metric Description', key: 'metric', width: 35 },
       { header: 'Small Towels', key: 'small', width: 18 },
       { header: 'Large Towels', key: 'large', width: 18 },
@@ -478,21 +482,21 @@ export default function TowelManagement({ currentUser, branchesList }) {
     ];
     summarySheet.getRow(1).font = { bold: true };
 
-    summarySheet.addRow({ branch: selectedBranchFilter, metric: 'Available Clean Stock in Branch', small: availableCleanStock.small, large: availableCleanStock.large, total: availableCleanStock.small + availableCleanStock.large });
-    summarySheet.addRow({ branch: selectedBranchFilter, metric: 'Pending Balance at Laundry', small: currentlyInLaundry.small, large: currentlyInLaundry.large, total: currentlyInLaundry.small + currentlyInLaundry.large });
-    summarySheet.addRow({ branch: selectedBranchFilter, metric: 'Lost Towels (Charged to Laundry)', small: metrics.lostSmall, large: metrics.lostLarge, total: metrics.lostSmall + metrics.lostLarge });
-    summarySheet.addRow({ branch: selectedBranchFilter, metric: 'Damaged / Cut (Internal Wear & Tear)', small: metrics.damagedSmall, large: metrics.damagedLarge, total: metrics.damagedSmall + metrics.damagedLarge });
+    summarySheet.addRow({ branch: branchLabel, metric: 'Available Clean Stock in Branch', small: availableCleanStock.small, large: availableCleanStock.large, total: availableCleanStock.small + availableCleanStock.large });
+    summarySheet.addRow({ branch: branchLabel, metric: 'Pending Balance at Laundry', small: currentlyInLaundry.small, large: currentlyInLaundry.large, total: currentlyInLaundry.small + currentlyInLaundry.large });
+    summarySheet.addRow({ branch: branchLabel, metric: 'Lost Towels (Charged to Laundry)', small: metrics.lostSmall, large: metrics.lostLarge, total: metrics.lostSmall + metrics.lostLarge });
+    summarySheet.addRow({ branch: branchLabel, metric: 'Damaged / Cut (Internal Wear & Tear)', small: metrics.damagedSmall, large: metrics.damagedLarge, total: metrics.damagedSmall + metrics.damagedLarge });
 
-    // Sheet 2: Detailed Log
     const logsSheet = workbook.addWorksheet('Detailed Operations Log');
     logsSheet.columns = [
       { header: 'Date & Time', key: 'date', width: 22 },
-      { header: 'Branch', key: 'branch', width: 18 },
+      { header: 'Branch', key: 'branch', width: 20 },
       { header: 'Type', key: 'type', width: 18 },
       { header: 'User Responsible', key: 'user', width: 22 },
       { header: 'Clean Count', key: 'clean', width: 18 },
       { header: 'Damaged Count', key: 'damaged', width: 18 },
       { header: 'Lost Count', key: 'lost', width: 18 },
+      { header: 'Image Link', key: 'image', width: 40 },
       { header: 'Notes', key: 'notes', width: 30 }
     ];
     logsSheet.getRow(1).font = { bold: true };
@@ -506,6 +510,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
         clean: `${tx.smallCount} S / ${tx.largeCount} L`,
         damaged: `${tx.smallDamaged} S / ${tx.largeDamaged} L`,
         lost: `${tx.smallLost} S / ${tx.largeLost} L`,
+        image: tx.documentImage || 'No Image',
         notes: tx.notes
       });
     });
@@ -525,33 +530,37 @@ export default function TowelManagement({ currentUser, branchesList }) {
           <div className="bg-slate-900 border border-slate-700 p-4 rounded-3xl max-w-lg w-full space-y-4 text-white">
             <div className="flex justify-between items-center border-b border-slate-800 pb-3">
               <h3 className="font-bold text-sm text-slate-200">📷 Mandatory Photo Capture</h3>
-              <button 
-                type="button" 
-                onClick={closeCamera} 
-                className="text-slate-400 hover:text-white font-bold text-sm"
-              >
-                ✕ Cancel
-              </button>
+              {!isUploading && (
+                <button type="button" onClick={closeCamera} className="text-slate-400 hover:text-white font-bold text-sm">✕ Cancel</button>
+              )}
             </div>
 
             <div className="relative aspect-video bg-black rounded-2xl overflow-hidden flex items-center justify-center border border-slate-800">
               <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+              {isUploading && (
+                <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center space-y-2">
+                  <div className="w-8 h-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                  <span className="text-xs font-bold text-emerald-400">Processing & Uploading...</span>
+                </div>
+              )}
             </div>
 
             <div className="flex gap-3 pt-2">
               <button 
                 type="button" 
+                disabled={isUploading}
                 onClick={() => setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'))} 
-                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 py-3 rounded-xl text-xs font-bold transition-all"
+                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 py-3 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
               >
                 🔄 Flip Camera
               </button>
               <button 
                 type="button" 
+                disabled={isUploading}
                 onClick={capturePhoto} 
-                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl text-xs font-black transition-all shadow-lg"
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl text-xs font-black transition-all shadow-lg disabled:opacity-50"
               >
-                📸 Snap &amp; Attach
+                {isUploading ? 'Uploading...' : '📸 Snap & Upload'}
               </button>
             </div>
           </div>
@@ -563,7 +572,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
           <div className="bg-white p-4 rounded-2xl max-w-2xl w-full space-y-4">
             <div className="flex justify-between items-center border-b pb-2">
-              <h3 className="font-bold text-slate-800 text-sm">Document Receipt Capture</h3>
+              <h3 className="font-bold text-slate-800 text-sm">Receipt Image Preview</h3>
               <div className="flex items-center gap-2">
                 {isAdmin && previewImageObj.txId && (
                   <button
@@ -578,23 +587,28 @@ export default function TowelManagement({ currentUser, branchesList }) {
               </div>
             </div>
             <div className="max-h-[70vh] overflow-auto flex justify-center">
-              <img src={previewImageObj.url} alt="Captured Document" className="max-w-full h-auto rounded-lg object-contain" />
+              <img src={previewImageObj.url} alt="Receipt" className="max-w-full h-auto rounded-lg object-contain" />
             </div>
           </div>
         </div>
       )}
 
-      {/* MANDATORY BRANCH SELECTION FILTER */}
+      {/* BRANCH FILTER DROPDOWN */}
       <div className="bg-slate-100 p-4 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <span className="text-xs font-black text-slate-700 uppercase tracking-wider">🏢 Select Branch (Required):</span>
+          <span className="text-xs font-black text-slate-700 uppercase tracking-wider">🏢 Select Branch:</span>
           <select 
             value={selectedBranchFilter} 
             onChange={(e) => setSelectedBranchFilter(e.target.value)} 
             className="bg-white border border-slate-300 font-extrabold text-xs text-indigo-700 px-4 py-2 rounded-xl shadow-sm outline-none cursor-pointer hover:border-indigo-500 transition-all"
           >
             <option value="">-- Select Branch --</option>
-            {userAllowedBranches.map((b) => (<option key={b} value={b}>{b}</option>))}
+            {userAllowedBranches.map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+            {canSeeAllBranches && (
+              <option value="ALL_BRANCHES">🌐 All Permitted Branches</option>
+            )}
           </select>
         </div>
 
@@ -606,23 +620,17 @@ export default function TowelManagement({ currentUser, branchesList }) {
         </div>
       </div>
 
-      {/* DASHBOARD HEADER WITH FIXED USER IDENTIFIER */}
+      {/* DASHBOARD HEADER */}
       <div style={{ backgroundColor: '#0f172a', color: '#ffffff' }} className="p-6 rounded-3xl shadow-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border border-slate-800">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-black text-white">🧺 Towel Management System</h1>
-            {selectedBranchFilter ? (
-              <span className="bg-indigo-500/20 text-indigo-300 text-[10px] font-extrabold px-2.5 py-1 rounded-full border border-indigo-500/30">
-                {selectedBranchFilter}
-              </span>
-            ) : (
-              <span className="bg-rose-500/20 text-rose-300 text-[10px] font-extrabold px-2.5 py-1 rounded-full border border-rose-500/30">
-                No Branch Selected
-              </span>
-            )}
+            <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-extrabold px-2.5 py-1 rounded-full border border-emerald-500/30">
+              ☁️ Cloudinary Enabled
+            </span>
           </div>
           <p className="text-slate-300 text-xs font-semibold mt-1">
-            Logged in user: <span className="text-amber-400 font-bold">{currentUsername}</span> &bull; Mandatory Photo Capture Enabled
+            Logged in user: <span className="text-amber-400 font-bold">{currentUsername}</span>
           </p>
         </div>
 
@@ -668,16 +676,16 @@ export default function TowelManagement({ currentUser, branchesList }) {
             <div className="p-12 text-center text-amber-800 bg-amber-50 rounded-2xl border border-amber-200 space-y-2">
               <span className="text-3xl block">🏢</span>
               <h4 className="font-extrabold text-base">Please Select a Branch Above</h4>
-              <p className="text-xs text-amber-700">Select a branch from the dropdown menu above to display towel inventory metrics, financial logs, and audit reports.</p>
+              <p className="text-xs text-amber-700">Select a specific branch or "All Permitted Branches" from the dropdown menu above.</p>
             </div>
           ) : (
             <>
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b pb-4">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
-                    Financial Audit: <span className="text-indigo-600">{selectedBranchFilter}</span>
+                    Financial Audit: <span className="text-indigo-600">{selectedBranchFilter === 'ALL_BRANCHES' ? 'All Permitted Branches' : selectedBranchFilter}</span>
                   </h3>
-                  <p className="text-xs text-slate-500">Includes responsible staff names &amp; direct camera upload verification.</p>
+                  <p className="text-xs text-slate-500">Includes receipt links &amp; staff responsibility log.</p>
                 </div>
 
                 <button 
@@ -685,7 +693,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                   style={{ backgroundColor: '#059669', color: '#ffffff' }} 
                   className="px-5 py-2.5 rounded-xl text-xs font-black shadow-md hover:opacity-90 border-0 cursor-pointer flex items-center gap-2"
                 >
-                  📥 Export Excel Report
+                  📥 Export Excel Report ({selectedBranchFilter === 'ALL_BRANCHES' ? 'All Branches' : selectedBranchFilter})
                 </button>
               </div>
 
@@ -734,13 +742,13 @@ export default function TowelManagement({ currentUser, branchesList }) {
                       <td className="p-3 font-bold text-amber-900">{currentlyInLaundry.small + currentlyInLaundry.large}</td>
                     </tr>
                     <tr className="bg-rose-50/50">
-                      <td className="p-3 font-bold text-rose-800">❌ Lost Items (Auto Deducted from Laundry)</td>
+                      <td className="p-3 font-bold text-rose-800">❌ Lost Items (Auto Deducted)</td>
                       <td className="p-3 font-bold text-rose-600">{metrics.lostSmall}</td>
                       <td className="p-3 font-bold text-rose-600">{metrics.lostLarge}</td>
                       <td className="p-3 font-bold text-rose-800">{metrics.lostSmall + metrics.lostLarge}</td>
                     </tr>
                     <tr className="bg-slate-50">
-                      <td className="p-3 font-bold text-slate-700">⚠️ Damaged / Cut (Internal Wear &amp; Tear)</td>
+                      <td className="p-3 font-bold text-slate-700">⚠️ Damaged / Cut (Wear &amp; Tear)</td>
                       <td className="p-3 font-bold text-slate-800">{metrics.damagedSmall}</td>
                       <td className="p-3 font-bold text-slate-800">{metrics.damagedLarge}</td>
                       <td className="p-3 font-bold text-slate-900">{metrics.damagedSmall + metrics.damagedLarge}</td>
@@ -749,7 +757,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                 </table>
               </div>
 
-              {/* LOGS TABLE SHOWING USER WHO SUBMITTED */}
+              {/* LOGS TABLE */}
               <div className="space-y-3 pt-4">
                 <h4 className="font-bold text-slate-900 text-sm">Detailed Operations Log ({filteredTransactions.length})</h4>
                 <div className="overflow-x-auto">
@@ -763,7 +771,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                         <th className="p-2.5">Clean Count</th>
                         <th className="p-2.5">Damaged</th>
                         <th className="p-2.5">Auto Lost</th>
-                        <th className="p-2.5">Receipt Photo</th>
+                        <th className="p-2.5">Photo</th>
                         <th className="p-2.5">Notes</th>
                         {isAdmin && <th className="p-2.5 text-right">Actions</th>}
                       </tr>
@@ -781,9 +789,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                               {tx.type}
                             </span>
                           </td>
-                          <td className="p-2.5 font-bold text-indigo-900">
-                            👤 {tx.addedBy || currentUsername}
-                          </td>
+                          <td className="p-2.5 font-bold text-indigo-900">👤 {tx.addedBy || currentUsername}</td>
                           <td className="p-2.5 font-semibold text-emerald-700">{tx.smallCount} S / {tx.largeCount} L</td>
                           <td className="p-2.5 font-semibold text-slate-600">{tx.smallDamaged} S / {tx.largeDamaged} L</td>
                           <td className="p-2.5 font-semibold text-rose-600">{tx.smallLost} S / {tx.largeLost} L</td>
@@ -793,15 +799,15 @@ export default function TowelManagement({ currentUser, branchesList }) {
                                 <button 
                                   type="button" 
                                   onClick={() => setPreviewImageObj({ url: tx.documentImage, txId: tx.id })}
-                                  className="bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all"
+                                  className="bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                                 >
-                                  📷 View
+                                  📷 View Image
                                 </button>
                                 {isAdmin && (
                                   <button
                                     type="button"
                                     onClick={() => handleDeleteImage(tx.id)}
-                                    title="Delete Photo Only"
+                                    title="Delete Photo"
                                     className="bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white px-1.5 py-1 rounded text-[10px] font-bold transition-all"
                                   >
                                     🗑️
@@ -910,13 +916,13 @@ export default function TowelManagement({ currentUser, branchesList }) {
             <div className="flex items-center gap-3">
               <button 
                 type="button" 
-                onClick={() => openCamera((img) => setSupplierForm({ ...supplierForm, docImage: img }))}
+                onClick={() => openCamera((imgUrl) => setSupplierForm({ ...supplierForm, docImage: imgUrl }))}
                 className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow transition-all"
               >
-                📸 Open Camera &amp; Take Photo
+                📸 Open Camera &amp; Upload
               </button>
               {supplierForm.docImage && (
-                <span className="text-xs font-bold text-emerald-600">✓ Photo Captured Successfully</span>
+                <span className="text-xs font-bold text-emerald-600">✓ Photo Attached</span>
               )}
             </div>
           </div>
@@ -933,7 +939,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
           <div className="border-b pb-3">
             <h3 className="text-base font-bold text-slate-900">Handover Dirty Towels to Laundry (Outgoing Pickup)</h3>
             <p className="text-xs text-slate-500">
-              Submitter: <strong className="text-indigo-600">{currentUsername}</strong> &bull; Camera capture is mandatory.
+              Submitter: <strong className="text-indigo-600">{currentUsername}</strong>
             </p>
           </div>
 
@@ -955,26 +961,25 @@ export default function TowelManagement({ currentUser, branchesList }) {
             </div>
           </div>
 
-          {/* STRICT MANDATORY LIVE CAMERA CAPTURE */}
           <div className="bg-amber-50 p-4 rounded-2xl border border-amber-300 space-y-3">
             <label className="block text-xs font-black text-amber-900">
-              📷 Capture Handover Document Photo (Mandatory Requirement) *
+              📷 Capture &amp; Upload Handover Photo (Mandatory Requirement) *
             </label>
             <div className="flex flex-wrap items-center gap-3">
               <button 
                 type="button" 
-                onClick={() => openCamera((img) => setLaundryOutForm({ ...laundryOutForm, docImage: img }))}
+                onClick={() => openCamera((imgUrl) => setLaundryOutForm({ ...laundryOutForm, docImage: imgUrl }))}
                 className="bg-amber-600 hover:bg-amber-700 text-white px-5 py-2.5 rounded-xl text-xs font-black shadow transition-all cursor-pointer"
               >
-                📸 Open Camera Viewfinder
+                📸 Open Camera &amp; Upload
               </button>
               {laundryOutForm.docImage ? (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-extrabold text-emerald-700">✓ Photo Captured &amp; Attached</span>
+                  <span className="text-xs font-extrabold text-emerald-700">✓ Photo Captured & Attached</span>
                   <button type="button" onClick={() => setPreviewImageObj({ url: laundryOutForm.docImage, txId: null })} className="text-[11px] underline font-bold text-indigo-600">Preview</button>
                 </div>
               ) : (
-                <span className="text-xs font-bold text-rose-600">⚠️ Direct camera photo required before submission</span>
+                <span className="text-xs font-bold text-rose-600">⚠️ Direct camera upload required before submission</span>
               )}
             </div>
           </div>
@@ -997,7 +1002,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
             <div>
               <h3 className="text-base font-bold text-slate-900">Receive Clean Towels &amp; Settle Batch</h3>
               <p className="text-xs text-slate-500">
-                Submitter: <strong className="text-emerald-600">{currentUsername}</strong> &bull; Camera capture is mandatory.
+                Submitter: <strong className="text-emerald-600">{currentUsername}</strong>
               </p>
             </div>
             <div className="w-48">
@@ -1015,7 +1020,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
             </div>
           </div>
 
-          {/* Small Towels Return */}
           <div className="bg-amber-50/50 p-4 rounded-2xl border border-amber-200 space-y-3">
             <h4 className="font-bold text-amber-900 text-xs uppercase">1. Small Towels</h4>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1034,7 +1038,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
             </div>
           </div>
 
-          {/* Large Towels Return */}
           <div className="bg-indigo-50/50 p-4 rounded-2xl border border-indigo-200 space-y-3">
             <h4 className="font-bold text-indigo-900 text-xs uppercase">2. Large Towels</h4>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1053,26 +1056,25 @@ export default function TowelManagement({ currentUser, branchesList }) {
             </div>
           </div>
 
-          {/* STRICT MANDATORY LIVE CAMERA CAPTURE */}
           <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-300 space-y-3">
             <label className="block text-xs font-black text-emerald-900">
-              📷 Capture Settlement Receipt Photo (Mandatory Requirement) *
+              📷 Capture &amp; Upload Receipt Photo (Mandatory Requirement) *
             </label>
             <div className="flex flex-wrap items-center gap-3">
               <button 
                 type="button" 
-                onClick={() => openCamera((img) => setLaundryInForm({ ...laundryInForm, docImage: img }))}
+                onClick={() => openCamera((imgUrl) => setLaundryInForm({ ...laundryInForm, docImage: imgUrl }))}
                 className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl text-xs font-black shadow transition-all cursor-pointer"
               >
-                📸 Open Camera Viewfinder
+                📸 Open Camera &amp; Upload
               </button>
               {laundryInForm.docImage ? (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-extrabold text-emerald-700">✓ Photo Captured &amp; Attached</span>
+                  <span className="text-xs font-extrabold text-emerald-700">✓ Photo Captured & Attached</span>
                   <button type="button" onClick={() => setPreviewImageObj({ url: laundryInForm.docImage, txId: null })} className="text-[11px] underline font-bold text-indigo-600">Preview</button>
                 </div>
               ) : (
-                <span className="text-xs font-bold text-rose-600">⚠️ Direct camera photo required before submission</span>
+                <span className="text-xs font-bold text-rose-600">⚠️ Direct camera upload required before submission</span>
               )}
             </div>
           </div>
