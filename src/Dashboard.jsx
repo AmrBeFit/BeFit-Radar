@@ -91,6 +91,15 @@ export default function Dashboard({ user, onLogout }) {
     return () => clearInterval(tickInterval);
   }, []);
 
+  // Update: force default password change on first login + self-service password change
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [forcedNewPassword, setForcedNewPassword] = useState('');
+  const [forcedConfirmPassword, setForcedConfirmPassword] = useState('');
+
+  const [showSelfPasswordModal, setShowSelfPasswordModal] = useState(false);
+  const [selfNewPassword, setSelfNewPassword] = useState('');
+  const [selfConfirmPassword, setSelfConfirmPassword] = useState('');
+
   // Live Camera Modal States
   const [showWebcam, setShowWebcam] = useState(false);
   const [cameraMode, setCameraMode] = useState('request');
@@ -133,10 +142,12 @@ export default function Dashboard({ user, onLogout }) {
   const isFacilityManager = userRole === 'Facility Manager';
   const isFacilityMember = userRole === 'Facility Member';
   const isStaff = userRole === 'User' || userRole === 'Staff';
+  const isHR = userRole === 'HR';
 
-  // ✅ تحديث: تغيير حالة طلب الصيانة أصبح مقصورًا على مدير الصيانة (Facility Manager) والـ Admin فقط
+  // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
   const canManageStatus = isAdmin || isFacilityManager;
-  const canViewReports = isAdmin || isCEO || isBranchManager || isSupervisor;
+  // HR can view attendance reports for all branches (but not manage users)
+  const canViewReports = isAdmin || isCEO || isBranchManager || isSupervisor || isHR;
   const canManageUsers = isAdmin || isCEO || isBranchManager || isFacilityManager;
 
   const facilityMembers = useMemo(() => {
@@ -147,8 +158,8 @@ export default function Dashboard({ user, onLogout }) {
     return branches.map(b => b.name);
   }, [branches]);
 
-  // ✅ تحديث: قايمة الفروع اللي تظهر للمستخدم في اختيار الفرع (مقصورة على الفروع المتخصص لها فقط)
-  // الـ Admin والـ Facility Manager مستثنيين ودايمًا بيشوفوا كل الفروع
+  // Update: the list of branches shown to a user when selecting a branch (restricted to their own assigned branches)
+  // Admin and Facility Manager are exceptions and always see all branches
   const visibleBranchesForUser = useMemo(() => {
     if (isAdmin || isFacilityManager) return branches;
     if (assignedBranches.length > 0) {
@@ -163,13 +174,13 @@ export default function Dashboard({ user, onLogout }) {
     return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime);
   }, [attendanceRecords]);
 
-  // ✅ تحديث: مافيش حد يشوف الحسابات إلا اللي عمل إنشاءها بنفسه، إلا الـ Admin اللي بيشوف الكل دايمًا
+  // Update: nobody can see accounts except the ones they created themselves, except Admin who always sees everyone
   const manageableUsersList = useMemo(() => {
     return usersList.filter(u => {
       if (isAdmin) return true;
       if (isFacilityManager) return u.role === 'Facility Member' && u.createdBy === user?.id;
       if (isBranchManager) return ['Supervisor', 'User'].includes(u.role) && u.createdBy === user?.id;
-      // أي دور تاني ليه صلاحية إدارة المستخدمين (مثل CEO) بيشوف بس الحسابات اللي هو عملها
+      // Any other role with user-management permission (e.g. CEO) only sees the accounts they created
       return u.createdBy === user?.id;
     });
   }, [usersList, isAdmin, isFacilityManager, isBranchManager, user?.id]);
@@ -547,7 +558,7 @@ export default function Dashboard({ user, onLogout }) {
       return alert("Branch Managers are only allowed to create Supervisor or Staff (User) accounts.");
     }
 
-    // Branch Manager لازم يحدد فرع/فروع لكل حساب بينشئه
+    // Branch Manager must assign branch(es) to every account they create
     if (isBranchManager && newUserBranches.length === 0) {
       return alert("Please assign at least one branch to this account.");
     }
@@ -559,9 +570,10 @@ export default function Dashboard({ user, onLogout }) {
         password: newPassword.trim(),
         phone: newUserPhone.trim() || '',
         role: targetRole,
-        assignedBranches: ['Supervisor', 'Branch Manager', 'User'].includes(targetRole) ? newUserBranches : [],
+        assignedBranches: newUserBranches,
         createdBy: user?.id || null,
         createdByUsername: user?.username || '',
+        mustChangePassword: true,
         createdAt: serverTimestamp()
       });
 
@@ -583,7 +595,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!canManageUsers) return alert("Permission denied.");
     if (!editingUser) return;
 
-    // مافيش حد يعدّل حساب إلا اللي أنشأه، إلا الـ Admin اللي ليه كل الصلاحيات دايمًا
+    // Nobody can edit an account except whoever created it, except Admin who always has full permissions
     if (!isAdmin && editingUser.createdBy !== user?.id) {
       return alert("You can only edit accounts that you created yourself.");
     }
@@ -601,13 +613,24 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     try {
-      await updateDoc(doc(db, 'users', editingUser.id), {
+      const updatePayload = {
         username: editUsername.trim(),
-        password: editPassword.trim(),
         phone: editUserPhone.trim(),
         role: editUserRole,
-        assignedBranches: ['Supervisor', 'Branch Manager', 'User'].includes(editUserRole) ? editUserBranches : []
-      });
+        assignedBranches: editUserBranches
+      };
+
+      // Update: only Admin is allowed to view/change another account's password from here.
+      // Everyone else can only change their own password via the "Change Password" button.
+      if (isAdmin && editPassword.trim()) {
+        updatePayload.password = editPassword.trim();
+        // If Admin changes someone else's password, force that user to set a new one on next login
+        if (editingUser.id !== user?.id) {
+          updatePayload.mustChangePassword = true;
+        }
+      }
+
+      await updateDoc(doc(db, 'users', editingUser.id), updatePayload);
       alert('User updated successfully!');
       setEditingUser(null);
     } catch (err) {
@@ -618,7 +641,7 @@ export default function Dashboard({ user, onLogout }) {
   const handleDeleteUser = async (targetUser) => {
     if (!canManageUsers) return alert("Permission denied.");
 
-    // مافيش حد يحذف حساب إلا اللي أنشأه، إلا الـ Admin
+    // Nobody can delete an account except whoever created it, except Admin
     if (!isAdmin && targetUser.createdBy !== user?.id) {
       return alert("You can only delete accounts that you created yourself.");
     }
@@ -657,6 +680,14 @@ export default function Dashboard({ user, onLogout }) {
   const startLiveCamera = async (mode = 'request') => {
     if ((mode === 'checkin' || mode === 'checkout') && !attendanceBranch) {
       return alert("Please select a branch first.");
+    }
+    if (
+      (mode === 'checkin' || mode === 'checkout') &&
+      !isAdmin && !isFacilityManager &&
+      assignedBranches.length > 0 &&
+      !assignedBranches.includes(attendanceBranch)
+    ) {
+      return alert("You can only check in/out from a branch assigned to you.");
     }
     setCameraMode(mode);
     setShowWebcam(true);
@@ -766,16 +797,22 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
-  // FORCE LOGOUT MONITORING
+  // FORCE LOGOUT MONITORING + FORCED PASSWORD CHANGE MONITORING
   useEffect(() => {
     if (!user?.id) return;
 
     const unsubUserSelf = onSnapshot(doc(db, 'users', user.id), (docSnap) => {
-      if (docSnap.exists() && docSnap.data().forceLogout) {
+      if (!docSnap.exists()) return;
+      const data = docSnap.data();
+
+      if (data.forceLogout) {
         updateDoc(doc(db, 'users', user.id), { forceLogout: false });
         alert('You have been forcefully logged out by the Administrator.');
         onLogout();
+        return;
       }
+
+      setMustChangePassword(!!data.mustChangePassword);
     });
 
     return () => unsubUserSelf();
@@ -792,8 +829,8 @@ export default function Dashboard({ user, onLogout }) {
       }).catch(() => {});
     };
 
-    sendHeartbeat(); // فوراً عند فتح الداشبورد
-    const heartbeatInterval = setInterval(sendHeartbeat, 45000); // كل 45 ثانية
+    sendHeartbeat(); // immediately when the dashboard opens
+    const heartbeatInterval = setInterval(sendHeartbeat, 45000); // every 45 seconds
 
     return () => clearInterval(heartbeatInterval);
   }, [user?.id]);
@@ -801,19 +838,19 @@ export default function Dashboard({ user, onLogout }) {
   // Helper: determine if a user is currently Online based on lastActive freshness
   const isUserOnline = (u) => {
     if (!u) return false;
-    if (u.isOnline === false) return false; // تم تسجيل الخروج صراحةً
+    if (u.isOnline === false) return false; // explicitly logged out
     if (!u.lastActive) return false;
     const lastMs = u.lastActive.toDate ? u.lastActive.toDate().getTime() : new Date(u.lastActive).getTime();
-    return (nowTick - lastMs) < 90000; // آخر نبضة خلال آخر 90 ثانية
+    return (nowTick - lastMs) < 90000; // last heartbeat within the last 90 seconds
   };
 
   const handleForceLogout = async (targetUser) => {
-    if (!window.confirm(`متأكد إنك عايز تعمل Force Logout للمستخدم "${targetUser.username}"؟`)) return;
+    if (!window.confirm(`Are you sure you want to force log out "${targetUser.username}"?`)) return;
     try {
       await updateDoc(doc(db, 'users', targetUser.id), { forceLogout: true });
-      alert(`تم إرسال أمر تسجيل الخروج لـ ${targetUser.username}.`);
+      alert(`Logout command sent to ${targetUser.username}.`);
     } catch (err) {
-      alert('خطأ أثناء تنفيذ Force Logout: ' + err.message);
+      alert('Error performing Force Logout: ' + err.message);
     }
   };
 
@@ -822,10 +859,54 @@ export default function Dashboard({ user, onLogout }) {
       try {
         await updateDoc(doc(db, 'users', user.id), { isOnline: false });
       } catch (err) {
-        // تجاهل أي خطأ هنا - الأهم إن المستخدم يقدر يسجل خروج برضو
+        // Ignore any error here - the important thing is the user can still log out
       }
     }
     onLogout();
+  };
+
+  // Update: mandatory password change after first login
+  const handleForcedPasswordChange = async (e) => {
+    e.preventDefault();
+    if (!forcedNewPassword.trim() || forcedNewPassword.trim().length < 4) {
+      return alert('Please enter a new password of at least 4 characters.');
+    }
+    if (forcedNewPassword.trim() !== forcedConfirmPassword.trim()) {
+      return alert('Password and confirmation do not match.');
+    }
+    try {
+      await updateDoc(doc(db, 'users', user.id), {
+        password: forcedNewPassword.trim(),
+        mustChangePassword: false
+      });
+      setForcedNewPassword('');
+      setForcedConfirmPassword('');
+      setMustChangePassword(false);
+    } catch (err) {
+      alert('An error occurred while updating the password: ' + err.message);
+    }
+  };
+
+  // Update: self-service password change - any account can change its own password anytime without seeing the old one
+  const handleSelfPasswordChange = async (e) => {
+    e.preventDefault();
+    if (!selfNewPassword.trim() || selfNewPassword.trim().length < 4) {
+      return alert('Please enter a new password of at least 4 characters.');
+    }
+    if (selfNewPassword.trim() !== selfConfirmPassword.trim()) {
+      return alert('Password and confirmation do not match.');
+    }
+    try {
+      await updateDoc(doc(db, 'users', user.id), {
+        password: selfNewPassword.trim()
+      });
+      alert('Password changed successfully!');
+      setSelfNewPassword('');
+      setSelfConfirmPassword('');
+      setShowSelfPasswordModal(false);
+    } catch (err) {
+      alert('An error occurred while updating the password: ' + err.message);
+    }
   };
 
   // FIRESTORE LISTENERS WITH ALPHABETICAL SORTING
@@ -888,7 +969,8 @@ export default function Dashboard({ user, onLogout }) {
 
     if (isStaff) {
       result = result.filter(r => r.createdBy === currentUserIdentifier);
-    } else if (isSupervisor || isBranchManager) {
+    } else if (!isAdmin && !isCEO) {
+      // Update: any account (regardless of role) with assigned branches only sees requests from its own branches
       if (assignedBranches.length > 0) {
         result = result.filter(r => assignedBranches.includes(r.branch));
       }
@@ -898,7 +980,7 @@ export default function Dashboard({ user, onLogout }) {
     if (branchFilter !== 'All') result = result.filter(r => r.branch === branchFilter);
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
-  }, [requests, isStaff, isSupervisor, isBranchManager, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, sortOrder, isAdmin, showArchivedOnly]);
+  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, sortOrder, isAdmin, showArchivedOnly]);
 
   // ROLE-BASED ATTENDANCE REPORT FILTER
   const filteredAttendanceReports = useMemo(() => {
@@ -910,12 +992,20 @@ export default function Dashboard({ user, onLogout }) {
       list = list.filter(a => !a.isArchived);
     }
 
-    if (isStaff) {
-      list = list.filter(a => a.username === currentUserIdentifier);
-    } else if (isSupervisor) {
+    // Update - Attendance visibility rules:
+    // Default: nobody sees anyone else's attendance, only their own
+    // Branch Manager & Supervisor: only see their assigned branches
+    // Admin & CEO & HR: exceptions, see all attendance across all branches
+    if (isAdmin || isCEO || isHR) {
+      // No filtering - they see all records
+    } else if (isBranchManager || isSupervisor) {
       if (assignedBranches.length > 0) {
         list = list.filter(a => assignedBranches.includes(a.branch));
+      } else {
+        list = list.filter(a => a.username === currentUserIdentifier);
       }
+    } else {
+      list = list.filter(a => a.username === currentUserIdentifier);
     }
 
     if (reportUserFilter !== 'All') list = list.filter(a => a.username === reportUserFilter);
@@ -938,7 +1028,7 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     return list.sort((a, b) => (b.checkInTime?.seconds || 0) - (a.checkInTime?.seconds || 0));
-  }, [attendanceRecords, isStaff, isSupervisor, assignedBranches, currentUserIdentifier, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate, isAdmin, showArchivedOnly]);
+  }, [attendanceRecords, isStaff, isSupervisor, isBranchManager, isCEO, isHR, assignedBranches, currentUserIdentifier, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate, isAdmin, showArchivedOnly]);
 
   const pendingCeoRequestsForUser = useMemo(() => {
     let list = [...ceoRequests];
@@ -1066,6 +1156,48 @@ export default function Dashboard({ user, onLogout }) {
       prev.includes(bName) ? prev.filter(b => b !== bName) : [...prev, bName]
     );
   };
+
+  // Update: mandatory screen to change the default password on first login - blocks the rest of the app until completed
+  if (mustChangePassword) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4" dir="ltr">
+        <div className="bg-white border border-slate-200 rounded-3xl shadow-lg p-8 w-full max-w-sm space-y-5">
+          <div className="text-center space-y-2">
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-indigo-600 flex items-center justify-center text-2xl">🔑</div>
+            <h2 className="text-lg font-bold text-slate-900">You Must Change Your Password</h2>
+            <p className="text-xs text-slate-500">
+              This is your first login. Please choose a new password before continuing to use the app.
+            </p>
+          </div>
+          <form onSubmit={handleForcedPasswordChange} className="space-y-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-600 mb-1">New Password</label>
+              <input 
+                type="text" 
+                value={forcedNewPassword} 
+                onChange={(e) => setForcedNewPassword(e.target.value)} 
+                required 
+                className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-600 mb-1">Confirm Password</label>
+              <input 
+                type="text" 
+                value={forcedConfirmPassword} 
+                onChange={(e) => setForcedConfirmPassword(e.target.value)} 
+                required 
+                className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs"
+              />
+            </div>
+            <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-xl text-xs transition-all">
+              Update Password &amp; Continue
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 p-4 md:p-8 font-sans" dir="ltr">
@@ -1277,9 +1409,17 @@ export default function Dashboard({ user, onLogout }) {
           )}
         </div>
 
-        <button onClick={handleLogoutClick} className="bg-slate-100 hover:bg-rose-600 hover:text-white border border-slate-300 text-slate-700 px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer">
-          Logout
-        </button>
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => setShowSelfPasswordModal(true)} 
+            className="bg-slate-100 hover:bg-indigo-600 hover:text-white border border-slate-300 text-slate-700 px-4 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+          >
+            🔑 Change Password
+          </button>
+          <button onClick={handleLogoutClick} className="bg-slate-100 hover:bg-rose-600 hover:text-white border border-slate-300 text-slate-700 px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer">
+            Logout
+          </button>
+        </div>
       </header>
 
       {/* TAB 0: TOWEL MANAGEMENT */}
@@ -1577,7 +1717,7 @@ export default function Dashboard({ user, onLogout }) {
                 className="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-none"
               >
                 <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
-                {branches.map(b => (
+                {visibleBranchesForUser.map(b => (
                   <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
                 ))}
               </select>
@@ -2077,6 +2217,7 @@ export default function Dashboard({ user, onLogout }) {
                       <option value="Branch Manager" className="bg-white text-slate-900">Branch Manager</option>
                       <option value="Facility Manager" className="bg-white text-slate-900">Facility Manager</option>
                       <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
+                      <option value="HR" className="bg-white text-slate-900">HR</option>
                       <option value="CEO" className="bg-white text-slate-900">CEO</option>
                       <option value="Admin" className="bg-white text-slate-900">Admin</option>
                     </>
@@ -2084,23 +2225,22 @@ export default function Dashboard({ user, onLogout }) {
                 </select>
               </div>
 
-              {(newUserRole === 'Supervisor' || newUserRole === 'Branch Manager' || newUserRole === 'User') && (
-                <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
-                  <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
-                  <div className="space-y-1 max-h-32 overflow-y-auto">
-                    {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
-                      <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
-                        <input 
-                          type="checkbox" 
-                          checked={newUserBranches.includes(b.name)} 
-                          onChange={() => toggleBranchSelectionForUser(b.name)} 
-                        />
-                        <span>{b.name}</span>
-                      </label>
-                    ))}
-                  </div>
+              {/* Update: assign branches to any account regardless of role - this restricts their visibility across the app to those branches only */}
+              <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
+                <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
+                    <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={newUserBranches.includes(b.name)} 
+                        onChange={() => toggleBranchSelectionForUser(b.name)} 
+                      />
+                      <span>{b.name}</span>
+                    </label>
+                  ))}
                 </div>
-              )}
+              </div>
 
               <button 
                 type="submit" 
@@ -2133,7 +2273,12 @@ export default function Dashboard({ user, onLogout }) {
                     >
                       Role {userSortField === 'role' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
                     </th>
-                    <th className="p-3">Status</th>
+                    <th
+                      className="p-3 cursor-pointer select-none hover:bg-slate-200 transition-colors"
+                      onClick={() => handleUserSort('status')}
+                    >
+                      Status {userSortField === 'status' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
+                    </th>
                     <th className="p-3">Assigned Branches</th>
                     <th className="p-3 text-right">Action</th>
                   </tr>
@@ -2142,6 +2287,12 @@ export default function Dashboard({ user, onLogout }) {
                   {[...manageableUsersList]
                     .sort((a, b) => {
                       if (!userSortField) return 0;
+                      if (userSortField === 'status') {
+                        const aOnline = isUserOnline(a) ? 1 : 0;
+                        const bOnline = isUserOnline(b) ? 1 : 0;
+                        if (aOnline === bOnline) return 0;
+                        return userSortDirection === 'asc' ? (bOnline - aOnline) : (aOnline - bOnline);
+                      }
                       const valA = String(a[userSortField] || '').toLowerCase();
                       const valB = String(b[userSortField] || '').toLowerCase();
                       if (valA < valB) return userSortDirection === 'asc' ? -1 : 1;
@@ -2201,7 +2352,7 @@ export default function Dashboard({ user, onLogout }) {
                                   onClick={() => {
                                     setEditingUser(u);
                                     setEditUsername(u.username || '');
-                                    setEditPassword(u.password || '');
+                                    setEditPassword(isAdmin ? (u.password || '') : '');
                                     setEditUserPhone(u.phone || '');
                                     setEditUserRole(u.role || 'User');
                                     setEditUserBranches(Array.isArray(u.assignedBranches) ? u.assignedBranches : []);
@@ -2334,10 +2485,22 @@ export default function Dashboard({ user, onLogout }) {
                 <label className="block text-xs font-bold text-slate-600 mb-1">Username</label>
                 <input type="text" value={editUsername} onChange={(e) => setEditUsername(e.target.value)} required className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs" />
               </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-600 mb-1">Password</label>
-                <input type="text" value={editPassword} onChange={(e) => setEditPassword(e.target.value)} required className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs" />
-              </div>
+              {isAdmin ? (
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1">Password</label>
+                  <input 
+                    type="text" 
+                    value={editPassword} 
+                    onChange={(e) => setEditPassword(e.target.value)} 
+                    required 
+                    className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs" 
+                  />
+                </div>
+              ) : (
+                <p className="text-[10px] text-slate-400 italic">
+                  Password can only be changed by the account owner (via "Change Password") or by an Admin.
+                </p>
+              )}
               <div>
                 <label className="block text-xs font-bold text-slate-600 mb-1">Phone Number</label>
                 <input type="text" value={editUserPhone} onChange={(e) => setEditUserPhone(e.target.value)} className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs font-semibold" />
@@ -2356,33 +2519,72 @@ export default function Dashboard({ user, onLogout }) {
                     <option value="Branch Manager" className="bg-white text-slate-900">Branch Manager</option>
                     <option value="Facility Manager" className="bg-white text-slate-900">Facility Manager</option>
                     <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
+                    <option value="HR" className="bg-white text-slate-900">HR</option>
                     <option value="CEO" className="bg-white text-slate-900">CEO</option>
                     <option value="Admin" className="bg-white text-slate-900">Admin</option>
                   </select>
                 </div>
               )}
 
-              {(editUserRole === 'Supervisor' || editUserRole === 'Branch Manager' || editUserRole === 'User') && (
-                <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
-                  <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
-                  <div className="space-y-1 max-h-36 overflow-y-auto">
-                    {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
-                      <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
-                        <input 
-                          type="checkbox" 
-                          checked={editUserBranches.includes(b.name)} 
-                          onChange={() => toggleBranchSelectionForEditUser(b.name)} 
-                        />
-                        <span>{b.name}</span>
-                      </label>
-                    ))}
-                  </div>
+              {/* Update: assign branches to any account regardless of role - this restricts their visibility across the app to those branches only */}
+              <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
+                <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
+                <p className="text-[10px] text-slate-500">If you assign branches here, this account will only see data related to these branches across the app (Attendance, Requests, etc.).</p>
+                <div className="space-y-1 max-h-36 overflow-y-auto">
+                  {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
+                    <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={editUserBranches.includes(b.name)} 
+                        onChange={() => toggleBranchSelectionForEditUser(b.name)} 
+                      />
+                      <span>{b.name}</span>
+                    </label>
+                  ))}
                 </div>
-              )}
+              </div>
 
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setEditingUser(null)} className="px-4 py-2 bg-slate-100 rounded-xl text-xs font-bold">Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold">Save Changes</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Update: self-service Change Password modal - available to any user to change only their own password */}
+      {showSelfPasswordModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-xl p-6 w-full max-w-sm space-y-4">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-slate-900 text-sm">🔑 Change My Password</h3>
+              <button onClick={() => { setShowSelfPasswordModal(false); setSelfNewPassword(''); setSelfConfirmPassword(''); }} className="text-slate-400 font-bold">✕</button>
+            </div>
+            <form onSubmit={handleSelfPasswordChange} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 mb-1">New Password</label>
+                <input 
+                  type="text" 
+                  value={selfNewPassword} 
+                  onChange={(e) => setSelfNewPassword(e.target.value)} 
+                  required 
+                  className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-600 mb-1">Confirm New Password</label>
+                <input 
+                  type="text" 
+                  value={selfConfirmPassword} 
+                  onChange={(e) => setSelfConfirmPassword(e.target.value)} 
+                  required 
+                  className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => { setShowSelfPasswordModal(false); setSelfNewPassword(''); setSelfConfirmPassword(''); }} className="px-4 py-2 bg-slate-100 rounded-xl text-xs font-bold">Cancel</button>
+                <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold">Update Password</button>
               </div>
             </form>
           </div>

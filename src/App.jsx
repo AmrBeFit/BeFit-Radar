@@ -54,8 +54,6 @@ function CEONotificationListener({ user }) {
             newRequest.role === 'ADMIN' ||
             newRequest.type === 'SUMMON';
 
-          if (!isManagement) continue;
-
           let requestTime = pageStartTimestamp;
           if (newRequest.createdAt) {
             if (typeof newRequest.createdAt.toMillis === 'function') {
@@ -69,35 +67,53 @@ function CEONotificationListener({ user }) {
             continue;
           }
 
-          const targetBranch = newRequest.targetBranch;
+          let shouldNotify = false;
+          let alertMsg = '';
 
-          let shouldNotify = isAdminOrCEO;
+          if (isManagement) {
+            // CEO/Admin/SUMMON requests - unchanged from before
+            const targetBranch = newRequest.targetBranch;
+            shouldNotify = isAdminOrCEO;
 
-          if (!shouldNotify && currentUserIdentifier && targetBranch) {
-            try {
-              const attSnapshot = await getDocs(collection(db, 'attendance'));
-              
-              const activeSession = attSnapshot.docs
-                .map(doc => doc.data())
-                .find(a => {
-                  const matchesUser = 
-                    a.username === currentUserIdentifier || 
-                    a.email === currentUserIdentifier || 
-                    a.name === currentUserIdentifier ||
-                    a.userId === user?.id;
+            if (!shouldNotify && currentUserIdentifier && targetBranch) {
+              try {
+                const attSnapshot = await getDocs(collection(db, 'attendance'));
 
-                  const isActive = !a.checkOutTime && !a.checkOut;
-                  const matchesBranch = a.branch === targetBranch || a.branchName === targetBranch;
+                const activeSession = attSnapshot.docs
+                  .map(doc => doc.data())
+                  .find(a => {
+                    const matchesUser = 
+                      a.username === currentUserIdentifier || 
+                      a.email === currentUserIdentifier || 
+                      a.name === currentUserIdentifier ||
+                      a.userId === user?.id;
 
-                  return matchesUser && isActive && matchesBranch;
-                });
+                    const isActive = !a.checkOutTime && !a.checkOut;
+                    const matchesBranch = a.branch === targetBranch || a.branchName === targetBranch;
 
-              if (activeSession) {
-                shouldNotify = true;
+                    return matchesUser && isActive && matchesBranch;
+                  });
+
+                if (activeSession) {
+                  shouldNotify = true;
+                }
+              } catch (err) {
+                console.error("Error verifying active attendance branch:", err);
               }
-            } catch (err) {
-              console.error("Error verifying active attendance branch:", err);
             }
+
+            alertMsg = newRequest.type === 'SUMMON'
+              ? `🚨 URGENT CALL FROM MANAGEMENT!\nTarget Branch: ${newRequest.targetBranch}\nSender: ${newRequest.senderName || 'Admin/CEO'}`
+              : `🔔 NEW MANAGEMENT REQUEST!\n${newRequest.title || newRequest.details || 'A new request has been submitted.'}`;
+          } else {
+            // Update: any regular new maintenance request - always notifies Admin and CEO, and notifies the Facility Manager if the request is in one of their branches (or all branches if none are assigned)
+            const isFacilityManagerRole = userRole === 'FACILITY MANAGER';
+            const userAssignedBranches = Array.isArray(user?.assignedBranches) ? user.assignedBranches : [];
+            const branchMatches = userAssignedBranches.length === 0 || userAssignedBranches.includes(newRequest.branch);
+
+            shouldNotify = isAdminOrCEO || (isFacilityManagerRole && branchMatches);
+
+            alertMsg = `🔧 NEW MAINTENANCE REQUEST!\n${newRequest.title || 'Untitled'}\nBranch: ${newRequest.branch || 'N/A'} • ${newRequest.category || ''}\nBy: ${newRequest.createdByUsername || newRequest.createdBy || 'Unknown'}`;
           }
 
           if (!shouldNotify) {
@@ -116,18 +132,14 @@ function CEONotificationListener({ user }) {
 
           if ('Notification' in window && Notification.permission === 'granted') {
             try {
-              new Notification('🚨 URGENT CALL FOR YOUR BRANCH!', {
-                body: newRequest.details || `Target Branch: ${newRequest.targetBranch || ''}`,
+              new Notification(isManagement ? '🚨 URGENT CALL FOR YOUR BRANCH!' : '🔧 New Maintenance Request', {
+                body: newRequest.details || newRequest.title || `Branch: ${newRequest.targetBranch || newRequest.branch || ''}`,
                 requireInteraction: true
               });
             } catch (e) {
               console.log("Notification Constructor Error:", e);
             }
           }
-
-          const alertMsg = newRequest.type === 'SUMMON'
-            ? `🚨 URGENT CALL FROM MANAGEMENT!\nTarget Branch: ${newRequest.targetBranch}\nSender: ${newRequest.senderName || 'Admin/CEO'}`
-            : `🔔 NEW MANAGEMENT REQUEST!\n${newRequest.title || newRequest.details || 'A new request has been submitted.'}`;
 
           setTimeout(() => {
             alert(alertMsg);
