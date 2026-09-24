@@ -17,6 +17,47 @@ import { saveAs } from 'file-saver';
 // Import Towel Management Component
 import TowelManagement from './TowelManagement';
 
+// Update: device/browser tracking helpers.
+// Note: browsers never expose a real hardware "serial number" for privacy/security reasons - no web API can read one.
+// As the closest practical substitute, we generate a persistent random Device ID stored in this browser's localStorage,
+// which lets us reliably detect when two different accounts are being used from the same physical browser/device.
+const getOrCreateDeviceId = () => {
+  try {
+    let id = localStorage.getItem('befit_device_id');
+    if (!id) {
+      id = 'dev_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+      localStorage.setItem('befit_device_id', id);
+    }
+    return id;
+  } catch (e) {
+    return 'unknown-device';
+  }
+};
+
+const parseDeviceInfo = () => {
+  const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+
+  let deviceType = 'Desktop';
+  if (/ipad|tablet/i.test(ua)) deviceType = 'Tablet';
+  else if (/mobile|android|iphone/i.test(ua)) deviceType = 'Mobile';
+
+  let browser = 'Unknown Browser';
+  if (ua.includes('Edg/')) browser = 'Edge';
+  else if (ua.includes('OPR/') || ua.includes('Opera')) browser = 'Opera';
+  else if (ua.includes('Chrome/') && !ua.includes('Edg')) browser = 'Chrome';
+  else if (ua.includes('Firefox/')) browser = 'Firefox';
+  else if (ua.includes('Safari/') && !ua.includes('Chrome')) browser = 'Safari';
+
+  let os = 'Unknown OS';
+  if (/Windows/i.test(ua)) os = 'Windows';
+  else if (/Mac OS/i.test(ua)) os = 'macOS';
+  else if (/Android/i.test(ua)) os = 'Android';
+  else if (/iPhone|iPad|iOS/i.test(ua)) os = 'iOS';
+  else if (/Linux/i.test(ua)) os = 'Linux';
+
+  return { deviceType, browser, os, userAgent: ua };
+};
+
 export default function Dashboard({ user, onLogout }) {
   // Navigation Tabs
   const [activeTab, setActiveTab] = useState('requests');
@@ -184,6 +225,22 @@ export default function Dashboard({ user, onLogout }) {
       return u.createdBy === user?.id;
     });
   }, [usersList, isAdmin, isFacilityManager, isBranchManager, user?.id]);
+
+  // Update: device/browser info modal + shared-device detection (Admin only)
+  const [viewingDeviceInfoUser, setViewingDeviceInfoUser] = useState(null);
+
+  const sharedDeviceGroups = useMemo(() => {
+    if (!isAdmin) return [];
+    const map = {};
+    usersList.forEach(u => {
+      if (!u.lastDeviceId || u.lastDeviceId === 'unknown-device') return;
+      if (!map[u.lastDeviceId]) map[u.lastDeviceId] = [];
+      map[u.lastDeviceId].push(u);
+    });
+    return Object.entries(map)
+      .filter(([, groupUsers]) => groupUsers.length > 1)
+      .map(([deviceId, groupUsers]) => ({ deviceId, users: groupUsers }));
+  }, [usersList, isAdmin]);
 
   // Active users present in selected CEO branch
   const activeUsersInCeoBranch = useMemo(() => {
@@ -692,12 +749,18 @@ export default function Dashboard({ user, onLogout }) {
     setCameraMode(mode);
     setShowWebcam(true);
     try {
-      const constraints = { video: { facingMode: { exact: "environment" } } };
+      // Update: use the front (selfie) camera for Check-In / Check-Out, and the back camera for maintenance request photos
+      const desiredFacingMode = (mode === 'checkin' || mode === 'checkout') ? 'user' : 'environment';
+      const constraints = { video: { facingMode: { exact: desiredFacingMode } } };
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia(constraints);
       } catch (e) {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: desiredFacingMode } });
+        } catch (e2) {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        }
       }
       mediaStreamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
@@ -818,14 +881,22 @@ export default function Dashboard({ user, onLogout }) {
     return () => unsubUserSelf();
   }, [user?.id, onLogout]);
 
-  // ONLINE PRESENCE HEARTBEAT - marks this account as online and refreshes lastActive periodically
+  // ONLINE PRESENCE HEARTBEAT - marks this account as online, refreshes lastActive, and records device/browser info
   useEffect(() => {
     if (!user?.id) return;
 
     const sendHeartbeat = () => {
+      const deviceId = getOrCreateDeviceId();
+      const { deviceType, browser, os, userAgent } = parseDeviceInfo();
+
       updateDoc(doc(db, 'users', user.id), {
         isOnline: true,
-        lastActive: serverTimestamp()
+        lastActive: serverTimestamp(),
+        lastDeviceId: deviceId,
+        lastDeviceType: deviceType,
+        lastBrowser: browser,
+        lastOS: os,
+        lastUserAgent: userAgent
       }).catch(() => {});
     };
 
@@ -983,6 +1054,13 @@ export default function Dashboard({ user, onLogout }) {
   }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, sortOrder, isAdmin, showArchivedOnly]);
 
   // ROLE-BASED ATTENDANCE REPORT FILTER
+  // Update: map of username -> role, used to enforce hierarchy visibility in Attendance Reports
+  const usernameToRole = useMemo(() => {
+    const map = {};
+    usersList.forEach(u => { map[u.username] = u.role; });
+    return map;
+  }, [usersList]);
+
   const filteredAttendanceReports = useMemo(() => {
     let list = [...attendanceRecords];
 
@@ -994,16 +1072,33 @@ export default function Dashboard({ user, onLogout }) {
 
     // Update - Attendance visibility rules:
     // Default: nobody sees anyone else's attendance, only their own
-    // Branch Manager & Supervisor: only see their assigned branches
+    // Branch Manager: sees Users (Staff) & Supervisors in their assigned branches (plus their own record)
+    // Supervisor: sees Users (Staff) only in their assigned branches (plus their own record)
     // Admin & CEO & HR: exceptions, see all attendance across all branches
     if (isAdmin || isCEO || isHR) {
       // No filtering - they see all records
-    } else if (isBranchManager || isSupervisor) {
+    } else if (isBranchManager) {
       if (assignedBranches.length > 0) {
         list = list.filter(a => assignedBranches.includes(a.branch));
       } else {
         list = list.filter(a => a.username === currentUserIdentifier);
       }
+      list = list.filter(a => {
+        if (a.username === currentUserIdentifier) return true;
+        const role = usernameToRole[a.username];
+        return role === 'User' || role === 'Staff' || role === 'Supervisor';
+      });
+    } else if (isSupervisor) {
+      if (assignedBranches.length > 0) {
+        list = list.filter(a => assignedBranches.includes(a.branch));
+      } else {
+        list = list.filter(a => a.username === currentUserIdentifier);
+      }
+      list = list.filter(a => {
+        if (a.username === currentUserIdentifier) return true;
+        const role = usernameToRole[a.username];
+        return role === 'User' || role === 'Staff';
+      });
     } else {
       list = list.filter(a => a.username === currentUserIdentifier);
     }
@@ -1028,7 +1123,7 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     return list.sort((a, b) => (b.checkInTime?.seconds || 0) - (a.checkInTime?.seconds || 0));
-  }, [attendanceRecords, isStaff, isSupervisor, isBranchManager, isCEO, isHR, assignedBranches, currentUserIdentifier, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate, isAdmin, showArchivedOnly]);
+  }, [attendanceRecords, isStaff, isSupervisor, isBranchManager, isCEO, isHR, assignedBranches, currentUserIdentifier, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate, isAdmin, showArchivedOnly, usernameToRole]);
 
   const pendingCeoRequestsForUser = useMemo(() => {
     let list = [...ceoRequests];
@@ -1251,7 +1346,13 @@ export default function Dashboard({ user, onLogout }) {
               <button onClick={stopLiveCamera} className="text-slate-400 hover:text-slate-700 font-bold text-sm">✕</button>
             </div>
             <div className="relative bg-black rounded-2xl overflow-hidden aspect-video flex items-center justify-center">
-              <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+              <video 
+                ref={videoRef} 
+                autoPlay 
+                playsInline 
+                className="w-full h-full object-cover" 
+                style={(cameraMode === 'checkin' || cameraMode === 'checkout') ? { transform: 'scaleX(-1)' } : undefined}
+              />
             </div>
             <div className="flex justify-end gap-3 pt-2">
               <button onClick={stopLiveCamera} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold">Cancel</button>
@@ -2252,7 +2353,32 @@ export default function Dashboard({ user, onLogout }) {
             </form>
           </div>
 
-          <div className="lg:col-span-2 bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
+          <div className="lg:col-span-2 space-y-4">
+            {/* Update: Shared Device Alerts - shows when two or more accounts have logged in from the same physical device/browser */}
+            {isAdmin && sharedDeviceGroups.length > 0 && (
+              <div className="bg-amber-50 border border-amber-300 p-5 rounded-3xl shadow-sm space-y-3">
+                <h3 className="text-sm font-black text-amber-900 flex items-center gap-2">
+                  ⚠️ Shared Device Alerts ({sharedDeviceGroups.length})
+                </h3>
+                <p className="text-[11px] text-amber-800">
+                  These accounts were last seen logging in from the exact same browser/device. This may indicate account sharing.
+                </p>
+                <div className="space-y-2">
+                  {sharedDeviceGroups.map(group => (
+                    <div key={group.deviceId} className="bg-white border border-amber-200 rounded-2xl p-3 text-xs">
+                      <p className="font-bold text-slate-700 mb-1">
+                        {group.users.map(u => u.username).join('  •  ')}
+                      </p>
+                      <p className="text-slate-400 text-[10px]">
+                        Device: {group.users[0]?.lastDeviceType || 'Unknown'} • {group.users[0]?.lastBrowser || 'Unknown'} • {group.users[0]?.lastOS || 'Unknown'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
             <h2 className="text-lg font-bold text-slate-900">
               {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
             </h2>
@@ -2336,6 +2462,16 @@ export default function Dashboard({ user, onLogout }) {
                           </td>
                           <td className="p-3 text-right">
                             <div className="flex items-center justify-end gap-2">
+                              {isAdmin && (
+                                <button
+                                  onClick={() => setViewingDeviceInfoUser(u)}
+                                  title="View login device info"
+                                  className="bg-slate-50 hover:bg-slate-700 hover:text-white border border-slate-300 text-slate-600 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                                >
+                                  📱 Device
+                                </button>
+                              )}
+
                               {canEditThisUser && u.id !== user?.id && (
                                 <button
                                   onClick={() => handleForceLogout(u)}
@@ -2379,6 +2515,7 @@ export default function Dashboard({ user, onLogout }) {
                 </tbody>
               </table>
             </div>
+          </div>
           </div>
         </div>
       )}
@@ -2590,6 +2727,51 @@ export default function Dashboard({ user, onLogout }) {
           </div>
         </div>
       )}
+
+      {/* Update: Device/Browser info modal - Admin only */}
+      {viewingDeviceInfoUser && isAdmin && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-xl p-6 w-full max-w-sm space-y-4">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-slate-900 text-sm">📱 Login Device Info - {viewingDeviceInfoUser.username}</h3>
+              <button onClick={() => setViewingDeviceInfoUser(null)} className="text-slate-400 font-bold">✕</button>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between border-b border-slate-100 pb-2">
+                <span className="text-slate-400 font-semibold">Device Type</span>
+                <span className="font-bold text-slate-800">{viewingDeviceInfoUser.lastDeviceType || 'Not recorded yet'}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-100 pb-2">
+                <span className="text-slate-400 font-semibold">Browser</span>
+                <span className="font-bold text-slate-800">{viewingDeviceInfoUser.lastBrowser || 'Not recorded yet'}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-100 pb-2">
+                <span className="text-slate-400 font-semibold">Operating System</span>
+                <span className="font-bold text-slate-800">{viewingDeviceInfoUser.lastOS || 'Not recorded yet'}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-100 pb-2">
+                <span className="text-slate-400 font-semibold">Device ID</span>
+                <span className="font-mono text-[10px] text-slate-600">{viewingDeviceInfoUser.lastDeviceId || 'N/A'}</span>
+              </div>
+              <div className="flex justify-between border-b border-slate-100 pb-2">
+                <span className="text-slate-400 font-semibold">Status</span>
+                <span className="font-bold text-slate-800">{isUserOnline(viewingDeviceInfoUser) ? 'Online now' : 'Offline'}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 font-semibold block mb-1">Full User Agent</span>
+                <p className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-[10px] text-slate-600 break-all">
+                  {viewingDeviceInfoUser.lastUserAgent || 'Not recorded yet'}
+                </p>
+              </div>
+              <p className="text-[10px] text-slate-400 italic pt-1">
+                Note: browsers do not expose a real hardware serial number. "Device ID" is a unique identifier generated for this browser the first time this account (or any account) logged in on it, and it stays the same on every future visit from that same browser/device.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* FOOTER BRANDING */}
       <footer className="mt-12 py-6 border-t border-slate-200 text-center print:hidden">
