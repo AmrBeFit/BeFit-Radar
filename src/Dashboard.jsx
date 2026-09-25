@@ -189,7 +189,8 @@ export default function Dashboard({ user, onLogout }) {
   // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
   const canManageStatus = isAdmin || isFacilityManager;
   // HR can view attendance reports for all branches (but not manage users)
-  const canViewReports = isAdmin || isCEO || isBranchManager || isSupervisor || isHR;
+  // Update: Attendance Reports access now matches the permission table exactly - Admin, HR, Branch Manager, Supervisor, User only (CEO no longer included)
+  const canViewReports = isAdmin || isBranchManager || isSupervisor || isHR;
   const canManageUsers = isAdmin || isCEO || isBranchManager || isFacilityManager;
 
   const facilityMembers = useMemo(() => {
@@ -1138,36 +1139,8 @@ export default function Dashboard({ user, onLogout }) {
     return map;
   }, [usersList]);
 
-  // Update: which usernames are allowed to appear in the Reports "User Filter" dropdown, following the same hierarchy rules
-  const visibleReportUsers = useMemo(() => {
-    if (isAdmin || isCEO || isHR) return usersList;
-
-    if (isBranchManager) {
-      return usersList.filter(u => {
-        if (u.id === user?.id) return true;
-        const role = (u.role || 'User').trim().toUpperCase();
-        if (role !== 'USER' && role !== 'STAFF' && role !== 'SUPERVISOR') return false;
-        if (assignedBranches.length === 0) return true;
-        const uBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
-        return uBranches.some(b => assignedBranches.includes(b));
-      });
-    }
-
-    if (isSupervisor) {
-      return usersList.filter(u => {
-        if (u.id === user?.id) return true;
-        const role = (u.role || 'User').trim().toUpperCase();
-        if (role !== 'USER' && role !== 'STAFF') return false;
-        if (assignedBranches.length === 0) return true;
-        const uBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
-        return uBranches.some(b => assignedBranches.includes(b));
-      });
-    }
-
-    return usersList.filter(u => u.id === user?.id);
-  }, [usersList, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, user?.id]);
-
-  const filteredAttendanceReports = useMemo(() => {
+  // Update: base attendance list after applying only the role/branch hierarchy rules (before user/branch/date filters)
+  const hierarchyFilteredAttendance = useMemo(() => {
     let list = [...attendanceRecords];
 
     if (isAdmin && showArchivedOnly) {
@@ -1176,12 +1149,12 @@ export default function Dashboard({ user, onLogout }) {
       list = list.filter(a => !a.isArchived);
     }
 
-    // Update - Attendance visibility rules:
+    // Attendance visibility rules (matches the official permission table exactly):
     // Default: nobody sees anyone else's attendance, only their own
     // Branch Manager: sees Users (Staff) & Supervisors in their assigned branches (plus their own record)
     // Supervisor: sees Users (Staff) only in their assigned branches (plus their own record)
-    // Admin & CEO & HR: exceptions, see all attendance across all branches
-    if (isAdmin || isCEO || isHR) {
+    // Admin & HR: exceptions, see all attendance across all branches (CEO is not granted this)
+    if (isAdmin || isHR) {
       // No filtering - they see all records
     } else if (isBranchManager) {
       if (assignedBranches.length > 0) {
@@ -1209,6 +1182,24 @@ export default function Dashboard({ user, onLogout }) {
       list = list.filter(a => a.username === currentUserIdentifier);
     }
 
+    return list;
+  }, [attendanceRecords, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, currentUserIdentifier, usernameToRole, showArchivedOnly]);
+
+  // Update: the "User Filter" dropdown is now derived directly from whoever actually has visible attendance records,
+  // so it can never show a name that then yields zero rows (this replaces the old assignedBranches-only guess)
+  const visibleReportUsers = useMemo(() => {
+    const usernames = [...new Set(hierarchyFilteredAttendance.map(a => a.username))];
+    if (currentUserIdentifier && !usernames.includes(currentUserIdentifier)) {
+      usernames.push(currentUserIdentifier);
+    }
+    return usernames
+      .map(name => usersList.find(u => u.username === name) || { id: name, username: name })
+      .sort((a, b) => (a.username || '').localeCompare(b.username || ''));
+  }, [hierarchyFilteredAttendance, usersList, currentUserIdentifier]);
+
+  const filteredAttendanceReports = useMemo(() => {
+    let list = [...hierarchyFilteredAttendance];
+
     if (reportUserFilter !== 'All') list = list.filter(a => a.username === reportUserFilter);
     if (reportBranchFilter !== 'All') list = list.filter(a => a.branch === reportBranchFilter);
 
@@ -1229,7 +1220,7 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     return list.sort((a, b) => (b.checkInTime?.seconds || 0) - (a.checkInTime?.seconds || 0));
-  }, [attendanceRecords, isStaff, isSupervisor, isBranchManager, isCEO, isHR, assignedBranches, currentUserIdentifier, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate, isAdmin, showArchivedOnly, usernameToRole]);
+  }, [hierarchyFilteredAttendance, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate]);
 
   const pendingCeoRequestsForUser = useMemo(() => {
     let list = [...ceoRequests];
@@ -1270,9 +1261,9 @@ export default function Dashboard({ user, onLogout }) {
         username: item.username || 'N/A',
         branch: item.branch || 'N/A',
         checkInTime: formatDate(item.checkInTime),
-        checkInPhoto: item.checkInPhoto || 'No Photo',
+        checkInPhoto: (isAdmin || isHR) ? (item.checkInPhoto || 'No Photo') : 'Restricted',
         checkOutTime: formatDate(item.checkOutTime),
-        checkOutPhoto: item.checkOutPhoto || 'No Photo',
+        checkOutPhoto: (isAdmin || isHR) ? (item.checkOutPhoto || 'No Photo') : 'Restricted',
         status: item.status || 'N/A',
       });
     });
@@ -2255,7 +2246,7 @@ export default function Dashboard({ user, onLogout }) {
                 className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
               >
                 <option value="All" className="bg-white text-slate-900">All Branches</option>
-                {branches.map(b => (
+                {visibleBranchesForUser.map(b => (
                   <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
                 ))}
               </select>
@@ -2315,24 +2306,32 @@ export default function Dashboard({ user, onLogout }) {
                     <td className="p-2.5">{rec.branch}</td>
                     <td className="p-2.5 text-emerald-700 font-bold">{formatDate(rec.checkInTime)}</td>
                     <td className="p-2.5 print:hidden">
-                      {rec.checkInPhoto && (
-                        <img 
-                          src={rec.checkInPhoto} 
-                          alt="In" 
-                          onClick={() => setFullscreenImage(rec.checkInPhoto)}
-                          className="w-8 h-8 object-cover rounded border border-slate-300 cursor-pointer hover:scale-110 transition-transform" 
-                        />
+                      {(isAdmin || isHR) ? (
+                        rec.checkInPhoto && (
+                          <img 
+                            src={rec.checkInPhoto} 
+                            alt="In" 
+                            onClick={() => setFullscreenImage(rec.checkInPhoto)}
+                            className="w-8 h-8 object-cover rounded border border-slate-300 cursor-pointer hover:scale-110 transition-transform" 
+                          />
+                        )
+                      ) : (
+                        rec.checkInPhoto && <span className="text-slate-300 text-[10px]" title="Only Admin and HR can view attendance photos">🔒</span>
                       )}
                     </td>
                     <td className="p-2.5 text-rose-700 font-bold">{formatDate(rec.checkOutTime)}</td>
                     <td className="p-2.5 print:hidden">
-                      {rec.checkOutPhoto && (
-                        <img 
-                          src={rec.checkOutPhoto} 
-                          alt="Out" 
-                          onClick={() => setFullscreenImage(rec.checkOutPhoto)}
-                          className="w-8 h-8 object-cover rounded border border-slate-300 cursor-pointer hover:scale-110 transition-transform" 
-                        />
+                      {(isAdmin || isHR) ? (
+                        rec.checkOutPhoto && (
+                          <img 
+                            src={rec.checkOutPhoto} 
+                            alt="Out" 
+                            onClick={() => setFullscreenImage(rec.checkOutPhoto)}
+                            className="w-8 h-8 object-cover rounded border border-slate-300 cursor-pointer hover:scale-110 transition-transform" 
+                          />
+                        )
+                      ) : (
+                        rec.checkOutPhoto && <span className="text-slate-300 text-[10px]" title="Only Admin and HR can view attendance photos">🔒</span>
                       )}
                     </td>
                     <td className="p-2.5"><span className="px-2 py-0.5 rounded font-black text-[9px] uppercase bg-emerald-100 text-emerald-800">{rec.status}</span></td>

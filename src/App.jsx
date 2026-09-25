@@ -23,19 +23,51 @@ function CEONotificationListener({ user }) {
     }
   };
 
-  const enableAudioAndNotifications = async () => {
+  // Update: notifications are now enabled automatically - nobody has to click a button.
+  // Browsers only require SOME user gesture (any click/tap/keypress anywhere on the page) before
+  // audio is allowed to play and before the notification permission prompt can appear, so instead of
+  // showing a dedicated "Enable Audio" button, we silently unlock everything on the very first
+  // interaction the person makes anywhere in the app (e.g. clicking a tab, typing in a field).
+  useEffect(() => {
+    // Ask for Notification permission proactively on mount (works in most browsers even without a gesture)
     if ('Notification' in window && Notification.permission === 'default') {
-      try {
-        await Notification.requestPermission();
-      } catch (err) {
-        console.log('Notification permission error:', err);
-      }
+      Notification.requestPermission().catch(() => {});
     }
-    
-    playOriginalAudio();
-    setAudioEnabled(true);
-    alert("✅ Sound & Notifications Activated Successfully!");
-  };
+
+    if (audioEnabled) return;
+
+    const silentlyUnlock = () => {
+      try {
+        const unlockAudio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+        unlockAudio.volume = 0;
+        unlockAudio.play().then(() => {
+          unlockAudio.pause();
+          unlockAudio.currentTime = 0;
+        }).catch(() => {});
+      } catch (e) {
+        // ignore
+      }
+
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+
+      setAudioEnabled(true);
+      window.removeEventListener('click', silentlyUnlock);
+      window.removeEventListener('touchstart', silentlyUnlock);
+      window.removeEventListener('keydown', silentlyUnlock);
+    };
+
+    window.addEventListener('click', silentlyUnlock);
+    window.addEventListener('touchstart', silentlyUnlock);
+    window.addEventListener('keydown', silentlyUnlock);
+
+    return () => {
+      window.removeEventListener('click', silentlyUnlock);
+      window.removeEventListener('touchstart', silentlyUnlock);
+      window.removeEventListener('keydown', silentlyUnlock);
+    };
+  }, [audioEnabled]);
 
   useEffect(() => {
     if (!currentUserIdentifier && !isAdminOrCEO) return;
@@ -153,42 +185,8 @@ function CEONotificationListener({ user }) {
     return () => unsubscribe();
   }, [currentUserIdentifier, isAdminOrCEO, user]);
 
-  if (audioEnabled) return null;
-
-  return (
-    <div style={{
-      position: 'fixed',
-      bottom: '20px',
-      right: '20px',
-      zIndex: 9999,
-      backgroundColor: '#1e293b',
-      color: '#fff',
-      padding: '12px 18px',
-      borderRadius: '16px',
-      boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '12px',
-      border: '1px solid #f59e0b'
-    }}>
-      <span style={{ fontSize: '12px', fontWeight: 'bold' }}>🔔 Enable Instant Sound & Alerts</span>
-      <button 
-        onClick={enableAudioAndNotifications}
-        style={{
-          backgroundColor: '#f59e0b',
-          color: '#0f172a',
-          border: 'none',
-          padding: '6px 12px',
-          borderRadius: '10px',
-          fontWeight: '900',
-          fontSize: '11px',
-          cursor: 'pointer'
-        }}
-      >
-        ACTIVATE NOW
-      </button>
-    </div>
-  );
+  // Update: no visible UI anymore - unlocking happens silently on first interaction, nothing to click
+  return null;
 }
 
 // 2. Dynamic Summon Branch Widget (Without Live Requests Viewer)

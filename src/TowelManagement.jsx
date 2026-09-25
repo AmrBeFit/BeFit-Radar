@@ -1,34 +1,33 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
+import { db } from './firebase';
+import {
+  collection,
+  onSnapshot,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  doc,
+  setDoc
+} from 'firebase/firestore';
 
 // -------------------------------------------------------------
-// ⚙️ CLOUDINARY CONFIGURATION (إعدادات كلاوديناري)
+// ⚙️ CLOUDINARY CONFIGURATION
 // -------------------------------------------------------------
-// ⚠️ تم التحديث: ضع اسم الـ Cloud Name الخاص بك في المتغير الأول
-const CLOUDINARY_CLOUD_NAME = 'dvnz134gg'; // ⬅️ استبدل 'dvnz134gg' باسم الـ Cloud Name المكتوب في أعلى dashboard حسابك
-const CLOUDINARY_UPLOAD_PRESET = 'ggwrpeyx'; // ⬅️ الـ Unsigned Preset الجاهز في حسابك
+// Update: this now points to the same Cloudinary account used for Attendance check-in/check-out photos,
+// so Towel Management images upload to Cloudinary exactly the same way.
+const CLOUDINARY_CLOUD_NAME = 'gwgnpo4v';
+const CLOUDINARY_UPLOAD_PRESET = 'ggwrpeyx';
 
 const DEFAULT_BRANCHES = ['Main Branch', 'Downtown Branch', 'VIP Branch'];
 
-// Initial dummy transaction logs
-const INITIAL_TRANSACTIONS = [
-  {
-    id: 'tx-101',
-    branch: 'Main Branch',
-    type: 'SUPPLIER',
-    smallCount: 200,
-    largeCount: 150,
-    smallLost: 0,
-    largeLost: 0,
-    smallDamaged: 0,
-    largeDamaged: 0,
-    notes: 'Initial Batch from Supplier',
-    documentImage: null,
-    addedBy: 'Admin',
-    createdAt: '2026-09-15T10:30:00.000Z'
-  }
-];
+const DEFAULT_PRICING = {
+  smallPurchasePrice: 20,
+  largePurchasePrice: 50,
+  smallWashPrice: 3,
+  largeWashPrice: 6
+};
 
 export default function TowelManagement({ currentUser, branchesList }) {
   const allowedRoles = ['ADMIN', 'BRANCH MANAGER', 'FACILITY MANAGER', 'FACILITY MEMBER', 'USER'];
@@ -50,7 +49,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
   const hasAccess = allowedRoles.includes(userRole) || true;
   const isAdmin = userRole === 'ADMIN';
 
-  // التحقق مما إذا كان المستخدم يملك صلاحية رؤية كافة الفروع (ADMIN أو FACILITY MANAGER)
+  // Check whether the user has permission to see all branches (ADMIN or FACILITY MANAGER)
   const canSeeAllBranches = userRole === 'ADMIN' || userRole === 'FACILITY MANAGER';
 
   const userAllowedBranches = useMemo(() => {
@@ -60,22 +59,15 @@ export default function TowelManagement({ currentUser, branchesList }) {
     return branchesList && branchesList.length > 0 ? branchesList : DEFAULT_BRANCHES;
   }, [currentUser, branchesList]);
 
-  const [pricing, setPricing] = useState(() => {
-    const saved = localStorage.getItem('towel_pricing_settings_v4');
-    return saved
-      ? JSON.parse(saved)
-      : {
-          smallPurchasePrice: 20,
-          largePurchasePrice: 50,
-          smallWashPrice: 3,
-          largeWashPrice: 6
-        };
-  });
+  // Update: pricing is now the live, shared value synced from Firestore (read by everyone, edited only by Admin via the Save button)
+  const [pricing, setPricing] = useState(DEFAULT_PRICING);
+  const [pricingForm, setPricingForm] = useState(DEFAULT_PRICING);
+  const pricingFormInitializedRef = useRef(false);
+  const [isSavingPricing, setIsSavingPricing] = useState(false);
 
-  const [transactions, setTransactions] = useState(() => {
-    const saved = localStorage.getItem('towel_transactions_v7');
-    return saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS;
-  });
+  // Update: transactions are now a live, shared Firestore collection instead of per-browser localStorage
+  const [transactions, setTransactions] = useState([]);
+  const [isLoadingTransactions, setIsLoadingTransactions] = useState(true);
 
   const [activeTab, setActiveTab] = useState('report');
   const [selectedBranchFilter, setSelectedBranchFilter] = useState('');
@@ -99,13 +91,46 @@ export default function TowelManagement({ currentUser, branchesList }) {
   const [laundryOutForm, setLaundryOutForm] = useState({ branch: '', smallSent: '', largeSent: '', notes: '', docImage: null });
   const [laundryInForm, setLaundryInForm] = useState({ branch: '', smallReturnedClean: '', smallDamaged: '', largeReturnedClean: '', largeDamaged: '', notes: '', docImage: null });
 
+  // Update: live-sync pricing settings from Firestore (shared document, everyone reads the same values)
   useEffect(() => {
-    localStorage.setItem('towel_pricing_settings_v4', JSON.stringify(pricing));
-  }, [pricing]);
+    const unsubPricing = onSnapshot(doc(db, 'towelSettings', 'pricing'), (snap) => {
+      if (snap.exists()) {
+        const data = { ...DEFAULT_PRICING, ...snap.data() };
+        setPricing(data);
+        // Only seed the editable form once, so it doesn't overwrite what the Admin is currently typing
+        if (!pricingFormInitializedRef.current) {
+          setPricingForm(data);
+          pricingFormInitializedRef.current = true;
+        }
+      } else {
+        pricingFormInitializedRef.current = true;
+      }
+    });
+    return () => unsubPricing();
+  }, []);
 
+  const handleSavePricing = async () => {
+    setIsSavingPricing(true);
+    try {
+      await setDoc(doc(db, 'towelSettings', 'pricing'), pricingForm);
+      alert('Pricing & rates updated successfully for everyone!');
+    } catch (err) {
+      alert('Error saving pricing: ' + err.message);
+    } finally {
+      setIsSavingPricing(false);
+    }
+  };
+
+  // Update: live-sync all towel transactions from Firestore (shared across every device/user)
   useEffect(() => {
-    localStorage.setItem('towel_transactions_v7', JSON.stringify(transactions));
-  }, [transactions]);
+    const unsubTransactions = onSnapshot(collection(db, 'towelTransactions'), (snapshot) => {
+      const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setTransactions(list);
+      setIsLoadingTransactions(false);
+    });
+    return () => unsubTransactions();
+  }, []);
 
   // ☁️ HELPER FUNCTION: Upload Base64 Image to Cloudinary API with Fallback
   const uploadToCloudinary = async (base64Data) => {
@@ -133,7 +158,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
     } catch (error) {
       console.warn('Cloudinary upload failed. Saving image locally as fallback.', error);
       setIsUploading(false);
-      // في حال وجود مشكلة في الاتصال يتم إرجاع الـ Base64 لكي تستمر الدورة دون توقف
+      // If there is a connection problem, return the Base64 data so the flow can continue without stopping
       return base64Data;
     }
   };
@@ -219,18 +244,20 @@ export default function TowelManagement({ currentUser, branchesList }) {
     });
   };
 
-  const handleDeleteImage = (txId) => {
+  const handleDeleteImage = async (txId) => {
     if (!isAdmin) {
       alert('Permission Denied: Only Administrators can delete receipt images.');
       return;
     }
 
     if (window.confirm('Are you sure you want to delete this attached photo? This action cannot be undone.')) {
-      setTransactions((prev) =>
-        prev.map((t) => (t.id === txId ? { ...t, documentImage: null } : t))
-      );
-      setPreviewImageObj(null);
-      alert('Photo removed from record successfully.');
+      try {
+        await updateDoc(doc(db, 'towelTransactions', txId), { documentImage: null });
+        setPreviewImageObj(null);
+        alert('Photo removed from record successfully.');
+      } catch (err) {
+        alert('Error removing photo: ' + err.message);
+      }
     }
   };
 
@@ -344,7 +371,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
   }, [metrics, pricing]);
 
   // Form Handlers
-  const handleSupplierSubmit = (e) => {
+  const handleSupplierSubmit = async (e) => {
     e.preventDefault();
     if (!supplierForm.branch) {
       alert('⚠️ Please select a Target Branch before submitting!');
@@ -352,7 +379,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
 
     const newTx = {
-      id: `tx-${Date.now()}`,
       branch: supplierForm.branch,
       type: 'SUPPLIER',
       smallCount: Number(supplierForm.small) || 0,
@@ -363,12 +389,17 @@ export default function TowelManagement({ currentUser, branchesList }) {
       addedBy: currentUsername,
       createdAt: new Date().toISOString()
     };
-    setTransactions([newTx, ...transactions]);
-    alert('Supplier intake recorded successfully!');
-    setSupplierForm({ branch: '', small: '', large: '', supplierName: '', docImage: null });
+
+    try {
+      await addDoc(collection(db, 'towelTransactions'), newTx);
+      alert('Supplier intake recorded successfully!');
+      setSupplierForm({ branch: '', small: '', large: '', supplierName: '', docImage: null });
+    } catch (err) {
+      alert('Error saving transaction: ' + err.message);
+    }
   };
 
-  const handleLaundryOutSubmit = (e) => {
+  const handleLaundryOutSubmit = async (e) => {
     e.preventDefault();
 
     if (!laundryOutForm.branch) {
@@ -382,7 +413,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
 
     const newTx = {
-      id: `tx-${Date.now()}`,
       branch: laundryOutForm.branch,
       type: 'LAUNDRY_OUT',
       smallCount: Number(laundryOutForm.smallSent) || 0,
@@ -393,12 +423,17 @@ export default function TowelManagement({ currentUser, branchesList }) {
       addedBy: currentUsername,
       createdAt: new Date().toISOString()
     };
-    setTransactions([newTx, ...transactions]);
-    alert(`Laundry handover logged and attached successfully by ${currentUsername}!`);
-    setLaundryOutForm({ branch: '', smallSent: '', largeSent: '', notes: '', docImage: null });
+
+    try {
+      await addDoc(collection(db, 'towelTransactions'), newTx);
+      alert(`Laundry handover logged and attached successfully by ${currentUsername}!`);
+      setLaundryOutForm({ branch: '', smallSent: '', largeSent: '', notes: '', docImage: null });
+    } catch (err) {
+      alert('Error saving transaction: ' + err.message);
+    }
   };
 
-  const handleLaundryInSubmit = (e) => {
+  const handleLaundryInSubmit = async (e) => {
     e.preventDefault();
 
     if (!laundryInForm.branch) {
@@ -430,7 +465,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
 
     const newTx = {
-      id: `tx-${Date.now()}`,
       branch: laundryInForm.branch,
       type: 'LAUNDRY_IN',
       smallCount: cleanSmall,
@@ -445,21 +479,28 @@ export default function TowelManagement({ currentUser, branchesList }) {
       createdAt: new Date().toISOString()
     };
 
-    setTransactions([newTx, ...transactions]);
-    alert(`Towels received & balance settled successfully by ${currentUsername}!`);
-
-    setLaundryInForm({
-      branch: '',
-      smallReturnedClean: '', smallDamaged: '',
-      largeReturnedClean: '', largeDamaged: '',
-      notes: '', docImage: null
-    });
+    try {
+      await addDoc(collection(db, 'towelTransactions'), newTx);
+      alert(`Towels received & balance settled successfully by ${currentUsername}!`);
+      setLaundryInForm({
+        branch: '',
+        smallReturnedClean: '', smallDamaged: '',
+        largeReturnedClean: '', largeDamaged: '',
+        notes: '', docImage: null
+      });
+    } catch (err) {
+      alert('Error saving transaction: ' + err.message);
+    }
   };
 
-  const handleDeleteTransaction = (txId) => {
+  const handleDeleteTransaction = async (txId) => {
     if (!isAdmin) return alert('Delete permission is reserved for Administrators only.');
     if (window.confirm('Are you sure you want to delete this record? Balances will recalculate automatically.')) {
-      setTransactions((prev) => prev.filter((t) => t.id !== txId));
+      try {
+        await deleteDoc(doc(db, 'towelTransactions', txId));
+      } catch (err) {
+        alert('Error deleting transaction: ' + err.message);
+      }
     }
   };
 
@@ -840,7 +881,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
         <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 space-y-6">
           <div>
             <h3 className="text-base font-bold text-slate-900">Set Towel Costs &amp; Laundry Rates</h3>
-            <p className="text-xs text-slate-500">Define replacement penalties for lost towels and washing service rates.</p>
+            <p className="text-xs text-slate-500">Define replacement penalties for lost towels and washing service rates. These rates are shared with everyone on the system.</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -849,7 +890,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Unit Replacement Penalty Rate</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricing.smallPurchasePrice} onChange={(e) => setPricing({ ...pricing, smallPurchasePrice: Number(e.target.value) })} className="w-full border rounded-xl p-3 text-sm font-bold bg-white" />
+                  <input type="number" min="0" value={pricingForm.smallPurchasePrice} onChange={(e) => setPricingForm({ ...pricingForm, smallPurchasePrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
@@ -857,7 +898,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Laundry Wash Rate (Service Fee)</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricing.smallWashPrice} onChange={(e) => setPricing({ ...pricing, smallWashPrice: Number(e.target.value) })} className="w-full border rounded-xl p-3 text-sm font-bold bg-white" />
+                  <input type="number" min="0" value={pricingForm.smallWashPrice} onChange={(e) => setPricingForm({ ...pricingForm, smallWashPrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
@@ -868,7 +909,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Unit Replacement Penalty Rate</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricing.largePurchasePrice} onChange={(e) => setPricing({ ...pricing, largePurchasePrice: Number(e.target.value) })} className="w-full border rounded-xl p-3 text-sm font-bold bg-white" />
+                  <input type="number" min="0" value={pricingForm.largePurchasePrice} onChange={(e) => setPricingForm({ ...pricingForm, largePurchasePrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
@@ -876,12 +917,25 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Laundry Wash Rate (Service Fee)</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricing.largeWashPrice} onChange={(e) => setPricing({ ...pricing, largeWashPrice: Number(e.target.value) })} className="w-full border rounded-xl p-3 text-sm font-bold bg-white" />
+                  <input type="number" min="0" value={pricingForm.largeWashPrice} onChange={(e) => setPricingForm({ ...pricingForm, largeWashPrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
             </div>
           </div>
+
+          {isAdmin ? (
+            <button
+              type="button"
+              onClick={handleSavePricing}
+              disabled={isSavingPricing}
+              className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold px-6 py-3 rounded-xl text-xs transition-all cursor-pointer"
+            >
+              {isSavingPricing ? 'Saving...' : '💾 Save Pricing For Everyone'}
+            </button>
+          ) : (
+            <p className="text-[11px] text-slate-400 italic">Only Admin can edit these rates.</p>
+          )}
         </div>
       )}
 
