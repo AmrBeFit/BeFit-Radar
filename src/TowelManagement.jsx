@@ -666,9 +666,6 @@ export default function TowelManagement({ currentUser, branchesList }) {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-black text-white">🧺 Towel Management System</h1>
-            <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-extrabold px-2.5 py-1 rounded-full border border-emerald-500/30">
-              ☁️ Cloudinary Enabled
-            </span>
           </div>
           <p className="text-slate-300 text-xs font-semibold mt-1">
             Logged in user: <span className="text-amber-400 font-bold">{currentUsername}</span>

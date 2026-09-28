@@ -1598,12 +1598,15 @@ export default function Dashboard({ user, onLogout }) {
 
           {!isFacilityManager && !isFacilityMember && (
             <>
-              <button 
-                onClick={() => setActiveTab('attendance')}
-                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'attendance' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-              >
-                🕒 Attendance
-              </button>
+              {/* The CEO does not use the Attendance page */}
+              {!isCEO && (
+                <button 
+                  onClick={() => setActiveTab('attendance')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'attendance' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                >
+                  🕒 Attendance
+                </button>
+              )}
 
               <button 
                 onClick={() => setActiveTab('ceo_services')}
@@ -1939,7 +1942,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 2: ATTENDANCE */}
-      {activeTab === 'attendance' && !isFacilityManager && !isFacilityMember && (
+      {activeTab === 'attendance' && !isCEO && !isFacilityManager && !isFacilityMember && (
         <div className="space-y-6">
           <div className="max-w-xl mx-auto bg-white border border-slate-200 p-8 rounded-3xl shadow-sm space-y-6 text-center">
             <div className="space-y-2">
