@@ -10,7 +10,10 @@ import {
   deleteDoc,
   doc, 
   serverTimestamp,
-  getDocs
+  getDocs,
+  query,
+  where,
+  Timestamp
 } from 'firebase/firestore';
 
 // Excel export libraries
@@ -1107,7 +1110,10 @@ export default function Dashboard({ user, onLogout }) {
     };
 
     sendHeartbeat(); // immediately when the dashboard opens
-    const heartbeatInterval = setInterval(sendHeartbeat, 45000); // every 45 seconds
+    // Update: every heartbeat write is broadcast to every open device (everyone keeps a live "who's online" list),
+    // so with N people online the cost grows like N x N. Slowing this down to once every 3 minutes cuts that cost
+    // roughly 4x with barely any difference in how fresh the Online/Offline status looks.
+    const heartbeatInterval = setInterval(sendHeartbeat, 180000); // every 3 minutes
 
     return () => clearInterval(heartbeatInterval);
   }, [user?.id]);
@@ -1118,7 +1124,7 @@ export default function Dashboard({ user, onLogout }) {
     if (u.isOnline === false) return false; // explicitly logged out
     if (!u.lastActive) return false;
     const lastMs = u.lastActive.toDate ? u.lastActive.toDate().getTime() : new Date(u.lastActive).getTime();
-    return (nowTick - lastMs) < 90000; // last heartbeat within the last 90 seconds
+    return (nowTick - lastMs) < 240000; // last heartbeat within the last 4 minutes (matches the 3-minute heartbeat, plus a margin)
   };
 
   const handleForceLogout = async (targetUser) => {
@@ -1216,7 +1222,13 @@ export default function Dashboard({ user, onLogout }) {
       setCategories(list);
     });
 
-    const unsubAttendance = onSnapshot(collection(db, 'attendance'), (snapshot) => {
+    // Update: only the last 2 months load into the app - older attendance keeps existing in Firestore
+    // (nothing is deleted), it just is not pulled into every device's live listener anymore. This keeps the
+    // app fast and cheap to run as attendance history grows. Full-year exports can still be added later if needed.
+    const twoMonthsAgo = new Date();
+    twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+    const attendanceQuery = query(collection(db, 'attendance'), where('checkInTime', '>=', Timestamp.fromDate(twoMonthsAgo)));
+    const unsubAttendance = onSnapshot(attendanceQuery, (snapshot) => {
       setAttendanceRecords(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
     });
 
