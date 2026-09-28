@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+serviceAccountKey*.json
+backup-*/
+migrate-to-auth.*
+backup-firestore.*
+functions/node_modules
+.firebase/

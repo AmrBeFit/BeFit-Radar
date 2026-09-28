@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { db } from './firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { db, auth } from './firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 
 export default function Login({ onLoginSuccess }) {
   const [identifier, setIdentifier] = useState('');
@@ -12,58 +13,54 @@ export default function Login({ onLoginSuccess }) {
     e.preventDefault();
     setError('');
 
-    const cleanInput = identifier.trim().toLowerCase();
+    const usernameLower = identifier.trim().toLowerCase();
     const cleanPassword = password.trim();
 
-    if (!cleanInput || !cleanPassword) {
-      setError('Please enter both username/email and password.');
+    if (!usernameLower || !cleanPassword) {
+      setError('Please enter both username and password.');
       return;
     }
 
     setLoading(true);
 
     try {
-      console.log("🔍 Searching for user:", cleanInput);
+      // Step 1: turn the username the person typed into the synthetic email
+      // Firebase Authentication actually needs, via the public usernameIndex lookup.
+      const indexSnap = await getDoc(doc(db, 'usernameIndex', usernameLower));
 
-      let foundUser = null;
-      const collectionsToTry = ['Users', 'users'];
-
-      for (const colName of collectionsToTry) {
-        if (foundUser) break;
-
-        const colRef = collection(db, colName);
-        const snap = await getDocs(colRef);
-        
-        snap.forEach(doc => {
-          const data = doc.data();
-
-          const email = String(data.email || '').trim().toLowerCase();
-          const username = String(data.username || '').trim().toLowerCase();
-          const displayName = String(data.displayName || '').trim().toLowerCase();
-
-          if (cleanInput === email || cleanInput === username || cleanInput === displayName) {
-            foundUser = { id: doc.id, ...data };
-          }
-        });
-      }
-
-      if (!foundUser) {
+      if (!indexSnap.exists()) {
         setError('User not found. Please check your credentials.');
+        setLoading(false);
         return;
       }
 
-      const dbPassword = String(foundUser.passwordText || foundUser.password || '').trim();
+      const { email } = indexSnap.data();
 
-      if (dbPassword === cleanPassword) {
-        console.log("✅ Logged in successfully:", foundUser);
-        onLoginSuccess(foundUser);
-      } else {
-        setError('Incorrect password. Please try again.');
+      // Step 2: the real, secure sign-in - Firebase verifies the password itself,
+      // this app never sees or compares a stored password anymore.
+      const credential = await signInWithEmailAndPassword(auth, email, cleanPassword);
+
+      // Step 3: load this account's profile (role, branches, phone, etc.)
+      const profileSnap = await getDoc(doc(db, 'users', credential.user.uid));
+
+      if (!profileSnap.exists()) {
+        setError('Your account was authenticated but no profile was found. Please contact an Admin.');
+        setLoading(false);
+        return;
       }
 
+      const profile = { id: credential.user.uid, ...profileSnap.data() };
+      onLoginSuccess(profile);
+
     } catch (err) {
-      console.error('❌ Database error:', err);
-      setError('Database Error: ' + err.message);
+      console.error('Login error:', err.code, err.message);
+      if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+        setError('Incorrect username or password. Please try again.');
+      } else if (err.code === 'auth/too-many-requests') {
+        setError('Too many attempts. Please wait a moment and try again.');
+      } else {
+        setError('Login error: ' + err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -87,14 +84,14 @@ export default function Login({ onLoginSuccess }) {
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
             <label className="block text-xs font-semibold text-gray-600 mb-1">
-              Username or Email
+              Username
             </label>
             <input
               type="text"
               required
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
-              placeholder="Enter username or email"
+              placeholder="Enter your username"
               className="w-full p-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm focus:outline-none"
             />
           </div>

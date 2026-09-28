@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import Login from './Login';
 import Dashboard from './Dashboard';
-import { db } from './firebase';
-import { collection, onSnapshot, addDoc, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
+import PushNotificationSetup from './PushNotificationSetup';
+import { db, auth } from './firebase';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { collection, onSnapshot, addDoc, query, where, getDocs, getDoc, doc, updateDoc } from 'firebase/firestore';
 
 const MAX_SESSIONS = 5;
 
@@ -631,27 +633,61 @@ export function LiveAttendancePortal({
 // 5. Main App Component
 export default function App() {
   const [user, setUser] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
 
+  // Update: session state now comes from Firebase Auth itself (it persists the
+  // session securely on its own - no more storing the profile in localStorage).
   useEffect(() => {
-    const savedUser = localStorage.getItem('befit_user');
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!firebaseUser) {
+        setUser(null);
+        setCheckingSession(false);
+        return;
+      }
+
+      try {
+        const profileSnap = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (profileSnap.exists()) {
+          setUser({ id: firebaseUser.uid, ...profileSnap.data() });
+        } else {
+          setUser(null);
+        }
+      } catch (err) {
+        console.error('Error loading profile:', err);
+        setUser(null);
+      } finally {
+        setCheckingSession(false);
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const handleLoginSuccess = (userData) => {
-    localStorage.setItem('befit_user', JSON.stringify(userData));
-    setUser(userData);
+  const handleLoginSuccess = (profile) => {
+    setUser(profile);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('befit_user');
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error('Sign out error:', err);
+    }
     setUser(null);
   };
+
+  if (checkingSession) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '13px' }}>
+        Loading...
+      </div>
+    );
+  }
 
   return (
     <>
       <CEONotificationListener user={user} />
+      <PushNotificationSetup user={user} />
 
       {!user ? (
         <Login onLoginSuccess={handleLoginSuccess} />

@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { db } from './firebase';
+import { db, auth, functions } from './firebase';
+import { updatePassword } from 'firebase/auth';
+import { httpsCallable } from 'firebase/functions';
 import { 
   collection, 
   onSnapshot, 
@@ -700,16 +702,15 @@ export default function Dashboard({ user, onLogout }) {
 
     setLoading(true);
     try {
-      await addDoc(collection(db, 'users'), {
+      // Update: account creation now goes through a Cloud Function, which creates a
+      // real Firebase Auth account (password is never stored in Firestore anymore).
+      const createUserAccount = httpsCallable(functions, 'createUserAccount');
+      await createUserAccount({
         username: newUsername.trim(),
         password: newPassword.trim(),
         phone: newUserPhone.trim() || '',
         role: targetRole,
-        assignedBranches: newUserBranches,
-        createdBy: user?.id || null,
-        createdByUsername: user?.username || '',
-        mustChangePassword: true,
-        createdAt: serverTimestamp()
+        assignedBranches: newUserBranches
       });
 
       setNewUsername('');
@@ -719,10 +720,18 @@ export default function Dashboard({ user, onLogout }) {
       setNewUserBranches([]);
       alert('User added successfully!');
     } catch (err) {
-      alert('Error adding user: ' + err.message);
+      alert('Error adding user: ' + (err.message || err));
     } finally {
       setLoading(false);
     }
+  };
+
+  // Generates a random temporary password (no look-alike characters like 0/O or 1/l)
+  const generateTempPassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    const bytes = new Uint32Array(8);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => chars[b % chars.length]).join('');
   };
 
   const handleUpdateUser = async (e) => {
@@ -747,29 +756,48 @@ export default function Dashboard({ user, onLogout }) {
       return alert("Please assign at least one branch to this account.");
     }
 
+    // Validate first, so we never half-apply an edit (profile saved but password rejected)
+    if (isAdmin && editPassword.trim() && editPassword.trim().length < 6) {
+      return alert("The new password must be at least 6 characters.");
+    }
+
     try {
+      // Note: the username is the account's login identity (linked to its Firebase Auth account
+      // and the login lookup), so it is intentionally not editable here.
       const updatePayload = {
-        username: editUsername.trim(),
         phone: editUserPhone.trim(),
-        role: editUserRole,
         assignedBranches: editUserBranches
       };
 
-      // Update: only Admin is allowed to view/change another account's password from here.
-      // Everyone else can only change their own password via the "Change Password" button.
-      if (isAdmin && editPassword.trim()) {
-        updatePayload.password = editPassword.trim();
-        // If Admin changes someone else's password, force that user to set a new one on next login
-        if (editingUser.id !== user?.id) {
-          updatePayload.mustChangePassword = true;
-        }
+      await updateDoc(doc(db, 'users', editingUser.id), updatePayload);
+
+      // Update: a role change updates the Firebase Auth custom claim too, so it
+      // has to go through this Cloud Function instead of a plain Firestore write.
+      if (isAdmin && editUserRole !== editingUser.role) {
+        const updateUserRole = httpsCallable(functions, 'updateUserRole');
+        await updateUserRole({ targetUserId: editingUser.id, newRole: editUserRole });
       }
 
-      await updateDoc(doc(db, 'users', editingUser.id), updatePayload);
-      alert('User updated successfully!');
+      // Update: only Admin can set a NEW password for someone else's account, and it
+      // now goes through Firebase Auth via this Cloud Function - never stored in Firestore.
+      let passwordWasReset = false;
+      if (isAdmin && editPassword.trim()) {
+        const adminResetPassword = httpsCallable(functions, 'adminResetPassword');
+        await adminResetPassword({ targetUserId: editingUser.id, newPassword: editPassword.trim() });
+        passwordWasReset = true;
+      }
+
+      if (passwordWasReset) {
+        const forcedNote = editingUser.id !== user?.id
+          ? '\nThey will be asked to choose their own password at their next login.'
+          : '';
+        alert(`User updated successfully!\n\nNew temporary password for "${editUsername}":\n${editPassword.trim()}\n\nShare it with the user now - it cannot be viewed again later.${forcedNote}`);
+      } else {
+        alert('User updated successfully!');
+      }
       setEditingUser(null);
     } catch (err) {
-      alert('Error updating user: ' + err.message);
+      alert('Error updating user: ' + (err.message || err));
     }
   };
 
@@ -791,10 +819,13 @@ export default function Dashboard({ user, onLogout }) {
 
     if (window.confirm(`Are you sure you want to delete user "${targetUser.username}"?`)) {
       try {
-        await deleteDoc(doc(db, 'users', targetUser.id));
+        // Update: deletes the real Auth account together with the Firestore profile,
+        // so a deleted account can never still log in.
+        const deleteUserAccount = httpsCallable(functions, 'deleteUserAccount');
+        await deleteUserAccount({ targetUserId: targetUser.id });
         alert('User deleted successfully!');
       } catch (err) {
-        alert('Error deleting user: ' + err.message);
+        alert('Error deleting user: ' + (err.message || err));
       }
     }
   };
@@ -1014,47 +1045,51 @@ export default function Dashboard({ user, onLogout }) {
     onLogout();
   };
 
-  // Update: mandatory password change after first login
+  // Update: mandatory password change after first login - now updates the real Firebase Auth password
   const handleForcedPasswordChange = async (e) => {
     e.preventDefault();
-    if (!forcedNewPassword.trim() || forcedNewPassword.trim().length < 4) {
-      return alert('Please enter a new password of at least 4 characters.');
+    if (!forcedNewPassword.trim() || forcedNewPassword.trim().length < 6) {
+      return alert('Please enter a new password of at least 6 characters.');
     }
     if (forcedNewPassword.trim() !== forcedConfirmPassword.trim()) {
       return alert('Password and confirmation do not match.');
     }
     try {
-      await updateDoc(doc(db, 'users', user.id), {
-        password: forcedNewPassword.trim(),
-        mustChangePassword: false
-      });
+      await updatePassword(auth.currentUser, forcedNewPassword.trim());
+      await updateDoc(doc(db, 'users', user.id), { mustChangePassword: false });
       setForcedNewPassword('');
       setForcedConfirmPassword('');
       setMustChangePassword(false);
     } catch (err) {
-      alert('An error occurred while updating the password: ' + err.message);
+      if (err.code === 'auth/requires-recent-login') {
+        alert('For security, please log out and log back in, then try changing your password again.');
+      } else {
+        alert('An error occurred while updating the password: ' + err.message);
+      }
     }
   };
 
-  // Update: self-service password change - any account can change its own password anytime without seeing the old one
+  // Update: self-service password change - now updates the real Firebase Auth password
   const handleSelfPasswordChange = async (e) => {
     e.preventDefault();
-    if (!selfNewPassword.trim() || selfNewPassword.trim().length < 4) {
-      return alert('Please enter a new password of at least 4 characters.');
+    if (!selfNewPassword.trim() || selfNewPassword.trim().length < 6) {
+      return alert('Please enter a new password of at least 6 characters.');
     }
     if (selfNewPassword.trim() !== selfConfirmPassword.trim()) {
       return alert('Password and confirmation do not match.');
     }
     try {
-      await updateDoc(doc(db, 'users', user.id), {
-        password: selfNewPassword.trim()
-      });
+      await updatePassword(auth.currentUser, selfNewPassword.trim());
       alert('Password changed successfully!');
       setSelfNewPassword('');
       setSelfConfirmPassword('');
       setShowSelfPasswordModal(false);
     } catch (err) {
-      alert('An error occurred while updating the password: ' + err.message);
+      if (err.code === 'auth/requires-recent-login') {
+        alert('For security, please log out and log back in, then try changing your password again.');
+      } else {
+        alert('An error occurred while updating the password: ' + err.message);
+      }
     }
   };
 
@@ -2769,19 +2804,30 @@ export default function Dashboard({ user, onLogout }) {
             </div>
             <form onSubmit={handleUpdateUser} className="space-y-3">
               <div>
-                <label className="block text-xs font-bold text-slate-600 mb-1">Username</label>
-                <input type="text" value={editUsername} onChange={(e) => setEditUsername(e.target.value)} required className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs" />
+                <label className="block text-xs font-bold text-slate-600 mb-1">Username <span className="font-normal text-slate-400">(cannot be changed)</span></label>
+                <input type="text" value={editUsername} readOnly className="w-full p-2.5 bg-slate-100 text-slate-500 border rounded-xl text-xs cursor-not-allowed" />
               </div>
               {isAdmin ? (
                 <div>
-                  <label className="block text-xs font-bold text-slate-600 mb-1">Password</label>
-                  <input 
-                    type="text" 
-                    value={editPassword} 
-                    onChange={(e) => setEditPassword(e.target.value)} 
-                    required 
-                    className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs" 
-                  />
+                  <label className="block text-xs font-bold text-slate-600 mb-1">
+                    New Password <span className="font-normal text-slate-400">(leave blank to keep the current password, min 6 characters)</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      value={editPassword} 
+                      onChange={(e) => setEditPassword(e.target.value)} 
+                      placeholder="Only fill this to reset the password"
+                      className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs" 
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setEditPassword(generateTempPassword())}
+                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-xl text-[11px] font-bold text-slate-700 whitespace-nowrap cursor-pointer"
+                    >
+                      🎲 Generate
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <p className="text-[10px] text-slate-400 italic">
