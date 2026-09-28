@@ -19,6 +19,12 @@ import { saveAs } from 'file-saver';
 
 // Import Towel Management Component
 import TowelManagement from './TowelManagement';
+import MultiSelectFilter from './MultiSelectFilter';
+import SchedulePlanner, { useAttendancePlans, MyScheduleCard } from './SchedulePlanner';
+import MaintenanceReport from './MaintenanceReport';
+
+// value used by the "Assigned to" filter for requests nobody has been assigned to
+const UNASSIGNED_FILTER = '__unassigned__';
 
 // Update: device/browser tracking helpers.
 // Note: browsers never expose a real hardware "serial number" for privacy/security reasons - no web API can read one.
@@ -61,6 +67,50 @@ const parseDeviceInfo = () => {
   return { deviceType, browser, os, userAgent: ua };
 };
 
+// Checkout reminder: after this many hours checked in without a check-out, the employee is reminded
+// (notification + vibration + sound + a pop-up). Set REPEAT to 0 for a single reminder instead of one every hour.
+const CHECKOUT_REMINDER_AFTER_HOURS = 7;
+const CHECKOUT_REMINDER_REPEAT_MINUTES = 60;
+
+// Shows a system notification. Android browsers only allow it through the service worker,
+// desktop browsers also allow the plain Notification object, so try both.
+const showLocalNotification = async (title, options) => {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+    if ('serviceWorker' in navigator) {
+      let reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) {
+        // no service worker yet (e.g. push is not set up): register the tiny one that only shows notifications
+        try {
+          await navigator.serviceWorker.register('/notification-sw.js');
+          reg = await navigator.serviceWorker.ready;
+        } catch (e) {
+          reg = null;
+        }
+      }
+      if (reg && reg.showNotification) {
+        await reg.showNotification(title, options);
+        return;
+      }
+    }
+    new Notification(title, options);
+  } catch (e) {
+    // notifications are a bonus - the pop-up, sound and vibration still work
+  }
+};
+
+// "1h 20m" between two Firestore timestamps ('' when either is missing)
+const formatDuration = (start, end) => {
+  const s = start?.toMillis ? start.toMillis() : null;
+  const e = end?.toMillis ? end.toMillis() : null;
+  if (s == null || e == null || e < s) return '';
+  const mins = Math.round((e - s) / 60000);
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+};
+
 export default function Dashboard({ user, onLogout }) {
   // Navigation Tabs
   const [activeTab, setActiveTab] = useState('requests');
@@ -101,6 +151,8 @@ export default function Dashboard({ user, onLogout }) {
   // Assignment Modal State
   const [assignModalReq, setAssignModalReq] = useState(null);
   const [selectedAssigneeId, setSelectedAssigneeId] = useState('');
+  const [assignTargetStatus, setAssignTargetStatus] = useState('In Progress'); // the status the assign pop-up will set
+  const [maintView, setMaintView] = useState('list'); // 'list' | 'report' (who did what)
 
   // CEO Request Form States
   const [ceoServiceType, setCeoServiceType] = useState('Drink');
@@ -153,12 +205,13 @@ export default function Dashboard({ user, onLogout }) {
   // Reports Filter States
   const [reportStartDate, setReportStartDate] = useState('');
   const [reportEndDate, setReportEndDate] = useState('');
-  const [reportUserFilter, setReportUserFilter] = useState('All');
-  const [reportBranchFilter, setReportBranchFilter] = useState('All');
+  const [reportUserFilters, setReportUserFilters] = useState([]);     // empty = all users
+  const [reportBranchFilters, setReportBranchFilters] = useState([]); // empty = all branches
 
   // Filter & Sort states (Requests)
   const [statusFilter, setStatusFilter] = useState('All');
   const [branchFilter, setBranchFilter] = useState('All');
+  const [assigneeFilters, setAssigneeFilters] = useState([]); // empty = everyone
   const [sortOrder, setSortOrder] = useState('desc');
 
   // Sort states (Users table)
@@ -177,7 +230,12 @@ export default function Dashboard({ user, onLogout }) {
   // User identity & Role Checks
   const currentUserIdentifier = user?.username || user?.displayName || user?.email || '';
   const userRole = user?.role || 'User';
-  const assignedBranches = Array.isArray(user?.assignedBranches) ? user.assignedBranches : [];
+  // Branches come from the live profile, so a change made by a manager or an Admin applies immediately
+  // (no need to log out and in again). The key keeps the array stable between the frequent presence updates.
+  const liveProfile = usersList.find(u => u.id === user?.id) || user;
+  const branchesKey = Array.isArray(liveProfile?.assignedBranches) ? liveProfile.assignedBranches.join('|') : '';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const assignedBranches = useMemo(() => (Array.isArray(liveProfile?.assignedBranches) ? liveProfile.assignedBranches : []), [branchesKey]);
 
   const isAdmin = userRole === 'Admin';
   const isCEO = userRole === 'CEO';
@@ -193,11 +251,16 @@ export default function Dashboard({ user, onLogout }) {
   // HR can view attendance reports for all branches (but not manage users)
   // Update: Attendance Reports access now matches the permission table exactly - Admin, HR, Branch Manager, Supervisor, User only (CEO no longer included)
   const canViewReports = isAdmin || isBranchManager || isSupervisor || isHR;
+  // The Schedule tab (planned shifts + plan-vs-actual report): those who plan it or need to see it
+  const canSeeSchedule = isAdmin || isCEO || isHR || isBranchManager || isSupervisor;
   // The CEO can no longer add, edit or delete users - only Admin, Branch Manager and Facility Manager can
   const canManageUsers = isAdmin || isBranchManager || isFacilityManager;
 
-  const facilityMembers = useMemo(() => {
-    return usersList.filter(u => u.role === 'Facility Member');
+  // People a maintenance task can be assigned to: Facility Members and Facility Managers
+  const taskAssignees = useMemo(() => {
+    return usersList
+      .filter(u => u.role === 'Facility Member' || u.role === 'Facility Manager')
+      .sort((a, b) => (a.username || '').localeCompare(b.username || ''));
   }, [usersList]);
 
   const branchesNamesList = useMemo(() => {
@@ -612,13 +675,23 @@ export default function Dashboard({ user, onLogout }) {
       }
     }
 
-    if (isFacilityManager && newStatus === 'In Progress') {
+    // The Facility Manager and the Admin must say WHO carries out the task:
+    //  - when the request goes "In Progress"
+    //  - when it is completed and nobody was assigned yet
+    if ((isFacilityManager || isAdmin) && (newStatus === 'In Progress' || (newStatus === 'Completed' && !req.assignedTo))) {
+      setAssignTargetStatus(newStatus);
+      setSelectedAssigneeId('');
       setAssignModalReq(req);
       return;
     }
 
     try {
-      let updatePayload = { status: newStatus };
+      const updatePayload = {
+        status: newStatus,
+        ...(newStatus === 'Completed'
+          ? { completedAt: serverTimestamp(), completedBy: currentUserIdentifier }
+          : (req.completedAt ? { completedAt: null, completedBy: null } : {})) // re-opened: clear the completion
+      };
 
       await updateDoc(doc(db, 'requests', req.id), updatePayload);
       await addDoc(collection(db, 'logs'), {
@@ -636,24 +709,32 @@ export default function Dashboard({ user, onLogout }) {
 
   const handleConfirmAssignment = async () => {
     if (!assignModalReq) return;
-    if (!selectedAssigneeId) return alert("Please select a team member!");
+    if (!selectedAssigneeId) return alert("Please choose who is in charge of this task!");
 
-    const selectedMember = facilityMembers.find(m => m.id === selectedAssigneeId);
-    if (!selectedMember) return alert("Invalid member selected.");
+    const selectedMember = taskAssignees.find(m => m.id === selectedAssigneeId);
+    if (!selectedMember) return alert("Invalid selection.");
+
+    const targetStatus = assignTargetStatus;
 
     try {
-      await updateDoc(doc(db, 'requests', assignModalReq.id), {
-        status: 'In Progress',
+      const payload = {
+        status: targetStatus,
         assignedTo: selectedMember.username,
+        assignedToId: selectedMember.id,
         assignedToPhone: selectedMember.phone || 'N/A',
-        assignedAt: serverTimestamp()
-      });
+        ...(targetStatus === 'Completed'
+          // completed straight away: we do not know when the work started, so no "assigned at" is invented
+          ? { completedAt: serverTimestamp(), completedBy: currentUserIdentifier }
+          : { assignedAt: serverTimestamp(), completedAt: null, completedBy: null })
+      };
+
+      await updateDoc(doc(db, 'requests', assignModalReq.id), payload);
 
       await addDoc(collection(db, 'logs'), {
         type: 'STATUS_CHANGE',
         title: assignModalReq.title || 'Maintenance Request',
         fromStatus: assignModalReq.status || 'New',
-        toStatus: 'In Progress',
+        toStatus: targetStatus,
         assignedTo: selectedMember.username,
         performedBy: currentUserIdentifier,
         timestamp: serverTimestamp()
@@ -661,9 +742,11 @@ export default function Dashboard({ user, onLogout }) {
 
       setAssignModalReq(null);
       setSelectedAssigneeId('');
-      alert(`Request assigned to ${selectedMember.username}!`);
+      alert(targetStatus === 'Completed'
+        ? `Request completed by ${selectedMember.username}!`
+        : `Request assigned to ${selectedMember.username}!`);
     } catch (err) {
-      alert('Error assigning request: ' + err.message);
+      alert('Error updating the request: ' + err.message);
     }
   };
 
@@ -850,16 +933,24 @@ export default function Dashboard({ user, onLogout }) {
 
   // CAMERA LOGIC
   const startLiveCamera = async (mode = 'request') => {
-    if ((mode === 'checkin' || mode === 'checkout') && !attendanceBranch) {
+    if (mode === 'checkin' && openAttendance) {
+      return alert("You are already checked in. Please check out first.");
+    }
+    if (mode === 'checkout' && !openAttendance) {
+      return alert("No active check-in found. Please check in first.");
+    }
+    // The branch is chosen when CHECKING IN (a new session may be at the same branch or another assigned one).
+    // Checking out simply closes the open session, so no branch needs to be selected for it.
+    if (mode === 'checkin' && !attendanceBranch) {
       return alert("Please select a branch first.");
     }
     if (
-      (mode === 'checkin' || mode === 'checkout') &&
+      mode === 'checkin' &&
       !isAdmin && !isFacilityManager &&
       assignedBranches.length > 0 &&
       !assignedBranches.includes(attendanceBranch)
     ) {
-      return alert("You can only check in/out from a branch assigned to you.");
+      return alert("You can only check in at a branch assigned to you.");
     }
     setCameraMode(mode);
     setShowWebcam(true);
@@ -1146,6 +1237,29 @@ export default function Dashboard({ user, onLogout }) {
     };
   }, []);
 
+  // ACTIVITY LOG BELL (header icon): the log is hidden until the bell is clicked.
+  // The red badge counts entries made by OTHER people since the bell was last opened
+  // (the "last opened" time is remembered per user in this browser).
+  const logsSeenKey = `befit_logs_seen_${user?.id || 'anon'}`;
+  const [showLogsPanel, setShowLogsPanel] = useState(false);
+  const [logsSeenAt, setLogsSeenAt] = useState(() => {
+    try { return Number(localStorage.getItem(`befit_logs_seen_${user?.id || 'anon'}`)) || 0; } catch (e) { return 0; }
+  });
+
+  const unreadLogsCount = useMemo(() => {
+    return activityLogs.filter((l) => {
+      const t = l.timestamp?.toMillis ? l.timestamp.toMillis() : 0;
+      return t > logsSeenAt && l.performedBy !== currentUserIdentifier;
+    }).length;
+  }, [activityLogs, logsSeenAt, currentUserIdentifier]);
+
+  const openLogsPanel = () => {
+    setShowLogsPanel(true);
+    const now = Date.now();
+    setLogsSeenAt(now);
+    try { localStorage.setItem(logsSeenKey, String(now)); } catch (e) { /* storage unavailable - the badge simply resets on reload */ }
+  };
+
   // ROLE-BASED MAINTENANCE REQUESTS FILTER
   const filteredRequests = useMemo(() => {
     let result = [...requests];
@@ -1167,9 +1281,35 @@ export default function Dashboard({ user, onLogout }) {
 
     if (statusFilter !== 'All') result = result.filter(r => (r.status || 'New') === statusFilter);
     if (branchFilter !== 'All') result = result.filter(r => r.branch === branchFilter);
+    if (assigneeFilters.length > 0) result = result.filter(r => assigneeFilters.includes(r.assignedTo || UNASSIGNED_FILTER));
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
-  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, sortOrder, isAdmin, showArchivedOnly]);
+  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, assigneeFilters, sortOrder, isAdmin, showArchivedOnly]);
+
+  // Options of the "Assigned to" filter: everyone who can be assigned, plus anyone already on a request
+  const assigneeFilterOptions = useMemo(() => {
+    const names = new Set(taskAssignees.map(u => u.username));
+    requests.forEach(r => { if (r.assignedTo) names.add(r.assignedTo); });
+    return [
+      { value: UNASSIGNED_FILTER, label: '— Unassigned —' },
+      ...[...names].filter(Boolean).sort((a, b) => a.localeCompare(b)).map(n => ({ value: n, label: n }))
+    ];
+  }, [taskAssignees, requests]);
+
+  // the "who did what" maintenance report: Admin, Facility Manager and CEO
+  const canSeeMaintReport = isAdmin || isFacilityManager || isCEO;
+
+  // The report follows the same branch rule as the requests list: an account with assigned branches
+  // (e.g. a Facility Manager) only reports on those branches; Admin, CEO and accounts with none see everything.
+  const reportUnrestricted = isAdmin || isCEO || assignedBranches.length === 0;
+  const maintReportRequests = useMemo(
+    () => (reportUnrestricted ? requests : requests.filter(r => assignedBranches.includes(r.branch))),
+    [requests, reportUnrestricted, assignedBranches]
+  );
+  const maintReportBranches = useMemo(
+    () => (reportUnrestricted ? branches : branches.filter(b => assignedBranches.includes(b.name))),
+    [branches, reportUnrestricted, assignedBranches]
+  );
 
   // ROLE-BASED ATTENDANCE REPORT FILTER
   // Update: map of username -> role, used to enforce hierarchy visibility in Attendance Reports
@@ -1237,11 +1377,32 @@ export default function Dashboard({ user, onLogout }) {
       .sort((a, b) => (a.username || '').localeCompare(b.username || ''));
   }, [hierarchyFilteredAttendance, usersList, currentUserIdentifier]);
 
+  // Options for the report filters. Admin and HR can pick from EVERY account and EVERY branch, even ones with no
+  // attendance yet; Branch Managers and Supervisors only from the people and branches inside their own scope.
+  const reportUserOptions = useMemo(() => {
+    const source = (isAdmin || isHR) ? usersList : visibleReportUsers;
+    const seen = new Set();
+    const result = [];
+    source.forEach(u => {
+      if (!u.username || seen.has(u.username)) return;
+      seen.add(u.username);
+      result.push({ value: u.username, label: u.username, hint: u.role || '' });
+    });
+    return result.sort((a, b) => a.label.localeCompare(b.label));
+  }, [isAdmin, isHR, usersList, visibleReportUsers]);
+
+  const reportBranchOptions = useMemo(() => {
+    const source = (isAdmin || isHR) ? branches : visibleBranchesForUser;
+    return source
+      .map(b => ({ value: b.name, label: b.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [isAdmin, isHR, branches, visibleBranchesForUser]);
+
   const filteredAttendanceReports = useMemo(() => {
     let list = [...hierarchyFilteredAttendance];
 
-    if (reportUserFilter !== 'All') list = list.filter(a => a.username === reportUserFilter);
-    if (reportBranchFilter !== 'All') list = list.filter(a => a.branch === reportBranchFilter);
+    if (reportUserFilters.length > 0) list = list.filter(a => reportUserFilters.includes(a.username));
+    if (reportBranchFilters.length > 0) list = list.filter(a => reportBranchFilters.includes(a.branch));
 
     if (reportStartDate) {
       const start = new Date(reportStartDate).getTime();
@@ -1260,7 +1421,7 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     return list.sort((a, b) => (b.checkInTime?.seconds || 0) - (a.checkInTime?.seconds || 0));
-  }, [hierarchyFilteredAttendance, reportUserFilter, reportBranchFilter, reportStartDate, reportEndDate]);
+  }, [hierarchyFilteredAttendance, reportUserFilters, reportBranchFilters, reportStartDate, reportEndDate]);
 
   const pendingCeoRequestsForUser = useMemo(() => {
     let list = [...ceoRequests];
@@ -1272,10 +1433,121 @@ export default function Dashboard({ user, onLogout }) {
     return list;
   }, [ceoRequests, isAdmin, showArchivedOnly]);
 
-  const todayUserAttendance = useMemo(() => {
+  // Today's sessions for the current user, newest first. After a check-out the employee can check in
+  // again (same branch or another assigned one), so a day can hold several sessions.
+  const todaySessions = useMemo(() => {
     const todayStr = new Date().toISOString().split('T')[0];
-    return attendanceRecords.find(a => a.username === currentUserIdentifier && a.dateStr === todayStr);
+    const startedAt = (r) => (r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now());
+    return attendanceRecords
+      .filter(a => a.username === currentUserIdentifier && a.dateStr === todayStr)
+      .sort((a, b) => startedAt(b) - startedAt(a));
   }, [attendanceRecords, currentUserIdentifier]);
+
+  // the session that is still open (checked in, not checked out yet) - decides which button is available
+  const openAttendance = todaySessions.find(a => !a.checkOutTime) || null;
+  // the most recent session - shown in the status card
+  const todayUserAttendance = todaySessions[0] || null;
+
+  // The attendance roster (planned shifts) this account is allowed to read
+  const attendancePlans = useAttendancePlans({
+    enabled: !isFacilityManager && !isFacilityMember,
+    role: userRole,
+    userId: user?.id
+  });
+
+  // "My Sessions" list in the attendance portal: the employee's own check-ins, today or over the last 7 days
+  const [showWeekSessions, setShowWeekSessions] = useState(false);
+
+  const mySessionsList = useMemo(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const startedAt = (r) => (r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now());
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return attendanceRecords
+      .filter(a => a.username === currentUserIdentifier && !a.isArchived)
+      .filter(a => (showWeekSessions ? startedAt(a) >= weekAgo : a.dateStr === todayStr))
+      .sort((a, b) => startedAt(b) - startedAt(a));
+  }, [attendanceRecords, currentUserIdentifier, showWeekSessions]);
+
+  // ---- Branch in the attendance portal ----
+  //  * while a session is open the branch is LOCKED to the one used at check-in (check-out cannot change it)
+  //  * with no open session (before the first check-in, or after a check-out) nothing is pre-selected:
+  //    the list shows "Select Branch..." and the employee must choose the branch first
+  useEffect(() => {
+    setAttendanceBranch(openAttendance ? (openAttendance.branch || '') : '');
+  }, [openAttendance?.id]);
+
+  // ---- Checkout reminder ----
+  const [checkoutReminder, setCheckoutReminder] = useState(null);
+
+  // the employee's newest session that is still open (independent of the date, so a shift that
+  // crosses midnight is still found)
+  const myOpenSession = useMemo(() => {
+    const startedAt = (r) => (r.checkInTime?.toMillis ? r.checkInTime.toMillis() : 0);
+    return attendanceRecords
+      .filter(a => a.username === currentUserIdentifier && !a.checkOutTime && !a.isArchived && startedAt(a) > 0)
+      .sort((a, b) => startedAt(b) - startedAt(a))[0] || null;
+  }, [attendanceRecords, currentUserIdentifier]);
+
+  useEffect(() => {
+    if (!myOpenSession) {
+      setCheckoutReminder(null);
+      return;
+    }
+
+    const checkInMs = myOpenSession.checkInTime.toMillis();
+    const storageKey = `befit_checkout_reminder_${myOpenSession.id}`;
+
+    const checkNow = () => {
+      const elapsed = Date.now() - checkInMs;
+      if (elapsed < CHECKOUT_REMINDER_AFTER_HOURS * 3600000) return;
+      if (elapsed > 24 * 3600000) return; // an old forgotten session - do not nag about it
+
+      let lastReminded = 0;
+      try { lastReminded = Number(localStorage.getItem(storageKey)) || 0; } catch (e) { /* ignore */ }
+      if (lastReminded) {
+        if (!CHECKOUT_REMINDER_REPEAT_MINUTES) return; // single reminder mode
+        if (Date.now() - lastReminded < CHECKOUT_REMINDER_REPEAT_MINUTES * 60000) return;
+      }
+      try { localStorage.setItem(storageKey, String(Date.now())); } catch (e) { /* ignore */ }
+
+      const mins = Math.floor(elapsed / 60000);
+      const elapsedText = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+      const branchName = myOpenSession.branch || 'your branch';
+
+      setCheckoutReminder({ branch: branchName, elapsedText });
+
+      try { if ('vibrate' in navigator) navigator.vibrate([500, 200, 500, 200, 500, 200, 500]); } catch (e) { /* ignore */ }
+      try {
+        const sound = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+        sound.play().catch(() => {});
+      } catch (e) { /* ignore */ }
+      showLocalNotification("⏰ Don't forget to check out", {
+        body: `You have been checked in at ${branchName} for ${elapsedText}. If your shift is over, please check out.`,
+        tag: 'checkout-reminder',
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [500, 200, 500, 200, 500, 200, 500]
+      });
+    };
+
+    checkNow();
+    const timer = setInterval(checkNow, 30000);
+    const onVisible = () => { if (document.visibilityState === 'visible') checkNow(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', checkNow);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', checkNow);
+    };
+  }, [myOpenSession?.id]);
+
+  const mySessionsCheckOuts = mySessionsList.filter(s => s.checkOutTime).length;
+  const mySessionsTotalMin = mySessionsList.reduce((sum, s) => {
+    const a = s.checkInTime?.toMillis ? s.checkInTime.toMillis() : null;
+    const b = s.checkOutTime?.toMillis ? s.checkOutTime.toMillis() : null;
+    return a != null && b != null && b >= a ? sum + Math.round((b - a) / 60000) : sum;
+  }, 0);
 
   // EXPORT TO EXCEL FUNCTION
   const exportAttendanceToExcel = async () => {
@@ -1482,6 +1754,30 @@ export default function Dashboard({ user, onLogout }) {
               </h3>
               <button onClick={stopLiveCamera} className="text-slate-400 hover:text-slate-700 font-bold text-sm">✕</button>
             </div>
+
+            {/* Friendly selfie rules, shown only for attendance photos (inline colors so they always render) */}
+            {(cameraMode === 'checkin' || cameraMode === 'checkout') && (
+              <div
+                className="rounded-2xl p-3 text-left space-y-1.5"
+                style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', color: '#78350f' }}
+              >
+                <p className="text-xs font-black">
+                  {cameraMode === 'checkin'
+                    ? '📸 Say cheese! Your check-in selfie is on its way'
+                    : '🏁 Shift wrapped? Time for the checkout selfie!'}
+                </p>
+                <ul className="text-[11px] font-semibold space-y-1">
+                  <li>😄 Face front and center, in good light. Shadows, masks and ninja mode stay home!</li>
+                  <li>🏋️ Let the branch landmarks photobomb you: the logo, sign, reception or gym floor.</li>
+                  <li>
+                    📍 {cameraMode === 'checkin'
+                      ? <>Prove you're really at <strong>{attendanceBranch || 'your branch'}</strong> - a selfie from the couch doesn't count!</>
+                      : <>Prove you're still at <strong>{attendanceBranch || 'your branch'}</strong>, not halfway home!</>}
+                  </li>
+                </ul>
+              </div>
+            )}
+
             <div className="relative bg-black rounded-2xl overflow-hidden aspect-video flex items-center justify-center">
               <video 
                 ref={videoRef} 
@@ -1506,11 +1802,15 @@ export default function Dashboard({ user, onLogout }) {
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
             <div className="flex justify-between items-center border-b pb-3">
-              <h3 className="font-bold text-slate-900 text-sm">Assign Request (In Progress)</h3>
+              <h3 className="font-bold text-slate-900 text-sm">
+                {assignTargetStatus === 'Completed' ? 'Who did this task? (Completed)' : 'Assign Request (In Progress)'}
+              </h3>
               <button onClick={() => setAssignModalReq(null)} className="text-slate-400 font-bold">✕</button>
             </div>
             <p className="text-xs text-slate-600">
-              Select a <strong>Facility Member</strong> to handle this issue:
+              {assignTargetStatus === 'Completed'
+                ? <>Nobody was assigned to this request. Select the <strong>Facility Member</strong> or <strong>Facility Manager</strong> who carried it out:</>
+                : <>Select a <strong>Facility Member</strong> or <strong>Facility Manager</strong> to handle this issue:</>}
             </p>
             <div className="space-y-3">
               <select
@@ -1518,17 +1818,17 @@ export default function Dashboard({ user, onLogout }) {
                 onChange={(e) => setSelectedAssigneeId(e.target.value)}
                 className="w-full p-3 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
               >
-                <option value="" className="bg-white text-slate-900">-- Select Member --</option>
-                {facilityMembers.map(m => (
+                <option value="" className="bg-white text-slate-900">-- Select who is in charge --</option>
+                {taskAssignees.map(m => (
                   <option key={m.id} value={m.id} className="bg-white text-slate-900">
-                    {m.username} ({m.phone || 'No Phone'})
+                    {m.username} - {m.role} ({m.phone || 'No Phone'})
                   </option>
                 ))}
               </select>
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setAssignModalReq(null)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold">Cancel</button>
-              <button onClick={handleConfirmAssignment} className="px-4 py-2 bg-amber-500 text-slate-900 font-extrabold rounded-xl text-xs shadow-md">Confirm & Assign</button>
+              <button onClick={handleConfirmAssignment} className="px-4 py-2 bg-amber-500 text-slate-900 font-extrabold rounded-xl text-xs shadow-md">{assignTargetStatus === 'Completed' ? 'Confirm' : 'Confirm & Assign'}</button>
             </div>
           </div>
         </div>
@@ -1608,6 +1908,15 @@ export default function Dashboard({ user, onLogout }) {
                 </button>
               )}
 
+              {canSeeSchedule && (
+                <button 
+                  onClick={() => setActiveTab('schedule')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'schedule' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                >
+                  📅 Schedule
+                </button>
+              )}
+
               <button 
                 onClick={() => setActiveTab('ceo_services')}
                 className={`px-4 py-2 rounded-xl text-xs font-bold transition-all relative ${activeTab === 'ceo_services' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
@@ -1651,6 +1960,22 @@ export default function Dashboard({ user, onLogout }) {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={openLogsPanel}
+            title="Activity notifications"
+            className="relative bg-slate-100 hover:bg-indigo-600 hover:text-white border border-slate-300 text-slate-700 rounded-2xl text-base shadow-sm transition-all cursor-pointer flex items-center justify-center"
+            style={{ width: 40, height: 40 }}
+          >
+            🔔
+            {unreadLogsCount > 0 && (
+              <span
+                className="absolute rounded-full text-[10px] font-black flex items-center justify-center"
+                style={{ top: -6, right: -6, minWidth: 18, height: 18, padding: '0 4px', backgroundColor: '#e11d48', color: '#ffffff', border: '2px solid #ffffff' }}
+              >
+                {unreadLogsCount > 99 ? '99+' : unreadLogsCount}
+              </span>
+            )}
+          </button>
           <button 
             onClick={() => setShowSelfPasswordModal(true)} 
             className="bg-slate-100 hover:bg-indigo-600 hover:text-white border border-slate-300 text-slate-700 px-4 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm cursor-pointer"
@@ -1731,57 +2056,30 @@ export default function Dashboard({ user, onLogout }) {
 
           <div className="lg:col-span-2 space-y-6">
             
-            <div className="bg-white border border-slate-200 p-5 rounded-3xl shadow-sm space-y-3">
-              <div className="flex justify-between items-center">
-                <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <span>🔔</span> Activity Notifications Log
-                </h3>
-                {isAdmin && activityLogs.length > 0 && (
-                  <button 
-                    onClick={handleClearAllLogs}
-                    className="text-[11px] bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white font-extrabold px-2.5 py-1 rounded-xl border border-rose-200 transition cursor-pointer"
-                  >
-                    Clear All Logs 🗑️
-                  </button>
-                )}
-              </div>
+            {maintView === 'report' && canSeeMaintReport && (
+              <MaintenanceReport
+                requests={maintReportRequests}
+                usersList={usersList}
+                branches={maintReportBranches}
+                onBack={() => setMaintView('list')}
+              />
+            )}
 
-              <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
-                {activityLogs.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">No recent status updates logged.</p>
-                ) : (
-                  activityLogs.map((log) => (
-                    <div key={log.id} className="p-2.5 bg-slate-50 border border-slate-100 rounded-xl text-xs flex justify-between items-center gap-2 hover:bg-slate-100/80 transition">
-                      <div className="flex-1">
-                        <span className="font-bold text-slate-800">{log.performedBy}</span> updated{' '}
-                        <span className="font-bold text-indigo-600">"{log.title}"</span> from{' '}
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: getStatusBadgeStyle(log.fromStatus).bg }}>{log.fromStatus}</span> to{' '}
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: getStatusBadgeStyle(log.toStatus).bg }}>{log.toStatus}</span>
-                        {log.assignedTo && <span className="font-bold text-amber-600 ml-1">(Assigned: {log.assignedTo})</span>}
-                      </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[10px] text-slate-400 font-medium">{formatDate(log.timestamp)}</span>
-                        {isAdmin && (
-                          <button 
-                            onClick={() => handleDeleteLog(log.id)}
-                            className="text-slate-400 hover:text-rose-600 font-bold px-1.5 py-0.5 hover:bg-rose-50 rounded transition cursor-pointer"
-                            title="Delete log"
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
+            <div
+              className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4"
+              style={{ display: maintView === 'report' && canSeeMaintReport ? 'none' : undefined }}
+            >
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div className="flex items-center gap-3">
                   <h2 className="text-lg font-bold">Requests List</h2>
+                  {canSeeMaintReport && (
+                    <button
+                      onClick={() => setMaintView('report')}
+                      className="px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-600 hover:text-white"
+                    >
+                      📊 Who did what
+                    </button>
+                  )}
                   {isAdmin && (
                     <button
                       onClick={() => setShowArchivedOnly(!showArchivedOnly)}
@@ -1816,6 +2114,18 @@ export default function Dashboard({ user, onLogout }) {
                       <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
                     ))}
                   </select>
+
+                  {!isStaff && (
+                    <div style={{ minWidth: 190 }}>
+                      <MultiSelectFilter
+                        options={assigneeFilterOptions}
+                        selected={assigneeFilters}
+                        onChange={setAssigneeFilters}
+                        allLabel="All Assignees"
+                        noun="people"
+                      />
+                    </div>
+                  )}
 
                   <select 
                     value={sortOrder} 
@@ -1950,19 +2260,29 @@ export default function Dashboard({ user, onLogout }) {
               <p className="text-xs text-slate-500">Record your daily Check-In and Check-Out with live photo capture.</p>
             </div>
 
-            <div className="text-left bg-slate-50 p-4 rounded-2xl border border-slate-200">
-              <label className="block text-xs font-bold text-slate-700 mb-1">Select Branch for Attendance</label>
-              <select
-                value={attendanceBranch}
-                onChange={(e) => setAttendanceBranch(e.target.value)}
-                className="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-none"
-              >
-                <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
-                {visibleBranchesForUser.map(b => (
-                  <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
-                ))}
-              </select>
-            </div>
+            {openAttendance ? (
+              <div className="text-left bg-emerald-50 p-4 rounded-2xl border border-emerald-200 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">You are checked in at</p>
+                  <p className="text-base font-black text-slate-900">📍 {openAttendance.branch}</p>
+                </div>
+                <span className="text-[11px] font-bold text-slate-500 text-right">Check-out closes this session<br />at the same branch</span>
+              </div>
+            ) : (
+              <div className="text-left bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                <label className="block text-xs font-bold text-slate-700 mb-1">Select Branch for Attendance</label>
+                <select
+                  value={attendanceBranch}
+                  onChange={(e) => setAttendanceBranch(e.target.value)}
+                  className="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-none"
+                >
+                  <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
+                  {visibleBranchesForUser.map(b => (
+                    <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex justify-around text-xs font-bold">
               <div>
@@ -1981,10 +2301,10 @@ export default function Dashboard({ user, onLogout }) {
 
             <div className="grid grid-cols-2 gap-4 pt-4">
               <button
-                disabled={loading || !!todayUserAttendance}
+                disabled={loading || !!openAttendance}
                 onClick={() => startLiveCamera('checkin')}
                 className={`p-6 rounded-2xl font-black text-sm flex flex-col items-center gap-2 shadow-md transition-all ${
-                  todayUserAttendance 
+                  openAttendance 
                     ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
                     : 'bg-emerald-600 hover:bg-emerald-700 text-white active:scale-95'
                 }`}
@@ -1995,10 +2315,10 @@ export default function Dashboard({ user, onLogout }) {
               </button>
 
               <button
-                disabled={loading || !todayUserAttendance || !!todayUserAttendance?.checkOutTime}
+                disabled={loading || !openAttendance}
                 onClick={() => startLiveCamera('checkout')}
                 className={`p-6 rounded-2xl font-black text-sm flex flex-col items-center gap-2 shadow-md transition-all ${
-                  !todayUserAttendance || todayUserAttendance?.checkOutTime 
+                  !openAttendance 
                     ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
                     : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95'
                 }`}
@@ -2008,8 +2328,81 @@ export default function Dashboard({ user, onLogout }) {
                 <span className="text-[10px] font-normal opacity-80">(Requires Live Photo)</span>
               </button>
             </div>
+
+            <MyScheduleCard plans={attendancePlans} userId={user?.id} />
+
+            {/* My sessions: how many times, when and where */}
+            <div className="text-left space-y-3 pt-2">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-black text-slate-900">My Sessions</h3>
+                <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setShowWeekSessions(false)}
+                    className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-all ${!showWeekSessions ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowWeekSessions(true)}
+                    className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-all ${showWeekSessions ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    Last 7 days
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 text-[11px] font-bold">
+                <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Check-ins: {mySessionsList.length}</span>
+                <span className="px-2.5 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200">Check-outs: {mySessionsCheckOuts}</span>
+                {mySessionsTotalMin > 0 && (
+                  <span className="px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    Total time: {Math.floor(mySessionsTotalMin / 60)}h {mySessionsTotalMin % 60}m
+                  </span>
+                )}
+              </div>
+
+              {mySessionsList.length === 0 ? (
+                <p className="text-xs text-slate-400 italic">No sessions recorded {showWeekSessions ? 'in the last 7 days' : 'today'}.</p>
+              ) : (
+                <div className="space-y-2 overflow-y-auto pr-1" style={{ maxHeight: 340 }}>
+                  {mySessionsList.map((s) => (
+                    <div key={s.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-black text-slate-800">📍 {s.branch}</span>
+                        {s.checkOutTime ? (
+                          <span className="text-slate-500 font-bold">{formatDuration(s.checkInTime, s.checkOutTime)}</span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-black text-[10px]">Still checked in</span>
+                        )}
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-400 font-semibold">Check-In</span>
+                        <span className="text-emerald-700 font-bold">{formatDate(s.checkInTime)}</span>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-400 font-semibold">Check-Out</span>
+                        <span className="text-rose-700 font-bold">{s.checkOutTime ? formatDate(s.checkOutTime) : '--:--'}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
+      )}
+
+      {/* TAB: SCHEDULE (planned shifts + plan vs actual) */}
+      {activeTab === 'schedule' && canSeeSchedule && !isFacilityManager && !isFacilityMember && (
+        <SchedulePlanner
+          user={user}
+          usersList={usersList}
+          branches={branches}
+          attendanceRecords={attendanceRecords}
+          plans={attendancePlans}
+        />
       )}
 
       {/* TAB 3: CEO SERVICES */}
@@ -2270,29 +2663,23 @@ export default function Dashboard({ user, onLogout }) {
             </div>
             <div>
               <label className="block text-[10px] font-extrabold uppercase text-slate-500 mb-1">User Filter</label>
-              <select 
-                value={reportUserFilter} 
-                onChange={(e) => setReportUserFilter(e.target.value)}
-                className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
-              >
-                <option value="All" className="bg-white text-slate-900">All Users</option>
-                {visibleReportUsers.map(u => (
-                  <option key={u.id} value={u.username} className="bg-white text-slate-900">{u.username}</option>
-                ))}
-              </select>
+              <MultiSelectFilter
+                options={reportUserOptions}
+                selected={reportUserFilters}
+                onChange={setReportUserFilters}
+                allLabel="All Users"
+                noun="users"
+              />
             </div>
             <div>
               <label className="block text-[10px] font-extrabold uppercase text-slate-500 mb-1">Branch Filter</label>
-              <select 
-                value={reportBranchFilter} 
-                onChange={(e) => setReportBranchFilter(e.target.value)}
-                className="w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium"
-              >
-                <option value="All" className="bg-white text-slate-900">All Branches</option>
-                {visibleBranchesForUser.map(b => (
-                  <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
-                ))}
-              </select>
+              <MultiSelectFilter
+                options={reportBranchOptions}
+                selected={reportBranchFilters}
+                onChange={setReportBranchFilters}
+                allLabel="All Branches"
+                noun="branches"
+              />
             </div>
           </div>
 
@@ -2476,7 +2863,17 @@ export default function Dashboard({ user, onLogout }) {
 
               {/* Update: assign branches to any account regardless of role - this restricts their visibility across the app to those branches only */}
               <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
-                <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Assign Branches <span className="font-normal text-slate-400">({newUserBranches.length}/{branches.length})</span>
+                  </label>
+                  {isAdmin && (
+                    <div className="flex items-center gap-3 text-[11px] font-bold">
+                      <button type="button" onClick={() => setNewUserBranches(branches.map(b => b.name))} className="text-indigo-600 hover:underline cursor-pointer">Select all</button>
+                      <button type="button" onClick={() => setNewUserBranches([])} className="text-slate-500 hover:underline cursor-pointer">Clear</button>
+                    </div>
+                  )}
+                </div>
                 <div className="space-y-1 max-h-32 overflow-y-auto">
                   {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                     <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
@@ -2869,7 +3266,17 @@ export default function Dashboard({ user, onLogout }) {
 
               {/* Update: assign branches to any account regardless of role - this restricts their visibility across the app to those branches only */}
               <div className="space-y-2 border p-3 rounded-xl bg-slate-50">
-                <label className="block text-xs font-bold text-slate-700">Assign Branches</label>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Assign Branches <span className="font-normal text-slate-400">({editUserBranches.length}/{branches.length})</span>
+                  </label>
+                  {isAdmin && (
+                    <div className="flex items-center gap-3 text-[11px] font-bold">
+                      <button type="button" onClick={() => setEditUserBranches(branches.map(b => b.name))} className="text-indigo-600 hover:underline cursor-pointer">Select all</button>
+                      <button type="button" onClick={() => setEditUserBranches([])} className="text-slate-500 hover:underline cursor-pointer">Clear</button>
+                    </div>
+                  )}
+                </div>
                 <p className="text-[10px] text-slate-500">If you assign branches here, this account will only see data related to these branches across the app (Attendance, Requests, etc.).</p>
                 <div className="space-y-1 max-h-36 overflow-y-auto">
                   {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
@@ -2976,6 +3383,102 @@ export default function Dashboard({ user, onLogout }) {
         </div>
       )}
 
+
+      {/* Activity log - opened from the bell icon in the header */}
+      {showLogsPanel && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-start justify-center p-4"
+          style={{ paddingTop: '5rem' }}
+          onClick={() => setShowLogsPanel(false)}
+        >
+          <div
+            className="bg-white border border-slate-200 rounded-3xl shadow-xl w-full max-w-2xl p-5 space-y-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center gap-3">
+              <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <span>🔔</span> Activity Notifications Log
+              </h3>
+              <div className="flex items-center gap-2">
+                {isAdmin && activityLogs.length > 0 && (
+                  <button
+                    onClick={handleClearAllLogs}
+                    className="text-[11px] bg-rose-600 hover:bg-rose-700 text-white font-extrabold px-3 py-1.5 rounded-xl shadow-sm transition cursor-pointer"
+                  >
+                    Clear All Logs 🗑️
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowLogsPanel(false)}
+                  title="Close"
+                  className="text-slate-400 hover:text-slate-700 font-bold px-2 py-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto space-y-2 pr-1" style={{ maxHeight: '65vh' }}>
+              {activityLogs.length === 0 ? (
+                <p className="text-xs text-slate-400 italic">No recent status updates logged.</p>
+              ) : (
+                activityLogs.map((log) => (
+                  <div key={log.id} className="p-2.5 bg-slate-50 border border-slate-100 rounded-xl text-xs flex justify-between items-center gap-2 hover:bg-slate-100/80 transition">
+                    <div className="flex-1">
+                      <span className="font-bold text-slate-800">{log.performedBy}</span> updated{' '}
+                      <span className="font-bold text-indigo-600">"{log.title}"</span> from{' '}
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: getStatusBadgeStyle(log.fromStatus).bg }}>{log.fromStatus}</span> to{' '}
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ backgroundColor: getStatusBadgeStyle(log.toStatus).bg }}>{log.toStatus}</span>
+                      {log.assignedTo && <span className="font-bold text-amber-600 ml-1">(Assigned: {log.assignedTo})</span>}
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] text-slate-400 font-medium">{formatDate(log.timestamp)}</span>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteLog(log.id)}
+                          className="text-slate-400 hover:text-rose-600 font-bold px-1.5 py-0.5 hover:bg-rose-50 rounded transition cursor-pointer"
+                          title="Delete log"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Checkout reminder pop-up (shown after CHECKOUT_REMINDER_AFTER_HOURS without a check-out) */}
+      {checkoutReminder && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-3xl shadow-xl w-full max-w-sm p-6 text-center space-y-4">
+            <div className="text-5xl">⏰</div>
+            <h3 className="text-lg font-black text-slate-900">Don't forget to check out</h3>
+            <p className="text-sm text-slate-600">
+              You have been checked in at <strong>{checkoutReminder.branch}</strong> for <strong>{checkoutReminder.elapsedText}</strong>.
+              If your shift is over, please check out now.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setCheckoutReminder(null)}
+                className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 rounded-xl text-xs transition cursor-pointer"
+              >
+                Later
+              </button>
+              <button
+                onClick={() => { setActiveTab('attendance'); setCheckoutReminder(null); }}
+                className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-bold py-2.5 rounded-xl text-xs shadow-sm transition cursor-pointer"
+              >
+                Go to Check Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* FOOTER BRANDING */}
       <footer className="mt-12 py-6 border-t border-slate-200 text-center print:hidden">

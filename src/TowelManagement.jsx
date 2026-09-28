@@ -619,7 +619,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                   <button
                     type="button"
                     onClick={() => handleDeleteImage(previewImageObj.txId)}
-                    className="bg-rose-100 hover:bg-rose-600 text-rose-700 hover:text-white font-bold text-xs px-3 py-1.5 rounded-lg transition-all"
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer"
                   >
                     🗑️ Delete Photo
                   </button>
@@ -846,9 +846,9 @@ export default function TowelManagement({ currentUser, branchesList }) {
                                     type="button"
                                     onClick={() => handleDeleteImage(tx.id)}
                                     title="Delete Photo"
-                                    className="bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white px-1.5 py-1 rounded text-[10px] font-bold transition-all"
+                                    className="bg-rose-600 text-white hover:bg-rose-700 px-2 py-1 rounded-lg text-[11px] font-bold shadow-sm transition-all cursor-pointer"
                                   >
-                                    🗑️
+                                    🗑️ Photo
                                   </button>
                                 )}
                               </div>
@@ -859,7 +859,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                           <td className="p-2.5 text-slate-500 font-medium max-w-[150px] truncate">{tx.notes}</td>
                           {isAdmin && (
                             <td className="p-2.5 text-right space-x-2">
-                              <button onClick={() => handleDeleteTransaction(tx.id)} className="bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold">Delete Row</button>
+                              <button onClick={() => handleDeleteTransaction(tx.id)} className="bg-rose-600 text-white hover:bg-rose-700 px-2.5 py-1 rounded-lg text-[11px] font-bold shadow-sm transition-all cursor-pointer">Delete</button>
                             </td>
                           )}
                         </tr>
