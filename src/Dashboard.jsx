@@ -193,7 +193,8 @@ export default function Dashboard({ user, onLogout }) {
   // HR can view attendance reports for all branches (but not manage users)
   // Update: Attendance Reports access now matches the permission table exactly - Admin, HR, Branch Manager, Supervisor, User only (CEO no longer included)
   const canViewReports = isAdmin || isBranchManager || isSupervisor || isHR;
-  const canManageUsers = isAdmin || isCEO || isBranchManager || isFacilityManager;
+  // The CEO can no longer add, edit or delete users - only Admin, Branch Manager and Facility Manager can
+  const canManageUsers = isAdmin || isBranchManager || isFacilityManager;
 
   const facilityMembers = useMemo(() => {
     return usersList.filter(u => u.role === 'Facility Member');
@@ -691,6 +692,11 @@ export default function Dashboard({ user, onLogout }) {
       }
     }
 
+    // Only an Admin can create another Admin account
+    if (targetRole === 'Admin' && !isAdmin) {
+      return alert("Only an Admin can create an Admin account.");
+    }
+
     if (isBranchManager && !['Supervisor', 'User'].includes(targetRole)) {
       return alert("Branch Managers are only allowed to create Supervisor or Staff (User) accounts.");
     }
@@ -1129,17 +1135,16 @@ export default function Dashboard({ user, onLogout }) {
       setActivityLogs(logsData);
     });
 
-    let unsubUsers = () => {};
-    if (canManageUsers || isFacilityManager || isFacilityMember) {
-      unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
-        setUsersList(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
-      });
-    }
+    // Every role now loads the users directory (it is needed to tell Users, Supervisors and Branch Managers apart
+    // in the attendance hierarchy - a Supervisor used to get an empty list here, so every record looked like a plain User).
+    const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
+      setUsersList(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
+    });
 
     return () => {
       unsubReq(); unsubCeoReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers();
     };
-  }, [canManageUsers, isFacilityManager, isFacilityMember]);
+  }, []);
 
   // ROLE-BASED MAINTENANCE REQUESTS FILTER
   const filteredRequests = useMemo(() => {
@@ -2460,7 +2465,7 @@ export default function Dashboard({ user, onLogout }) {
                       <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                       <option value="HR" className="bg-white text-slate-900">HR</option>
                       <option value="CEO" className="bg-white text-slate-900">CEO</option>
-                      <option value="Admin" className="bg-white text-slate-900">Admin</option>
+                      {isAdmin && <option value="Admin" className="bg-white text-slate-900">Admin</option>}
                     </>
                   )}
                 </select>
