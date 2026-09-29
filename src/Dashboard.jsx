@@ -25,9 +25,22 @@ import TowelManagement from './TowelManagement';
 import MultiSelectFilter from './MultiSelectFilter';
 import SchedulePlanner, { useAttendancePlans, MyScheduleCard } from './SchedulePlanner';
 import MaintenanceReport from './MaintenanceReport';
+import IntegrityReports from './IntegrityReports';
+import BranchChecklist from './BranchChecklist';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
 const UNASSIGNED_FILTER = '__unassigned__';
+
+// BUG FIX: "today"'s date, in the EMPLOYEE'S OWN local timezone (Cairo), not UTC.
+// `new Date().toISOString().split('T')[0]` (the old code) returns the UTC date, which is a
+// DIFFERENT calendar day from roughly midnight to 3 AM Cairo time (UTC+3) - e.g. a 12:34 AM
+// check-in on Sep 29 Cairo time was being saved with dateStr "2026-09-28". A few hours later,
+// once UTC had also rolled over to the 29th, the app compared that stored "2026-09-28" against
+// today's real value and no longer recognized the session as open - Check-In showed available
+// again (risking a duplicate) and Check-Out stayed disabled, even though the employee never
+// checked out. This helper reads the LOCAL calendar date instead, so it always matches what the
+// employee actually sees on their own clock.
+const toLocalYmd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 // Update: device/browser tracking helpers.
 // Note: browsers never expose a real hardware "serial number" for privacy/security reasons - no web API can read one.
@@ -125,6 +138,11 @@ export default function Dashboard({ user, onLogout }) {
   const [categories, setCategories] = useState([]);
   const [usersList, setUsersList] = useState([]);
   const [attendanceRecords, setAttendanceRecords] = useState([]);
+  // Surfaces a query failure (e.g. a missing Firestore index) instead of silently leaving the
+  // attendance list empty - a compound query like "username == X AND checkInTime >= cutoff" needs a
+  // composite index, and without one Firestore rejects the whole query for every role except
+  // Admin/CEO/HR (whose query has only the single checkInTime filter, so it never hits this).
+  const [attendanceLoadError, setAttendanceLoadError] = useState(null);
   const [activityLogs, setActivityLogs] = useState([]);
 
   // Fullscreen Image Lightbox Modal State
@@ -259,6 +277,14 @@ export default function Dashboard({ user, onLogout }) {
   // The CEO can no longer add, edit or delete users - only Admin, Branch Manager and Facility Manager can
   const canManageUsers = isAdmin || isBranchManager || isFacilityManager;
 
+  // Integrity / wrongdoing reports: every signed-in account can submit one; only Admin and HR can review the list
+  const canReviewIntegrity = isAdmin || isHR;
+
+  // Branch checklist: anyone checked in at a branch can tick items; only Admin/Branch Manager/Supervisor sign off
+  // the day, and only Admin edits the shared item list - same visibility as the Attendance tab otherwise.
+  const canSeeChecklist = !isCEO && !isFacilityManager && !isFacilityMember;
+  const canSignOffChecklist = isAdmin || isBranchManager || isSupervisor;
+
   // People a maintenance task can be assigned to: Facility Members and Facility Managers
   const taskAssignees = useMemo(() => {
     return usersList
@@ -282,7 +308,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // Active users currently present in branches
   const currentlyPresentUsers = useMemo(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = toLocalYmd();
     return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime);
   }, [attendanceRecords]);
 
@@ -397,7 +423,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // Check if current user is present
   const isCurrentUserPresentCurrently = useMemo(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = toLocalYmd();
     return attendanceRecords.some(a => a.username === currentUserIdentifier && a.dateStr === todayStr && !a.checkOutTime);
   }, [attendanceRecords, currentUserIdentifier]);
 
@@ -1029,7 +1055,7 @@ export default function Dashboard({ user, onLogout }) {
       if (!res.ok) throw new Error('Failed to upload photo');
       const photoUrl = data.secure_url;
 
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = toLocalYmd();
 
       if (mode === 'checkin') {
         await addDoc(collection(db, 'attendance'), {
@@ -1045,11 +1071,18 @@ export default function Dashboard({ user, onLogout }) {
         });
         alert('Check-In Successful! 🟢');
       } else if (mode === 'checkout') {
-        const activeRecord = attendanceRecords.find(a => 
-          a.username === currentUserIdentifier && 
-          a.dateStr === todayStr && 
+        // Close the MOST RECENT open session (the one actually shown on screen).
+        // Using a plain .find() here previously picked whichever open session
+        // happened to come first in the array, which could be an older stray
+        // session at a different branch than the one displayed — leaving the
+        // real open session untouched and stuck.
+        const openSessions = attendanceRecords.filter(a =>
+          a.username === currentUserIdentifier &&
+          a.dateStr === todayStr &&
           !a.checkOutTime
         );
+        const sessionTime = (a) => (a.checkInTime?.toMillis ? a.checkInTime.toMillis() : 0);
+        const activeRecord = openSessions.sort((a, b) => sessionTime(b) - sessionTime(a))[0] || null;
 
         if (activeRecord) {
           await updateDoc(doc(db, 'attendance', activeRecord.id), {
@@ -1196,11 +1229,51 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Update: server-side scoped queries for "requests" and "attendance".
+  // Previously every signed-in account subscribed to the WHOLE collection and the app only hid what it
+  // shouldn't show on screen - meaning anyone could read every branch's data by querying Firestore directly
+  // from the browser console. These two queries now ask the server for only the documents this account is
+  // allowed to see, and the matching Security Rules (see firestore.rules) reject anything wider than that -
+  // so the restriction can no longer be bypassed by skipping the app's UI.
+  // The role-vs-role sub-filter inside hierarchyFilteredAttendance (e.g. a Supervisor seeing Users but not
+  // fellow Supervisors) still happens after this, in memory - Firestore queries cannot depend on a second
+  // account's role, only on fields already stored on the document itself (its branch or username).
+  const roleLower = (userRole || '').trim().toLowerCase();
+
+  const buildRequestsQuery = () => {
+    if (roleLower === 'user' || roleLower === 'staff') {
+      return query(collection(db, 'requests'), where('createdBy', '==', currentUserIdentifier));
+    }
+    if (roleLower === 'admin' || roleLower === 'ceo') {
+      return collection(db, 'requests');
+    }
+    // Supervisor, Branch Manager, Facility Manager, HR, etc.: their own branches, or everything if none are set
+    // (matches the app's existing rule in filteredRequests exactly)
+    return assignedBranches.length > 0
+      ? query(collection(db, 'requests'), where('branch', 'in', assignedBranches.slice(0, 30)))
+      : collection(db, 'requests');
+  };
+
+  const buildAttendanceQuery = (cutoff) => {
+    const cutoffFilter = where('checkInTime', '>=', Timestamp.fromDate(cutoff));
+    if (roleLower === 'admin' || roleLower === 'ceo' || roleLower === 'hr') {
+      return query(collection(db, 'attendance'), cutoffFilter);
+    }
+    if (roleLower === 'branch manager' || roleLower === 'supervisor') {
+      // matches hierarchyFilteredAttendance: own branches if any are set, otherwise own records only
+      return assignedBranches.length > 0
+        ? query(collection(db, 'attendance'), where('branch', 'in', assignedBranches.slice(0, 30)), cutoffFilter)
+        : query(collection(db, 'attendance'), where('username', '==', currentUserIdentifier), cutoffFilter);
+    }
+    // User/Staff, Facility Manager, Facility Member and anyone else: their own attendance only
+    return query(collection(db, 'attendance'), where('username', '==', currentUserIdentifier), cutoffFilter);
+  };
+
   // FIRESTORE LISTENERS WITH ALPHABETICAL SORTING
   useEffect(() => {
-    const unsubReq = onSnapshot(collection(db, 'requests'), (snapshot) => {
+    const unsubReq = onSnapshot(buildRequestsQuery(), (snapshot) => {
       setRequests(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
-    });
+    }, (err) => console.warn('Could not load requests:', err.message));
 
     const unsubCeoReq = onSnapshot(collection(db, 'ceo_requests'), (snapshot) => {
       const data = snapshot.docs.map(item => ({ id: item.id, ...item.data() }));
@@ -1227,9 +1300,12 @@ export default function Dashboard({ user, onLogout }) {
     // app fast and cheap to run as attendance history grows. Full-year exports can still be added later if needed.
     const twoMonthsAgo = new Date();
     twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
-    const attendanceQuery = query(collection(db, 'attendance'), where('checkInTime', '>=', Timestamp.fromDate(twoMonthsAgo)));
-    const unsubAttendance = onSnapshot(attendanceQuery, (snapshot) => {
+    const unsubAttendance = onSnapshot(buildAttendanceQuery(twoMonthsAgo), (snapshot) => {
       setAttendanceRecords(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
+      setAttendanceLoadError(null);
+    }, (err) => {
+      console.warn('Could not load attendance:', err.message);
+      setAttendanceLoadError(err.message || 'Unknown error');
     });
 
     const unsubLogs = onSnapshot(collection(db, 'logs'), (snapshot) => {
@@ -1247,7 +1323,7 @@ export default function Dashboard({ user, onLogout }) {
     return () => {
       unsubReq(); unsubCeoReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers();
     };
-  }, []);
+  }, [user?.id, roleLower, branchesKey, currentUserIdentifier]);
 
   // ACTIVITY LOG BELL (header icon): the log is hidden until the bell is clicked.
   // The red badge counts entries made by OTHER people since the bell was last opened
@@ -1448,7 +1524,7 @@ export default function Dashboard({ user, onLogout }) {
   // Today's sessions for the current user, newest first. After a check-out the employee can check in
   // again (same branch or another assigned one), so a day can hold several sessions.
   const todaySessions = useMemo(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = toLocalYmd();
     const startedAt = (r) => (r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now());
     return attendanceRecords
       .filter(a => a.username === currentUserIdentifier && a.dateStr === todayStr)
@@ -1471,7 +1547,7 @@ export default function Dashboard({ user, onLogout }) {
   const [showWeekSessions, setShowWeekSessions] = useState(false);
 
   const mySessionsList = useMemo(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = toLocalYmd();
     const startedAt = (r) => (r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now());
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     return attendanceRecords
@@ -1593,7 +1669,7 @@ export default function Dashboard({ user, onLogout }) {
     });
 
     const buffer = await workbook.xlsx.writeBuffer();
-    const fileName = `Attendance_Report_${new Date().toISOString().split('T')[0]}.xlsx`;
+    const fileName = `Attendance_Report_${toLocalYmd()}.xlsx`;
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     saveAs(blob, fileName);
   };
@@ -1952,8 +2028,24 @@ export default function Dashboard({ user, onLogout }) {
             </button>
           )}
 
+          <button
+            onClick={() => setActiveTab('integrity')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'integrity' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+          >
+            🚩 Report a Concern
+          </button>
+
+          {canSeeChecklist && (
+            <button
+              onClick={() => setActiveTab('checklist')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'checklist' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              ✅ Checklist
+            </button>
+          )}
+
           {canManageUsers && (
-            <button 
+            <button
               onClick={() => setActiveTab('users')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'users' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
@@ -2271,6 +2363,16 @@ export default function Dashboard({ user, onLogout }) {
               <h2 className="text-2xl font-black text-slate-900">Live Attendance Portal</h2>
               <p className="text-xs text-slate-500">Record your daily Check-In and Check-Out with live photo capture.</p>
             </div>
+
+            {attendanceLoadError && (
+              <div className="text-left bg-rose-50 border border-rose-200 rounded-2xl p-4 space-y-1">
+                <p className="text-xs font-bold text-rose-700">⚠️ Could not load your attendance history.</p>
+                <p className="text-[11px] text-rose-600">
+                  Your Check-In / Check-Out buttons may not reflect a session that's already open. Please tell Admin
+                  and try again shortly. (Error: {attendanceLoadError})
+                </p>
+              </div>
+            )}
 
             {openAttendance ? (
               <div className="text-left bg-emerald-50 p-4 rounded-2xl border border-emerald-200 flex items-center justify-between gap-3">
@@ -2800,6 +2902,26 @@ export default function Dashboard({ user, onLogout }) {
             </table>
           </div>
         </div>
+      )}
+
+      {/* TAB: REPORT A CONCERN (integrity / wrongdoing reports) */}
+      {activeTab === 'integrity' && (
+        <IntegrityReports
+          currentUser={liveProfile}
+          branchesList={branches}
+          usersList={usersList}
+          canReview={canReviewIntegrity}
+        />
+      )}
+
+      {activeTab === 'checklist' && canSeeChecklist && (
+        <BranchChecklist
+          currentUser={liveProfile}
+          branchesList={visibleBranchesForUser}
+          openBranch={openAttendance?.branch || null}
+          canSignOff={canSignOffChecklist}
+          isAdmin={isAdmin}
+        />
       )}
 
       {/* TAB 5: USERS MANAGEMENT */}

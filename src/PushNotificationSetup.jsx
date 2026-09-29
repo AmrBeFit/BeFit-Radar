@@ -5,7 +5,7 @@ import { getToken, onMessage } from 'firebase/messaging';
 
 // ⚠️ Paste the VAPID key you generate in:
 // Firebase Console -> Project Settings -> Cloud Messaging -> Web configuration -> "Generate key pair"
-const VAPID_KEY = 'PASTE_YOUR_VAPID_KEY_HERE';
+const VAPID_KEY = 'BD6vr5znvsM9R7wtu8m9Q5WyRv2x4ytlWmvyO3hK0axWdy2zTKZhgd4l_icuYpp29huOSx1QZWN12DWgQydG0KY';
 
 // Mount this once, anywhere inside the logged-in area (e.g. right next to <CEONotificationListener />
 // in App.jsx). It silently registers this browser/device to receive push notifications for this

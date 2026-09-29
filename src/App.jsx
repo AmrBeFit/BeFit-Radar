@@ -71,8 +71,16 @@ function CEONotificationListener({ user }) {
     };
   }, [audioEnabled]);
 
-  useEffect(() => {
+    useEffect(() => {
     if (!currentUserIdentifier && !isAdminOrCEO) return;
+
+    // A plain "user"/"staff" role can only read requests THEY created (see firestore.rules),
+    // so listening to the whole `requests` collection with no filter is rejected by the
+    // security rules ("Missing or insufficient permissions") for that role - and this listener
+    // exists to alert management/facility staff about new requests, not to alert the person
+    // submitting one about their own request, so it's safe to simply skip it for this role.
+    const isPlainUserRole = userRole === 'USER' || userRole === 'STAFF';
+    if (isPlainUserRole) return;
 
     const pageStartTimestamp = Date.now();
 
