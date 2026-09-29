@@ -327,6 +327,7 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('17:00');
   const [saving, setSaving] = useState(false);
+  const [resultBanner, setResultBanner] = useState(null); // { type: 'success' | 'warning', message }
 
   const periodDays = PERIODS.find((p) => p.key === period).days;
 
@@ -360,17 +361,23 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
     if (!window.confirm(`Create ${totalShifts} shift(s) for ${selectedIds.length} employee(s) at ${branch}?`)) return;
 
     setSaving(true);
+    setResultBanner(null);
     try {
       const createPlans = httpsCallable(functions, 'createAttendancePlans', { timeout: 120000 });
       const res = await createPlans({ userIds: selectedIds, dates: plannedDates, branch, startTime, endTime });
       const { created = 0, skipped = 0 } = res.data || {};
-      alert(
-        `Done! ${created} shift(s) created.` +
-        (skipped > 0 ? `\n${skipped} shift(s) were skipped because they overlap a shift that already exists.` : '')
-      );
+      // Red/warning whenever something did NOT go through as planned (nothing created, or
+      // some shifts were skipped) - green only when every shift was created cleanly.
+      const isWarning = created === 0 || skipped > 0;
+      setResultBanner({
+        type: isWarning ? 'warning' : 'success',
+        message:
+          `Done! ${created} shift(s) created.` +
+          (skipped > 0 ? ` ${skipped} shift(s) were skipped because they overlap a shift that already exists.` : '')
+      });
       setSelectedIds([]);
     } catch (err) {
-      alert('Could not save the schedule: ' + (err.message || err));
+      setResultBanner({ type: 'warning', message: 'Could not save the schedule: ' + (err.message || err) });
     } finally {
       setSaving(false);
     }
@@ -387,6 +394,27 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
           Choose the period, the people, the branch and the working hours. The employees will see their shifts in their Attendance page.
         </p>
       </div>
+
+      {resultBanner && (
+        <div
+          className="p-3 rounded-xl text-xs font-bold flex items-start justify-between gap-3"
+          style={
+            resultBanner.type === 'warning'
+              ? { backgroundColor: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }
+              : { backgroundColor: '#ecfdf5', border: '1px solid #a7f3d0', color: '#065f46' }
+          }
+        >
+          <span>{resultBanner.type === 'warning' ? '⚠️ ' : '✅ '}{resultBanner.message}</span>
+          <button
+            type="button"
+            onClick={() => setResultBanner(null)}
+            className="shrink-0 opacity-70 hover:opacity-100 font-black"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {(plannableUsers.length === 0 || plannableBranches.length === 0) && (
         <div className="p-3 rounded-xl text-xs font-semibold" style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', color: '#78350f' }}>
