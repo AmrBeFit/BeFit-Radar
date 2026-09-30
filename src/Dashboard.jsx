@@ -187,10 +187,21 @@ export default function Dashboard({ user, onLogout }) {
   const [assignTargetStatus, setAssignTargetStatus] = useState('In Progress'); // the status the assign pop-up will set
   const [maintView, setMaintView] = useState('list'); // 'list' | 'report' (who did what)
 
+  // Per-request "Action Taken" (written by the assigned Facility Member) and
+  // "Notes" (written by the Facility Manager) - draft text kept locally until saved.
+  const [actionTakenDrafts, setActionTakenDrafts] = useState({});
+  const [notesDrafts, setNotesDrafts] = useState({});
+
   // CEO Request Form States
   const [ceoServiceType, setCeoServiceType] = useState('Drink');
   const [ceoItemDetails, setCeoItemDetails] = useState('');
   const [ceoSelectedBranch, setCeoSelectedBranch] = useState('');
+
+  // Leave Request States
+  const [leaveRequests, setLeaveRequests] = useState([]);
+  const [leaveStartDate, setLeaveStartDate] = useState('');
+  const [leaveEndDate, setLeaveEndDate] = useState('');
+  const [leaveReason, setLeaveReason] = useState('');
 
   // User Management States
   const [newUsername, setNewUsername] = useState('');
@@ -299,19 +310,22 @@ export default function Dashboard({ user, onLogout }) {
   // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
   const canManageStatus = isAdmin || isFacilityManager;
   // HR can view attendance reports for all branches (but not manage users)
-  // Update: Attendance Reports access now matches the permission table exactly - Admin, HR, Branch Manager, Supervisor, User only (CEO no longer included)
-  const canViewReports = isAdmin || isBranchManager || isSupervisor || isHR;
+  // Update: CEO now also sees the full check-in/check-out attendance reports across every branch (view-only, same as everyone else here - this tab was never editable).
+  const canViewReports = isAdmin || isBranchManager || isSupervisor || isHR || isCEO;
   // The Schedule tab (planned shifts + plan-vs-actual report): those who plan it or need to see it
   const canSeeSchedule = isAdmin || isCEO || isHR || isBranchManager || isSupervisor;
-  // The CEO can no longer add, edit or delete users - only Admin, Branch Manager and Facility Manager can
-  const canManageUsers = isAdmin || isBranchManager || isFacilityManager;
+  // The CEO can no longer add, edit or delete users - Admin, Branch Manager and Facility Manager can create,
+  // edit and delete; Supervisor can view/edit/delete Users only (cannot create accounts).
+  const canManageUsers = isAdmin || isBranchManager || isFacilityManager || isSupervisor;
 
   // Integrity / wrongdoing reports: every signed-in account can submit one; only Admin and HR can review the list
   const canReviewIntegrity = isAdmin || isHR;
 
   // Branch checklist: anyone checked in at a branch can tick items; only Admin/Branch Manager/Supervisor sign off
   // the day, and only Admin edits the shared item list - same visibility as the Attendance tab otherwise.
-  const canSeeChecklist = !isCEO && !isFacilityManager && !isFacilityMember;
+  // CEO can view every branch's checklist but never ticks/edits it (CEO never checks in at a branch, so
+  // BranchChecklist's own canTick stays false for them automatically - see isAdmin/openBranch passed below).
+  const canSeeChecklist = !isFacilityManager && !isFacilityMember;
   const canSignOffChecklist = isAdmin || isBranchManager || isSupervisor;
 
   // People a maintenance task can be assigned to: Facility Members and Facility Managers
@@ -341,16 +355,38 @@ export default function Dashboard({ user, onLogout }) {
     return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime && !isHiddenAdminUser(a));
   }, [attendanceRecords]);
 
-  // Update: nobody can see accounts except the ones they created themselves, except Admin who always sees everyone
+  // Leave requests this account is allowed to review: Admin/CEO/HR see everyone's,
+  // Branch Manager/Supervisor only see requests from people assigned to one of their own branches.
+  const leaveRequestsForApproval = useMemo(() => {
+    if (isAdmin || isCEO || isHR) return leaveRequests;
+    if ((isBranchManager || isSupervisor) && assignedBranches.length > 0) {
+      return leaveRequests.filter(r => {
+        const reqBranches = Array.isArray(r.assignedBranches) ? r.assignedBranches : [];
+        return reqBranches.some(b => assignedBranches.includes(b));
+      });
+    }
+    return [];
+  }, [leaveRequests, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches]);
+
+  const myLeaveRequests = useMemo(
+    () => leaveRequests.filter(r => r.username === currentUserIdentifier),
+    [leaveRequests, currentUserIdentifier]
+  );
+
+  // Update: nobody can see accounts except the ones they created themselves, except Admin who always sees everyone.
+  // Facility Managers, Branch Managers and Supervisors are the exception: their teams are shared -
+  // every Facility Manager sees every Facility Member, every Branch Manager sees every Supervisor/User,
+  // and every Supervisor sees every User - regardless of which specific manager created the account.
   const manageableUsersList = useMemo(() => {
     return usersList.filter(u => {
       if (isAdmin) return true;
-      if (isFacilityManager) return u.role === 'Facility Member' && u.createdBy === user?.id;
-      if (isBranchManager) return ['Supervisor', 'User'].includes(u.role) && u.createdBy === user?.id;
+      if (isFacilityManager) return u.role === 'Facility Member';
+      if (isBranchManager) return ['Supervisor', 'User'].includes(u.role);
+      if (isSupervisor) return u.role === 'User';
       // Any other role with user-management permission (e.g. CEO) only sees the accounts they created
       return u.createdBy === user?.id;
     });
-  }, [usersList, isAdmin, isFacilityManager, isBranchManager, user?.id]);
+  }, [usersList, isAdmin, isFacilityManager, isBranchManager, isSupervisor, user?.id]);
 
   // Update: device/browser login history log (Admin only) - a real report with date/time filtering + clearable history
   const [viewingDeviceInfoUser, setViewingDeviceInfoUser] = useState(null);
@@ -471,9 +507,13 @@ export default function Dashboard({ user, onLogout }) {
 
   const getStatusBadgeStyle = (status) => {
     const s = (status || '').toLowerCase().trim();
-    if (s === 'completed' || s === 'done') return { bg: '#059669', color: '#ffffff' }; 
-    if (s === 'in progress' || s === 'inprogress' || s === 'pending') return { bg: '#f59e0b', color: '#ffffff' }; 
-    return { bg: '#e11d48', color: '#ffffff' }; 
+    if (s === 'completed' || s === 'done') return { bg: '#059669', color: '#ffffff' }; // dark green
+    if (s === 'completed under testing') return { bg: '#a3e635', color: '#1a2e05' }; // neon/fluorescent green
+    if (s === 'delayed') return { bg: '#86efac', color: '#14532d' }; // light green
+    if (s === 'not applicable') return { bg: '#94a3b8', color: '#ffffff' }; // gray
+    if (s === 'in progress' || s === 'inprogress') return { bg: '#d97706', color: '#ffffff' }; // dark yellow
+    if (s === 'pending') return { bg: '#fde68a', color: '#78350f' }; // light yellow
+    return { bg: '#e11d48', color: '#ffffff' }; // New (and default)
   };
 
   // LOG DELETION ACTIONS
@@ -717,20 +757,68 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // LEAVE REQUEST ACTIONS
+  const canApproveLeave = isAdmin || isCEO || isHR || isBranchManager || isSupervisor;
+
+  const handleCreateLeaveRequest = async (e) => {
+    e.preventDefault();
+    if (!leaveStartDate || !leaveEndDate) return alert('Please select a start and end date.');
+    if (leaveEndDate < leaveStartDate) return alert('The end date cannot be before the start date.');
+
+    setLoading(true);
+    try {
+      await addDoc(collection(db, 'leaveRequests'), {
+        username: currentUserIdentifier,
+        assignedBranches: assignedBranches || [],
+        startDate: leaveStartDate,
+        endDate: leaveEndDate,
+        reason: leaveReason.trim(),
+        status: 'Pending',
+        createdAt: serverTimestamp(),
+        createdById: user?.id || null
+      });
+      setLeaveStartDate('');
+      setLeaveEndDate('');
+      setLeaveReason('');
+      alert('Leave request submitted! You will be notified once it is reviewed.');
+    } catch (err) {
+      alert('Error submitting leave request: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLeaveDecision = async (requestId, decision) => {
+    try {
+      await updateDoc(doc(db, 'leaveRequests', requestId), {
+        status: decision,
+        reviewedBy: currentUserIdentifier,
+        reviewedAt: serverTimestamp()
+      });
+    } catch (err) {
+      alert('Error updating the leave request: ' + err.message);
+    }
+  };
+
+  const handleDeleteLeaveRequest = async (requestId) => {
+    if (!window.confirm('Delete this leave request permanently?')) return;
+    try {
+      await deleteDoc(doc(db, 'leaveRequests', requestId));
+    } catch (err) {
+      alert('Error deleting leave request: ' + err.message);
+    }
+  };
+
   // MAINTENANCE ACTIONS
   const handleUpdateStatus = async (req, newStatus) => {
     if (req.status === newStatus) return;
 
     const currentStatus = req.status || 'New';
 
-    if (!isAdmin) {
-      if (newStatus === 'New' && (currentStatus === 'In Progress' || currentStatus === 'Completed')) {
-        return alert("You cannot revert the request to (New) once it has been started.");
-      }
-
-      if (newStatus === 'In Progress' && currentStatus === 'Completed') {
-        return alert("You cannot change the status from (Completed) back to (In Progress).");
-      }
+    // Only Admin may ever set a request back to (New) - Facility Manager can reverse
+    // status any other way (e.g. Completed -> Pending), just not back to New.
+    if (newStatus === 'New' && !isAdmin) {
+      return alert("Only Admin can set a request back to (New).");
     }
 
     // The Facility Manager and the Admin must say WHO carries out the task:
@@ -762,6 +850,38 @@ export default function Dashboard({ user, onLogout }) {
       });
     } catch (err) {
       alert('Error updating status: ' + err.message);
+    }
+  };
+
+  // "Action Taken" box: only the Facility Member this request is assigned to (or Admin) can write it.
+  const canEditActionTaken = (req) => isAdmin || (req.assignedTo && req.assignedTo === currentUserIdentifier);
+  const getActionTakenValue = (req) => (actionTakenDrafts[req.id] !== undefined ? actionTakenDrafts[req.id] : (req.actionTaken || ''));
+  const handleSaveActionTaken = async (req) => {
+    try {
+      await updateDoc(doc(db, 'requests', req.id), {
+        actionTaken: getActionTakenValue(req).trim(),
+        actionTakenBy: currentUserIdentifier,
+        actionTakenAt: serverTimestamp()
+      });
+      setActionTakenDrafts(prev => { const next = { ...prev }; delete next[req.id]; return next; });
+    } catch (err) {
+      alert('Error saving action taken: ' + err.message);
+    }
+  };
+
+  // "Notes" box: only the Facility Manager (or Admin) can write it.
+  const canEditNotes = () => isAdmin || isFacilityManager;
+  const getNotesValue = (req) => (notesDrafts[req.id] !== undefined ? notesDrafts[req.id] : (req.notes || ''));
+  const handleSaveNotes = async (req) => {
+    try {
+      await updateDoc(doc(db, 'requests', req.id), {
+        notes: getNotesValue(req).trim(),
+        notesBy: currentUserIdentifier,
+        notesAt: serverTimestamp()
+      });
+      setNotesDrafts(prev => { const next = { ...prev }; delete next[req.id]; return next; });
+    } catch (err) {
+      alert('Error saving notes: ' + err.message);
     }
   };
 
@@ -900,17 +1020,17 @@ export default function Dashboard({ user, onLogout }) {
     if (!canManageUsers) return alert("Permission denied.");
     if (!editingUser) return;
 
-    // Nobody can edit an account except whoever created it, except Admin who always has full permissions
-    if (!isAdmin && editingUser.createdBy !== user?.id) {
+    // Facility Manager / Branch Manager / Supervisor share their team - they can edit any account of the
+    // right role, regardless of who created it. Everyone else may only edit accounts they created themselves
+    // (Admin always has full permission).
+    if (isFacilityManager) {
+      if (editingUser.role !== 'Facility Member') return alert("Facility Managers can only edit Facility Members.");
+    } else if (isBranchManager) {
+      if (!['Supervisor', 'User'].includes(editingUser.role)) return alert("Branch Managers can only edit Supervisor or Staff (User) accounts.");
+    } else if (isSupervisor) {
+      if (editingUser.role !== 'User') return alert("Supervisors can only edit Staff (User) accounts.");
+    } else if (!isAdmin && editingUser.createdBy !== user?.id) {
       return alert("You can only edit accounts that you created yourself.");
-    }
-
-    if (isFacilityManager && editingUser.role !== 'Facility Member') {
-      return alert("Facility Managers can only edit Facility Members.");
-    }
-
-    if (isBranchManager && !['Supervisor', 'User'].includes(editingUser.role)) {
-      return alert("Branch Managers can only edit Supervisor or Staff (User) accounts.");
     }
 
     if (isBranchManager && editUserBranches.length === 0) {
@@ -972,18 +1092,22 @@ export default function Dashboard({ user, onLogout }) {
   // silently skip any selected user that this account isn't actually allowed to delete.
   const canDeleteUser = (targetUser) => {
     if (!canManageUsers) return false;
+    // Facility Manager / Branch Manager / Supervisor share their team: any of them can manage any
+    // account of the right role, regardless of who created it.
+    if (isFacilityManager) return targetUser.role === 'Facility Member';
+    if (isBranchManager) return ['Supervisor', 'User'].includes(targetUser.role);
+    if (isSupervisor) return targetUser.role === 'User';
     if (!isAdmin && targetUser.createdBy !== user?.id) return false;
-    if (isFacilityManager && targetUser.role !== 'Facility Member') return false;
-    if (isBranchManager && (targetUser.role === 'Branch Manager' || targetUser.role === 'Admin' || targetUser.role === 'CEO')) return false;
     return true;
   };
 
   const handleDeleteUser = async (targetUser) => {
     if (!canDeleteUser(targetUser)) {
       if (!canManageUsers) return alert("Permission denied.");
+      if (isFacilityManager) return alert("Facility Managers can only delete Facility Members.");
+      if (isBranchManager) return alert("Branch Managers can only delete Supervisor or Staff (User) accounts.");
+      if (isSupervisor) return alert("Supervisors can only delete Staff (User) accounts.");
       if (!isAdmin && targetUser.createdBy !== user?.id) return alert("You can only delete accounts that you created yourself.");
-      if (isFacilityManager && targetUser.role !== 'Facility Member') return alert("Facility Managers can only delete Facility Members.");
-      if (isBranchManager) return alert("Branch Managers are not allowed to delete other Managers or Admins.");
       return alert("Permission denied.");
     }
 
@@ -1246,6 +1370,13 @@ export default function Dashboard({ user, onLogout }) {
     return (nowTick - lastMs) < 240000; // last heartbeat within the last 4 minutes (matches the 3-minute heartbeat, plus a margin)
   };
 
+  // Helper: human-readable "last seen" text for the System Users table's new column.
+  const formatLastSeen = (u) => {
+    if (!u?.lastActive) return 'Never';
+    const d = u.lastActive.toDate ? u.lastActive.toDate() : new Date(u.lastActive);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
   const handleForceLogout = async (targetUser) => {
     if (!window.confirm(`Are you sure you want to force log out "${targetUser.username}"?`)) return;
     try {
@@ -1367,6 +1498,13 @@ export default function Dashboard({ user, onLogout }) {
       setCeoRequests(data);
     });
 
+    // Leave requests - same broad-read pattern as ceo_requests above (works for every role today).
+    const unsubLeaveReq = onSnapshot(collection(db, 'leaveRequests'), (snapshot) => {
+      const data = snapshot.docs.map(item => ({ id: item.id, ...item.data() }));
+      data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setLeaveRequests(data);
+    }, (err) => console.warn('Could not load leave requests:', err.message));
+
     // Fetch and Sort Branches Alphabetically (A-Z)
     const unsubBranches = onSnapshot(collection(db, 'branches'), (snapshot) => {
       const list = snapshot.docs.map(item => ({ id: item.id, name: item.data().name || item.data().title || 'Unnamed' }));
@@ -1411,7 +1549,7 @@ export default function Dashboard({ user, onLogout }) {
     });
 
     return () => {
-      unsubReq(); unsubCeoReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers();
+      unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers();
     };
   }, [user?.id, roleLower, branchesKey, currentUserIdentifier]);
 
@@ -1514,8 +1652,8 @@ export default function Dashboard({ user, onLogout }) {
     // Default: nobody sees anyone else's attendance, only their own
     // Branch Manager: sees Users (Staff) & Supervisors in their assigned branches (plus their own record)
     // Supervisor: sees Users (Staff) only in their assigned branches (plus their own record)
-    // Admin & HR: exceptions, see all attendance across all branches (CEO is not granted this)
-    if (isAdmin || isHR) {
+    // Admin, HR & CEO: exceptions, see all attendance across all branches
+    if (isAdmin || isHR || isCEO) {
       // No filtering - they see all records
     } else if (isBranchManager) {
       if (assignedBranches.length > 0) {
@@ -2098,15 +2236,12 @@ export default function Dashboard({ user, onLogout }) {
 
           {!isFacilityManager && !isFacilityMember && !isQA && (
             <>
-              {/* The CEO does not use the Attendance page */}
-              {!isCEO && (
-                <button 
-                  onClick={() => setActiveTab('attendance')}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'attendance' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                >
-                  🕒 Attendance
-                </button>
-              )}
+              <button
+                onClick={() => setActiveTab('attendance')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'attendance' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+              >
+                🕒 Attendance
+              </button>
 
               {canSeeSchedule && (
                 <button 
@@ -2316,7 +2451,11 @@ export default function Dashboard({ user, onLogout }) {
                   >
                     <option value="All" className="bg-white text-slate-900">All Statuses</option>
                     <option value="New" className="bg-white text-slate-900">New</option>
+                    <option value="Pending" className="bg-white text-slate-900">Pending</option>
                     <option value="In Progress" className="bg-white text-slate-900">In Progress</option>
+                    <option value="Not Applicable" className="bg-white text-slate-900">Not Applicable</option>
+                    <option value="Delayed" className="bg-white text-slate-900">Delayed</option>
+                    <option value="Completed Under Testing" className="bg-white text-slate-900">Completed Under Testing</option>
                     <option value="Completed" className="bg-white text-slate-900">Completed</option>
                   </select>
 
@@ -2382,7 +2521,8 @@ export default function Dashboard({ user, onLogout }) {
                   const hasImage = req.imageUrl && req.imageUrl !== 'NO_IMAGE';
 
                   return (
-                    <div key={req.id} className="p-4 border rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:shadow-sm transition bg-white">
+                    <div key={req.id} className="p-4 border rounded-2xl hover:shadow-sm transition bg-white space-y-3">
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                       <div className="flex items-start md:items-center gap-3">
                         {isAdmin && (
                           <input
@@ -2428,7 +2568,11 @@ export default function Dashboard({ user, onLogout }) {
                             className="text-xs font-bold px-3 py-1.5 rounded-xl border-0 cursor-pointer shadow-sm focus:outline-none"
                           >
                             <option value="New" className="bg-white text-slate-900">New</option>
+                            <option value="Pending" className="bg-white text-slate-900">Pending</option>
                             <option value="In Progress" className="bg-white text-slate-900">In Progress</option>
+                            <option value="Not Applicable" className="bg-white text-slate-900">Not Applicable</option>
+                            <option value="Delayed" className="bg-white text-slate-900">Delayed</option>
+                            <option value="Completed Under Testing" className="bg-white text-slate-900">Completed Under Testing</option>
                             <option value="Completed" className="bg-white text-slate-900">Completed</option>
                           </select>
                         ) : (
@@ -2458,6 +2602,61 @@ export default function Dashboard({ user, onLogout }) {
                         )}
                       </div>
                     </div>
+
+                    {(req.assignedTo || req.actionTaken || canEditActionTaken(req) || req.notes || canEditNotes()) && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-3 border-t border-slate-100">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1">🔧 Action Taken</label>
+                          {canEditActionTaken(req) ? (
+                            <div className="space-y-1">
+                              <textarea
+                                value={getActionTakenValue(req)}
+                                onChange={(e) => setActionTakenDrafts(prev => ({ ...prev, [req.id]: e.target.value }))}
+                                rows={2}
+                                placeholder="Describe what was done to resolve this..."
+                                className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                              />
+                              {actionTakenDrafts[req.id] !== undefined && actionTakenDrafts[req.id] !== (req.actionTaken || '') && (
+                                <button
+                                  onClick={() => handleSaveActionTaken(req)}
+                                  className="text-[11px] font-black text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                                >
+                                  💾 Save
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-slate-600 italic">{req.actionTaken || 'Nothing recorded yet.'}</p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1">📝 Notes (Facility Manager)</label>
+                          {canEditNotes() ? (
+                            <div className="space-y-1">
+                              <textarea
+                                value={getNotesValue(req)}
+                                onChange={(e) => setNotesDrafts(prev => ({ ...prev, [req.id]: e.target.value }))}
+                                rows={2}
+                                placeholder="Manager notes / follow-up..."
+                                className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                              />
+                              {notesDrafts[req.id] !== undefined && notesDrafts[req.id] !== (req.notes || '') && (
+                                <button
+                                  onClick={() => handleSaveNotes(req)}
+                                  className="text-[11px] font-black text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                                >
+                                  💾 Save
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-slate-600 italic">{req.notes || 'No notes yet.'}</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    </div>
                   );
                 })}
               </div>
@@ -2468,7 +2667,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 2: ATTENDANCE */}
-      {activeTab === 'attendance' && !isCEO && !isFacilityManager && !isFacilityMember && !isQA && (
+      {activeTab === 'attendance' && !isFacilityManager && !isFacilityMember && !isQA && (
         <div className="space-y-6">
           <div className="max-w-xl mx-auto bg-white border border-slate-200 p-8 rounded-3xl shadow-sm space-y-6 text-center">
             <div className="space-y-2">
@@ -2617,6 +2816,129 @@ export default function Dashboard({ user, onLogout }) {
               )}
             </div>
           </div>
+
+          {/* Leave Requests: submit + (for managers) review */}
+          <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
+            <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">🗓️ Request Leave</h2>
+            <form onSubmit={handleCreateLeaveRequest} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1">From</label>
+                  <input
+                    type="date"
+                    required
+                    value={leaveStartDate}
+                    onChange={(e) => setLeaveStartDate(e.target.value)}
+                    className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1">To</label>
+                  <input
+                    type="date"
+                    required
+                    value={leaveEndDate}
+                    onChange={(e) => setLeaveEndDate(e.target.value)}
+                    className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-600 mb-1">Reason (optional)</label>
+                <textarea
+                  value={leaveReason}
+                  onChange={(e) => setLeaveReason(e.target.value)}
+                  placeholder="e.g. Family occasion, medical appointment..."
+                  rows={2}
+                  className="w-full p-2.5 bg-slate-50 text-slate-900 border border-slate-200 rounded-xl text-xs font-semibold"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-black py-2.5 rounded-xl text-sm shadow-md transition cursor-pointer"
+              >
+                {loading ? 'Submitting...' : 'Submit Leave Request'}
+              </button>
+            </form>
+
+            {myLeaveRequests.length > 0 && (
+              <div className="pt-3 border-t space-y-2">
+                <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">My Leave Requests</p>
+                {myLeaveRequests.map((r) => {
+                  const badge = r.status === 'Approved'
+                    ? { bg: '#059669', label: 'Approved' }
+                    : r.status === 'Rejected'
+                    ? { bg: '#e11d48', label: 'Rejected' }
+                    : { bg: '#f59e0b', label: 'Pending' };
+                  return (
+                    <div key={r.id} className="flex items-center justify-between gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                      <div>
+                        <p className="font-bold text-slate-800">{r.startDate} → {r.endDate}</p>
+                        {r.reason && <p className="text-slate-500 mt-0.5">{r.reason}</p>}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black text-white" style={{ backgroundColor: badge.bg }}>
+                          {badge.label}
+                        </span>
+                        {r.status === 'Pending' && (
+                          <button
+                            onClick={() => handleDeleteLeaveRequest(r.id)}
+                            title="Cancel request"
+                            className="text-rose-500 hover:text-rose-700 font-bold"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {canApproveLeave && (
+            <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-3">
+              <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
+                📋 Leave Requests Awaiting Approval
+                {leaveRequestsForApproval.filter(r => r.status === 'Pending').length > 0 && (
+                  <span className="bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
+                    {leaveRequestsForApproval.filter(r => r.status === 'Pending').length}
+                  </span>
+                )}
+              </h2>
+              {leaveRequestsForApproval.filter(r => r.status === 'Pending').length === 0 ? (
+                <p className="text-xs text-slate-400 italic">No pending leave requests.</p>
+              ) : (
+                <div className="space-y-2">
+                  {leaveRequestsForApproval.filter(r => r.status === 'Pending').map((r) => (
+                    <div key={r.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-black text-slate-800">👤 {r.username}</span>
+                        <span className="text-slate-500 font-bold">{r.startDate} → {r.endDate}</span>
+                      </div>
+                      {r.reason && <p className="text-slate-500">{r.reason}</p>}
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          onClick={() => handleLeaveDecision(r.id, 'Rejected')}
+                          className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-300 hover:bg-rose-200 transition"
+                        >
+                          Reject
+                        </button>
+                        <button
+                          onClick={() => handleLeaveDecision(r.id, 'Approved')}
+                          className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-emerald-100 text-emerald-700 border border-emerald-300 hover:bg-emerald-200 transition"
+                        >
+                          Approve
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -2633,7 +2955,37 @@ export default function Dashboard({ user, onLogout }) {
 
       {/* TAB 3: CEO SERVICES */}
       {activeTab === 'ceo_services' && !isFacilityManager && !isFacilityMember && !isQA && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="space-y-6">
+          {(isCEO || isAdmin) && (
+            <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm">
+              <h2 className="text-md font-bold text-slate-900 mb-4 flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#0f172a' }}></span> Overview
+              </h2>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 text-center">
+                  <p className="text-2xl font-black text-emerald-700">{currentlyPresentUsers.length}</p>
+                  <p className="text-[11px] font-bold text-emerald-700 uppercase tracking-wide mt-1">Present Now</p>
+                </div>
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-center">
+                  <p className="text-2xl font-black text-amber-700">
+                    {requests.filter(r => !['Completed', 'False Report'].includes(r.status || 'New') && !r.isArchived).length}
+                  </p>
+                  <p className="text-[11px] font-bold text-amber-700 uppercase tracking-wide mt-1">Open Maintenance</p>
+                </div>
+                <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 text-center">
+                  <p className="text-2xl font-black text-indigo-700">
+                    {ceoRequests.filter(r => (r.status || 'Pending') === 'Pending').length}
+                  </p>
+                  <p className="text-[11px] font-bold text-indigo-700 uppercase tracking-wide mt-1">Pending CEO Requests</p>
+                </div>
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center">
+                  <p className="text-2xl font-black text-slate-700">{branches.length}</p>
+                  <p className="text-[11px] font-bold text-slate-700 uppercase tracking-wide mt-1">Branches</p>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {(isCEO || isAdmin) && (
             <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
               <h2 className="text-md font-bold text-slate-900 flex items-center gap-2">
@@ -2824,6 +3176,7 @@ export default function Dashboard({ user, onLogout }) {
                 ))
               )}
             </div>
+          </div>
           </div>
         </div>
       )}
@@ -3040,6 +3393,8 @@ export default function Dashboard({ user, onLogout }) {
       {/* TAB 5: USERS MANAGEMENT */}
       {activeTab === 'users' && canManageUsers && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Supervisors can view/edit/delete Users but cannot create new accounts (Branch Manager or Admin does that). */}
+          {!isSupervisor && (
           <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
             <h2 className="text-md font-bold text-slate-900 flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span> Add New User
@@ -3138,12 +3493,16 @@ export default function Dashboard({ user, onLogout }) {
                   <label className="block text-xs font-bold text-slate-700">
                     Assign Branches <span className="font-normal text-slate-400">({newUserBranches.length}/{branches.length})</span>
                   </label>
-                  {isAdmin && (
-                    <div className="flex items-center gap-3 text-[11px] font-bold">
-                      <button type="button" onClick={() => setNewUserBranches(branches.map(b => b.name))} className="text-indigo-600 hover:underline cursor-pointer">Select all</button>
-                      <button type="button" onClick={() => setNewUserBranches([])} className="text-slate-500 hover:underline cursor-pointer">Clear</button>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-3 text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setNewUserBranches((isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
+                      className="text-indigo-600 hover:underline cursor-pointer"
+                    >
+                      Select all
+                    </button>
+                    <button type="button" onClick={() => setNewUserBranches([])} className="text-slate-500 hover:underline cursor-pointer">Clear</button>
+                  </div>
                 </div>
                 <div className="space-y-1 max-h-32 overflow-y-auto">
                   {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
@@ -3168,8 +3527,9 @@ export default function Dashboard({ user, onLogout }) {
               </button>
             </form>
           </div>
+          )}
 
-          <div className="lg:col-span-2 space-y-4">
+          <div className={isSupervisor ? 'lg:col-span-3 space-y-4' : 'lg:col-span-2 space-y-4'}>
             {/* Update: Shared Device Alerts report - filterable by date/time, with per-login history and a Clear History control */}
             {isAdmin && (
               <div className="bg-amber-50 border border-amber-300 p-5 rounded-3xl shadow-sm space-y-3">
@@ -3296,6 +3656,12 @@ export default function Dashboard({ user, onLogout }) {
                     >
                       Status {userSortField === 'status' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
                     </th>
+                    <th
+                      className="p-3 cursor-pointer select-none hover:bg-slate-200 transition-colors"
+                      onClick={() => handleUserSort('lastActive')}
+                    >
+                      Last Seen {userSortField === 'lastActive' ? (userSortDirection === 'asc' ? '▲' : '▼') : ''}
+                    </th>
                     <th className="p-3">Assigned Branches</th>
                     <th className="p-3 text-right">Action</th>
                   </tr>
@@ -3310,6 +3676,12 @@ export default function Dashboard({ user, onLogout }) {
                         if (aOnline === bOnline) return 0;
                         return userSortDirection === 'asc' ? (bOnline - aOnline) : (aOnline - bOnline);
                       }
+                      if (userSortField === 'lastActive') {
+                        const msOf = (u) => u.lastActive ? (u.lastActive.toDate ? u.lastActive.toDate().getTime() : new Date(u.lastActive).getTime()) : 0;
+                        const aMs = msOf(a);
+                        const bMs = msOf(b);
+                        return userSortDirection === 'asc' ? (aMs - bMs) : (bMs - aMs);
+                      }
                       const valA = String(a[userSortField] || '').toLowerCase();
                       const valB = String(b[userSortField] || '').toLowerCase();
                       if (valA < valB) return userSortDirection === 'asc' ? -1 : 1;
@@ -3317,8 +3689,12 @@ export default function Dashboard({ user, onLogout }) {
                       return 0;
                     })
                     .map((u) => {
-                      const canEditThisUser = isAdmin || u.createdBy === user?.id;
-                      const canDeleteThisUser = isAdmin || u.createdBy === user?.id;
+                      // Facility Managers share one team: any Facility Manager can edit/delete any Facility Member.
+                      const canEditThisUser = isAdmin || u.createdBy === user?.id
+                        || (isFacilityManager && u.role === 'Facility Member')
+                        || (isBranchManager && ['Supervisor', 'User'].includes(u.role))
+                        || (isSupervisor && u.role === 'User');
+                      const canDeleteThisUser = canDeleteUser(u);
                       const userBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
                       const online = isUserOnline(u);
 
@@ -3356,6 +3732,13 @@ export default function Dashboard({ user, onLogout }) {
                               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-black uppercase border border-slate-300">
                                 <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Offline
                               </span>
+                            )}
+                          </td>
+                          <td className="p-3 text-slate-600 text-[11px] whitespace-nowrap">
+                            {online ? (
+                              <span className="text-emerald-600 font-bold">Online now</span>
+                            ) : (
+                              formatLastSeen(u)
                             )}
                           </td>
                           <td className="p-3 text-slate-600">
@@ -3591,12 +3974,16 @@ export default function Dashboard({ user, onLogout }) {
                   <label className="block text-xs font-bold text-slate-700">
                     Assign Branches <span className="font-normal text-slate-400">({editUserBranches.length}/{branches.length})</span>
                   </label>
-                  {isAdmin && (
-                    <div className="flex items-center gap-3 text-[11px] font-bold">
-                      <button type="button" onClick={() => setEditUserBranches(branches.map(b => b.name))} className="text-indigo-600 hover:underline cursor-pointer">Select all</button>
-                      <button type="button" onClick={() => setEditUserBranches([])} className="text-slate-500 hover:underline cursor-pointer">Clear</button>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-3 text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setEditUserBranches((isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
+                      className="text-indigo-600 hover:underline cursor-pointer"
+                    >
+                      Select all
+                    </button>
+                    <button type="button" onClick={() => setEditUserBranches([])} className="text-slate-500 hover:underline cursor-pointer">Clear</button>
+                  </div>
                 </div>
                 <p className="text-[10px] text-slate-500">If you assign branches here, this account will only see data related to these branches across the app (Attendance, Requests, etc.).</p>
                 <div className="space-y-1 max-h-36 overflow-y-auto">

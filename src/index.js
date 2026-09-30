@@ -22,6 +22,16 @@ const ALLOWED_ROLES_BY_CREATOR = {
   'FACILITY MANAGER': ['Facility Member']
 };
 
+// Update: Facility Manager / Branch Manager / Supervisor teams are now SHARED - any manager of that
+// type can delete any account of the matching role(s), regardless of which specific manager created
+// it (this is intentionally separate from ALLOWED_ROLES_BY_CREATOR above, since e.g. a Supervisor may
+// delete a User's account without being allowed to create one).
+const ALLOWED_DELETE_TARGET_ROLES_BY_ROLE = {
+  'FACILITY MANAGER': ['Facility Member'],
+  'BRANCH MANAGER': ['User', 'Supervisor'],
+  SUPERVISOR: ['User']
+};
+
 // --------------------------------------------------------------
 // createUserAccount: replaces the old client-side addDoc(users, {...}).
 // Creating a Firebase Auth user from the browser signs the browser in as
@@ -393,10 +403,18 @@ exports.deleteUserAccount = onCall(async (request) => {
   const targetData = targetDoc.data();
 
   const isAdmin = callerRole === 'ADMIN';
-  // Only the roles that are allowed to create accounts may delete the ones they created.
+  const targetRole = targetData.role || 'User';
+
+  // Shared-team roles (Facility Manager / Branch Manager / Supervisor): may delete ANY account of the
+  // matching role(s), regardless of who created it.
+  const allowedDeleteTargetRoles = ALLOWED_DELETE_TARGET_ROLES_BY_ROLE[callerRole];
+  const canDeleteByRole = !!allowedDeleteTargetRoles && allowedDeleteTargetRoles.includes(targetRole);
+
+  // Fallback for any other role that manages users (e.g. CEO): only accounts they personally created.
   const isCreator = targetData.createdBy === request.auth.uid && Object.keys(ALLOWED_ROLES_BY_CREATOR).includes(callerRole);
-  if (!isAdmin && !isCreator) {
-    throw new HttpsError('permission-denied', 'You can only delete accounts that you created yourself.');
+
+  if (!isAdmin && !canDeleteByRole && !isCreator) {
+    throw new HttpsError('permission-denied', 'You do not have permission to delete this account.');
   }
 
   try {
