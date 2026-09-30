@@ -2368,21 +2368,21 @@ export default function Dashboard({ user, onLogout }) {
             <form onSubmit={handleAddRequest} className="space-y-4">
               <input type="text" required value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className="w-full p-3 bg-slate-50 border rounded-xl text-sm" />
               
-              <div className="grid grid-cols-2 gap-3">
-                <select 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select
                   required
-                  value={selectedBranch} 
-                  onChange={(e) => setSelectedBranch(e.target.value)} 
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
                   className="p-3 bg-white text-slate-900 border rounded-xl text-xs font-semibold"
                 >
                   <option value="" disabled className="bg-white text-slate-900">Select Branch...</option>
                   {visibleBranchesForUser.map(b => <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>)}
                 </select>
 
-                <select 
+                <select
                   required
-                  value={selectedCategory} 
-                  onChange={(e) => setSelectedCategory(e.target.value)} 
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
                   className="p-3 bg-white text-slate-900 border rounded-xl text-xs font-semibold"
                 >
                   <option value="" disabled className="bg-white text-slate-900">Select Category...</option>
@@ -2457,11 +2457,11 @@ export default function Dashboard({ user, onLogout }) {
                   )}
                 </div>
                 
-                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                  <select 
-                    value={statusFilter} 
-                    onChange={(e) => setStatusFilter(e.target.value)} 
-                    className="p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto">
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
                   >
                     <option value="All" className="bg-white text-slate-900">All Statuses</option>
                     <option value="New" className="bg-white text-slate-900">New</option>
@@ -2473,10 +2473,10 @@ export default function Dashboard({ user, onLogout }) {
                     <option value="Completed" className="bg-white text-slate-900">Completed</option>
                   </select>
 
-                  <select 
-                    value={branchFilter} 
-                    onChange={(e) => setBranchFilter(e.target.value)} 
-                    className="p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
+                  <select
+                    value={branchFilter}
+                    onChange={(e) => setBranchFilter(e.target.value)}
+                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
                   >
                     <option value="All" className="bg-white text-slate-900">All Branches</option>
                     {branches.map(b => (
@@ -2485,7 +2485,7 @@ export default function Dashboard({ user, onLogout }) {
                   </select>
 
                   {!isStaff && (
-                    <div style={{ minWidth: 190 }}>
+                    <div className="col-span-2 sm:col-auto" style={{ minWidth: 190 }}>
                       <MultiSelectFilter
                         options={assigneeFilterOptions}
                         selected={assigneeFilters}
@@ -2496,10 +2496,10 @@ export default function Dashboard({ user, onLogout }) {
                     </div>
                   )}
 
-                  <select 
-                    value={sortOrder} 
-                    onChange={(e) => setSortOrder(e.target.value)} 
-                    className="p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
+                  <select
+                    value={sortOrder}
+                    onChange={(e) => setSortOrder(e.target.value)}
+                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
                   >
                     <option value="desc" className="bg-white text-slate-900">Newest First</option>
                     <option value="asc" className="bg-white text-slate-900">Oldest First</option>
@@ -2508,7 +2508,7 @@ export default function Dashboard({ user, onLogout }) {
               </div>
 
               {isAdmin && filteredRequests.length > 0 && (
-                <div className="flex items-center justify-between p-3 bg-slate-100 border rounded-2xl text-xs font-bold">
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-slate-100 border rounded-2xl text-xs font-bold">
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
@@ -2573,13 +2573,13 @@ export default function Dashboard({ user, onLogout }) {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 w-full md:w-auto justify-end">
+                      <div className="flex flex-wrap items-center gap-2 w-full md:w-auto md:justify-end">
                         {canManageStatus ? (
-                          <select 
-                            value={req.status || 'New'} 
+                          <select
+                            value={req.status || 'New'}
                             onChange={(e) => handleUpdateStatus(req, e.target.value)}
                             style={{ backgroundColor: statusStyle.bg, color: statusStyle.color }}
-                            className="text-xs font-bold px-3 py-1.5 rounded-xl border-0 cursor-pointer shadow-sm focus:outline-none"
+                            className="flex-1 min-w-[140px] md:flex-none text-xs font-bold px-3 py-2 md:py-1.5 rounded-xl border-0 cursor-pointer shadow-sm focus:outline-none"
                           >
                             <option value="New" className="bg-white text-slate-900">New</option>
                             <option value="Pending" className="bg-white text-slate-900">Pending</option>
@@ -2597,17 +2597,17 @@ export default function Dashboard({ user, onLogout }) {
 
                         {isAdmin && (
                           <>
-                            <button 
+                            <button
                               onClick={() => handleArchiveReq(req.id, req.isArchived)}
-                              className="bg-amber-500 hover:bg-amber-600 text-slate-900 px-2.5 py-1.5 rounded-xl text-xs font-extrabold shadow-sm cursor-pointer"
+                              className="bg-amber-500 hover:bg-amber-600 text-slate-900 px-2.5 py-2 md:py-1.5 rounded-xl text-xs font-extrabold shadow-sm cursor-pointer"
                               title="Archive Request"
                             >
                               {req.isArchived ? 'Unarchive' : 'Archive 📁'}
                             </button>
 
-                            <button 
+                            <button
                               onClick={() => handleDeleteRequest(req.id)}
-                              className="bg-rose-600 hover:bg-rose-700 text-white font-black px-3 py-1.5 rounded-xl text-xs shadow-md cursor-pointer border-0"
+                              className="bg-rose-600 hover:bg-rose-700 text-white font-black px-3 py-2 md:py-1.5 rounded-xl text-xs shadow-md cursor-pointer border-0"
                               style={{ backgroundColor: '#e11d48', color: '#ffffff' }}
                             >
                               DELETE
@@ -3830,9 +3830,8 @@ export default function Dashboard({ user, onLogout }) {
                               {canEditThisUser && u.id !== user?.id && (
                                 <button
                                   onClick={() => handleForceLogout(u)}
-                                  disabled={!online}
-                                  title={online ? 'Force log this user out now' : 'User is already offline'}
-                                  className="bg-amber-50 hover:bg-amber-600 hover:text-white border border-amber-300 text-amber-700 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-50 disabled:hover:text-amber-700"
+                                  title={online ? 'Force log this user out now' : 'User is offline now - they will be forced to log in again the next time they open the app'}
+                                  className="bg-amber-50 hover:bg-amber-600 hover:text-white border border-amber-300 text-amber-700 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
                                 >
                                   🔒 Force Logout
                                 </button>

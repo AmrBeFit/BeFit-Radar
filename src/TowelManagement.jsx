@@ -51,13 +51,65 @@ export default function TowelManagement({ currentUser, branchesList }) {
 
   // Check whether the user has permission to see all branches (ADMIN or FACILITY MANAGER)
   const canSeeAllBranches = userRole === 'ADMIN' || userRole === 'FACILITY MANAGER';
+  // Only Admin / Facility Manager can choose which branches actually have a Towel service.
+  const canManageTowelBranches = canSeeAllBranches;
+
+  // Update: not every branch has a towel service. Admin / Facility Manager pick which branches
+  // are "Towel branches" (synced from Firestore, shared with everyone). Everyone else - and the
+  // branch dropdowns throughout this screen - only ever work with that narrowed-down list.
+  const [towelEnabledBranches, setTowelEnabledBranches] = useState([]);
+  const [enabledBranchesForm, setEnabledBranchesForm] = useState([]);
+  const [isTowelBranchesConfigured, setIsTowelBranchesConfigured] = useState(false);
+  const enabledBranchesFormInitializedRef = useRef(false);
+  const [isSavingTowelBranches, setIsSavingTowelBranches] = useState(false);
+
+  useEffect(() => {
+    const unsubTowelBranches = onSnapshot(doc(db, 'towelSettings', 'branches'), (snap) => {
+      if (snap.exists()) {
+        const list = Array.isArray(snap.data().enabledBranches) ? snap.data().enabledBranches : [];
+        setTowelEnabledBranches(list);
+        setIsTowelBranchesConfigured(true);
+        if (!enabledBranchesFormInitializedRef.current) {
+          setEnabledBranchesForm(list);
+          enabledBranchesFormInitializedRef.current = true;
+        }
+      } else {
+        setIsTowelBranchesConfigured(false);
+        enabledBranchesFormInitializedRef.current = true;
+      }
+    });
+    return () => unsubTowelBranches();
+  }, []);
+
+  const handleSaveTowelBranches = async () => {
+    setIsSavingTowelBranches(true);
+    try {
+      await setDoc(doc(db, 'towelSettings', 'branches'), { enabledBranches: enabledBranchesForm });
+      alert('Towel-enabled branches updated for everyone!');
+    } catch (err) {
+      alert('Error saving towel branches: ' + err.message);
+    } finally {
+      setIsSavingTowelBranches(false);
+    }
+  };
+
+  const toggleEnabledBranch = (branchName) => {
+    setEnabledBranchesForm((prev) =>
+      prev.includes(branchName) ? prev.filter((b) => b !== branchName) : [...prev, branchName]
+    );
+  };
 
   const userAllowedBranches = useMemo(() => {
+    const allBranches = branchesList && branchesList.length > 0 ? branchesList : DEFAULT_BRANCHES;
+    // Until Admin/Facility Manager configure the towel branch list, fall back to every branch
+    // so nothing breaks before it's set up for the first time.
+    const towelBranches = isTowelBranchesConfigured ? towelEnabledBranches : allBranches;
+
     if (currentUser && typeof currentUser === 'object' && Array.isArray(currentUser.assignedBranches) && currentUser.assignedBranches.length > 0) {
-      return currentUser.assignedBranches;
+      return currentUser.assignedBranches.filter((b) => towelBranches.includes(b));
     }
-    return branchesList && branchesList.length > 0 ? branchesList : DEFAULT_BRANCHES;
-  }, [currentUser, branchesList]);
+    return towelBranches;
+  }, [currentUser, branchesList, towelEnabledBranches, isTowelBranchesConfigured]);
 
   // Update: pricing is now the live, shared value synced from Firestore (read by everyone, edited only by Admin via the Save button)
   const [pricing, setPricing] = useState(DEFAULT_PRICING);
@@ -887,7 +939,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Unit Replacement Penalty Rate</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricingForm.smallPurchasePrice} onChange={(e) => setPricingForm({ ...pricingForm, smallPurchasePrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
+                  <input type="number" min="0" value={pricingForm.smallPurchasePrice} onChange={(e) => setPricingForm({ ...pricingForm, smallPurchasePrice: Number(e.target.value) })} disabled={!canManageTowelBranches} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
@@ -895,7 +947,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Laundry Wash Rate (Service Fee)</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricingForm.smallWashPrice} onChange={(e) => setPricingForm({ ...pricingForm, smallWashPrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
+                  <input type="number" min="0" value={pricingForm.smallWashPrice} onChange={(e) => setPricingForm({ ...pricingForm, smallWashPrice: Number(e.target.value) })} disabled={!canManageTowelBranches} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
@@ -906,7 +958,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Unit Replacement Penalty Rate</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricingForm.largePurchasePrice} onChange={(e) => setPricingForm({ ...pricingForm, largePurchasePrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
+                  <input type="number" min="0" value={pricingForm.largePurchasePrice} onChange={(e) => setPricingForm({ ...pricingForm, largePurchasePrice: Number(e.target.value) })} disabled={!canManageTowelBranches} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
@@ -914,14 +966,14 @@ export default function TowelManagement({ currentUser, branchesList }) {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Laundry Wash Rate (Service Fee)</label>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0" value={pricingForm.largeWashPrice} onChange={(e) => setPricingForm({ ...pricingForm, largeWashPrice: Number(e.target.value) })} disabled={!isAdmin} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
+                  <input type="number" min="0" value={pricingForm.largeWashPrice} onChange={(e) => setPricingForm({ ...pricingForm, largeWashPrice: Number(e.target.value) })} disabled={!canManageTowelBranches} className="w-full border rounded-xl p-3 text-sm font-bold bg-white disabled:bg-slate-100 disabled:text-slate-400" />
                   <span className="text-xs font-bold text-slate-500">EGP</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {isAdmin ? (
+          {canManageTowelBranches ? (
             <button
               type="button"
               onClick={handleSavePricing}
@@ -931,8 +983,64 @@ export default function TowelManagement({ currentUser, branchesList }) {
               {isSavingPricing ? 'Saving...' : '💾 Save Pricing For Everyone'}
             </button>
           ) : (
-            <p className="text-[11px] text-slate-400 italic">Only Admin can edit these rates.</p>
+            <p className="text-[11px] text-slate-400 italic">Only Admin or Facility Manager can edit these rates.</p>
           )}
+
+          {/* TOWEL-ENABLED BRANCHES: not every branch has a towel service - Admin / Facility Manager
+              choose which ones do, and everyone else only ever works with that narrowed-down list. */}
+          <div className="pt-6 border-t border-slate-200 space-y-4">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">🏢 Branches With Towel Service</h3>
+              <p className="text-xs text-slate-500">Only the branches checked here will appear in the branch dropdown across the Towel Management system, for every account.</p>
+            </div>
+
+            {canManageTowelBranches ? (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {(branchesList && branchesList.length > 0 ? branchesList : DEFAULT_BRANCHES).map((b) => (
+                    <label key={b} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-700 cursor-pointer hover:border-indigo-400 transition-all">
+                      <input
+                        type="checkbox"
+                        checked={enabledBranchesForm.includes(b)}
+                        onChange={() => toggleEnabledBranch(b)}
+                        className="w-4 h-4 accent-indigo-600 cursor-pointer"
+                      />
+                      {b}
+                    </label>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEnabledBranchesForm(branchesList && branchesList.length > 0 ? [...branchesList] : [...DEFAULT_BRANCHES])}
+                    className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEnabledBranchesForm([])}
+                    className="text-[11px] font-bold text-slate-500 hover:text-slate-700 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveTowelBranches}
+                    disabled={isSavingTowelBranches}
+                    className="ml-auto bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold px-6 py-2.5 rounded-xl text-xs transition-all cursor-pointer"
+                  >
+                    {isSavingTowelBranches ? 'Saving...' : '💾 Save Towel Branches For Everyone'}
+                  </button>
+                </div>
+                {!isTowelBranchesConfigured && (
+                  <p className="text-[11px] text-amber-600 italic">Not configured yet - right now every branch is shown to everyone. Check the branches that actually have a towel service, then save.</p>
+                )}
+              </>
+            ) : (
+              <p className="text-[11px] text-slate-400 italic">Only Admin or Facility Manager can choose which branches have a towel service.</p>
+            )}
+          </div>
         </div>
       )}
 
