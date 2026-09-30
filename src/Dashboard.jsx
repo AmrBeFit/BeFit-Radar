@@ -809,6 +809,20 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Admin-only: archive / unarchive a leave request (keeps the approval queue clean
+  // without deleting the record).
+  const handleArchiveLeaveRequest = async (requestId, isArchived) => {
+    try {
+      await updateDoc(doc(db, 'leaveRequests', requestId), {
+        isArchived: !isArchived,
+        archivedBy: currentUserIdentifier,
+        archivedAt: serverTimestamp()
+      });
+    } catch (err) {
+      alert('Error archiving leave request: ' + err.message);
+    }
+  };
+
   // MAINTENANCE ACTIONS
   const handleUpdateStatus = async (req, newStatus) => {
     if (req.status === newStatus) return;
@@ -2898,47 +2912,104 @@ export default function Dashboard({ user, onLogout }) {
             )}
           </div>
 
-          {canApproveLeave && (
-            <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-3">
-              <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
-                📋 Leave Requests Awaiting Approval
-                {leaveRequestsForApproval.filter(r => r.status === 'Pending').length > 0 && (
-                  <span className="bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
-                    {leaveRequestsForApproval.filter(r => r.status === 'Pending').length}
-                  </span>
-                )}
-              </h2>
-              {leaveRequestsForApproval.filter(r => r.status === 'Pending').length === 0 ? (
-                <p className="text-xs text-slate-400 italic">No pending leave requests.</p>
-              ) : (
-                <div className="space-y-2">
-                  {leaveRequestsForApproval.filter(r => r.status === 'Pending').map((r) => (
-                    <div key={r.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-black text-slate-800">👤 {r.username}</span>
-                        <span className="text-slate-500 font-bold">{r.startDate} → {r.endDate}</span>
-                      </div>
-                      {r.reason && <p className="text-slate-500">{r.reason}</p>}
-                      <div className="flex gap-2 justify-end">
-                        <button
-                          onClick={() => handleLeaveDecision(r.id, 'Rejected')}
-                          className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-300 hover:bg-rose-200 transition"
-                        >
-                          Reject
-                        </button>
-                        <button
-                          onClick={() => handleLeaveDecision(r.id, 'Approved')}
-                          className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-emerald-100 text-emerald-700 border border-emerald-300 hover:bg-emerald-200 transition"
-                        >
-                          Approve
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+          {canApproveLeave && (() => {
+            const pendingCount = leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived).length;
+            const visibleLeaveRequests = isAdmin
+              ? leaveRequestsForApproval
+                  .filter(r => (showArchivedOnly ? r.isArchived === true : !r.isArchived))
+                  .slice()
+                  .sort((a, b) => (a.status === 'Pending' ? -1 : 1) - (b.status === 'Pending' ? -1 : 1))
+              : leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived);
+
+            return (
+              <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
+                    📋 {isAdmin ? 'Leave Requests' : 'Leave Requests Awaiting Approval'}
+                    {pendingCount > 0 && (
+                      <span className="bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
+                        {pendingCount}
+                      </span>
+                    )}
+                  </h2>
+                  {isAdmin && (
+                    <button
+                      onClick={() => setShowArchivedOnly(!showArchivedOnly)}
+                      className={`px-3 py-1.5 rounded-xl text-[11px] font-black border transition ${
+                        showArchivedOnly ? 'bg-amber-500 text-slate-900 border-amber-600' : 'bg-slate-100 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      {showArchivedOnly ? '📂 Viewing Archived' : '📁 Show Archived'}
+                    </button>
+                  )}
                 </div>
-              )}
-            </div>
-          )}
+                {visibleLeaveRequests.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">
+                    {showArchivedOnly && isAdmin ? 'No archived leave requests.' : 'No pending leave requests.'}
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {visibleLeaveRequests.map((r) => {
+                      const badge = r.status === 'Approved'
+                        ? { bg: '#059669', label: 'Approved' }
+                        : r.status === 'Rejected'
+                        ? { bg: '#e11d48', label: 'Rejected' }
+                        : { bg: '#f59e0b', label: 'Pending' };
+                      return (
+                        <div key={r.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-black text-slate-800">👤 {r.username}</span>
+                            <span className="text-slate-500 font-bold">{r.startDate} → {r.endDate}</span>
+                          </div>
+                          {r.reason && <p className="text-slate-500">{r.reason}</p>}
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black text-white" style={{ backgroundColor: badge.bg }}>
+                              {badge.label}
+                            </span>
+                            <div className="flex gap-2 justify-end">
+                              {r.status === 'Pending' && (
+                                <>
+                                  <button
+                                    onClick={() => handleLeaveDecision(r.id, 'Rejected')}
+                                    className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-300 hover:bg-rose-200 transition"
+                                  >
+                                    Reject
+                                  </button>
+                                  <button
+                                    onClick={() => handleLeaveDecision(r.id, 'Approved')}
+                                    className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-emerald-100 text-emerald-700 border border-emerald-300 hover:bg-emerald-200 transition"
+                                  >
+                                    Approve
+                                  </button>
+                                </>
+                              )}
+                              {isAdmin && (
+                                <>
+                                  <button
+                                    onClick={() => handleArchiveLeaveRequest(r.id, r.isArchived)}
+                                    className="bg-amber-500 hover:bg-amber-600 text-slate-900 px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold shadow-sm cursor-pointer"
+                                    title="Archive Request"
+                                  >
+                                    {r.isArchived ? 'Unarchive' : 'Archive 📁'}
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteLeaveRequest(r.id)}
+                                    className="bg-rose-600 hover:bg-rose-700 text-white font-black px-3 py-1.5 rounded-xl text-[11px] shadow-md cursor-pointer border-0"
+                                  >
+                                    DELETE
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
