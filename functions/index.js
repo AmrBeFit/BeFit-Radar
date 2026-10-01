@@ -17,7 +17,7 @@ const usernameToEmail = (username) =>
 
 // Update: which roles a given caller role is allowed to create, mirroring the app's own rules.
 const ALLOWED_ROLES_BY_CREATOR = {
-  ADMIN: ['User', 'Supervisor', 'Branch Manager', 'Facility Manager', 'Facility Member', 'HR', 'CEO', 'Admin'],
+  ADMIN: ['User', 'Supervisor', 'Branch Manager', 'Facility Manager', 'Facility Member', 'HR', 'CEO', 'QA', 'Admin'],
   'BRANCH MANAGER': ['User', 'Supervisor'],
   'FACILITY MANAGER': ['Facility Member']
 };
