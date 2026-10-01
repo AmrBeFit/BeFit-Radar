@@ -22,6 +22,16 @@ const ALLOWED_ROLES_BY_CREATOR = {
   'FACILITY MANAGER': ['Facility Member']
 };
 
+// Update: Facility Manager / Branch Manager / Supervisor teams are now SHARED - any manager of that
+// type can delete any account of the matching role(s), regardless of which specific manager created
+// it (this is intentionally separate from ALLOWED_ROLES_BY_CREATOR above, since e.g. a Supervisor may
+// delete a User's account without being allowed to create one).
+const ALLOWED_DELETE_TARGET_ROLES_BY_ROLE = {
+  'FACILITY MANAGER': ['Facility Member'],
+  'BRANCH MANAGER': ['User', 'Supervisor'],
+  SUPERVISOR: ['User']
+};
+
 // --------------------------------------------------------------
 // createUserAccount: replaces the old client-side addDoc(users, {...}).
 // Creating a Firebase Auth user from the browser signs the browser in as
@@ -393,10 +403,18 @@ exports.deleteUserAccount = onCall(async (request) => {
   const targetData = targetDoc.data();
 
   const isAdmin = callerRole === 'ADMIN';
-  // Only the roles that are allowed to create accounts may delete the ones they created.
+  const targetRole = targetData.role || 'User';
+
+  // Shared-team roles (Facility Manager / Branch Manager / Supervisor): may delete ANY account of the
+  // matching role(s), regardless of who created it.
+  const allowedDeleteTargetRoles = ALLOWED_DELETE_TARGET_ROLES_BY_ROLE[callerRole];
+  const canDeleteByRole = !!allowedDeleteTargetRoles && allowedDeleteTargetRoles.includes(targetRole);
+
+  // Fallback for any other role that manages users (e.g. CEO): only accounts they personally created.
   const isCreator = targetData.createdBy === request.auth.uid && Object.keys(ALLOWED_ROLES_BY_CREATOR).includes(callerRole);
-  if (!isAdmin && !isCreator) {
-    throw new HttpsError('permission-denied', 'You can only delete accounts that you created yourself.');
+
+  if (!isAdmin && !canDeleteByRole && !isCreator) {
+    throw new HttpsError('permission-denied', 'You do not have permission to delete this account.');
   }
 
   try {
@@ -414,6 +432,42 @@ exports.deleteUserAccount = onCall(async (request) => {
 
   return { success: true };
 });
+
+// Shared by both push triggers below: sends one multicast push to a list of FCM tokens and
+// prunes any token that Firebase reports as no-longer-valid (app uninstalled, token expired, etc.)
+// from every user document that had it. `usersSnap` is the full /users snapshot already fetched by
+// the caller, reused here just for the cleanup pass so we don't query Firestore a second time.
+const sendPushAndCleanup = async (usersSnap, tokens, title, body, data) => {
+  const allTokens = [...new Set(tokens)];
+  if (allTokens.length === 0) return;
+
+  const message = { notification: { title, body }, data, tokens: allTokens };
+
+  try {
+    const response = await getMessaging().sendEachForMulticast(message);
+    console.log(`Push sent: ${response.successCount} succeeded, ${response.failureCount} failed.`);
+
+    const invalidTokens = [];
+    response.responses.forEach((r, i) => {
+      if (!r.success) invalidTokens.push(allTokens[i]);
+    });
+
+    if (invalidTokens.length > 0) {
+      const batch = db.batch();
+      usersSnap.forEach((docSnap) => {
+        const u = docSnap.data();
+        const tokens2 = Array.isArray(u.fcmTokens) ? u.fcmTokens : [];
+        const stillValid = tokens2.filter((t) => !invalidTokens.includes(t));
+        if (stillValid.length !== tokens2.length) {
+          batch.update(docSnap.ref, { fcmTokens: stillValid });
+        }
+      });
+      await batch.commit();
+    }
+  } catch (err) {
+    console.error('Error sending push notification:', err);
+  }
+};
 
 // Fires automatically every time a new document is added to the "requests" collection,
 // even if every single browser/device is fully closed - this is what makes it a true push notification.
@@ -477,46 +531,73 @@ exports.onNewRequestPush = onDocumentCreated('requests/{requestId}', async (even
 
   if (targetUsers.length === 0) return;
 
-  const allTokens = [...new Set(targetUsers.flatMap((u) => u.fcmTokens))];
-
   const title = isManagement
     ? (newRequest.type === 'SUMMON' ? '🚨 Urgent Call From Management' : '🔔 New Management Request')
     : '🔧 New Maintenance Request';
 
   const body = newRequest.title || newRequest.details || `Branch: ${newRequest.branch || newRequest.targetBranch || ''}`;
 
-  const message = {
-    notification: { title, body },
-    data: {
-      requestId: event.params.requestId,
-      type: newRequest.type || 'REQUEST'
-    },
-    tokens: allTokens
-  };
+  await sendPushAndCleanup(
+    usersSnap,
+    targetUsers.flatMap((u) => u.fcmTokens),
+    title,
+    body,
+    { requestId: event.params.requestId, type: newRequest.type || 'REQUEST' }
+  );
+});
 
-  try {
-    const response = await getMessaging().sendEachForMulticast(message);
-    console.log(`Push sent: ${response.successCount} succeeded, ${response.failureCount} failed.`);
+// Fires automatically every time a new document is added to the "ceo_requests" collection - this is
+// the "CEO Services" tab (a CEO/Admin sending something to whoever is currently checked in at a
+// branch, e.g. "bring me a coffee" or an urgent summon). Without this trigger, these never pushed at
+// all (only the in-app, tab-must-be-open listener caught them), which is the gap being fixed here.
+exports.onNewCeoRequestPush = onDocumentCreated('ceo_requests/{requestId}', async (event) => {
+  const newCeoRequest = event.data.data();
+  if (!newCeoRequest) return;
 
-    // Clean up tokens that are no longer valid (uninstalled, expired, etc.)
-    const invalidTokens = [];
-    response.responses.forEach((r, i) => {
-      if (!r.success) invalidTokens.push(allTokens[i]);
+  // Whoever is currently checked in (no checkOutTime yet) at the targeted branch - these are the
+  // people actually being asked to do something, so they must be notified even with the app closed.
+  let activeUsernamesAtTargetBranch = [];
+  if (newCeoRequest.targetBranch) {
+    const activeAttendanceSnap = await db
+      .collection('attendance')
+      .where('branch', '==', newCeoRequest.targetBranch)
+      .get();
+
+    activeAttendanceSnap.forEach((a) => {
+      const rec = a.data();
+      const isActive = !rec.checkOutTime && !rec.checkOut;
+      if (isActive && rec.username) {
+        activeUsernamesAtTargetBranch.push(rec.username);
+      }
     });
-
-    if (invalidTokens.length > 0) {
-      const batch = db.batch();
-      usersSnap.forEach((docSnap) => {
-        const u = docSnap.data();
-        const tokens = Array.isArray(u.fcmTokens) ? u.fcmTokens : [];
-        const stillValid = tokens.filter((t) => !invalidTokens.includes(t));
-        if (stillValid.length !== tokens.length) {
-          batch.update(docSnap.ref, { fcmTokens: stillValid });
-        }
-      });
-      await batch.commit();
-    }
-  } catch (err) {
-    console.error('Error sending push notification:', err);
   }
+
+  const usersSnap = await db.collection('users').get();
+  const targetUsers = [];
+
+  usersSnap.forEach((docSnap) => {
+    const u = docSnap.data();
+    const role = (u.role || '').trim().toUpperCase();
+    const isAdminOrCEO = role === 'ADMIN' || role === 'CEO';
+    // Notify every Admin/CEO (so management sees its own request went out), plus whoever is
+    // actually present at the targeted branch right now and needs to act on it.
+    const shouldNotify = isAdminOrCEO || activeUsernamesAtTargetBranch.includes(u.username);
+
+    if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+      targetUsers.push(u);
+    }
+  });
+
+  if (targetUsers.length === 0) return;
+
+  const title = '🚨 CEO Service Request';
+  const body = `${newCeoRequest.serviceType || 'Request'}: ${newCeoRequest.itemDetails || ''} — ${newCeoRequest.targetBranch || ''}`;
+
+  await sendPushAndCleanup(
+    usersSnap,
+    targetUsers.flatMap((u) => u.fcmTokens),
+    title,
+    body,
+    { requestId: event.params.requestId, type: 'CEO_REQUEST' }
+  );
 });
