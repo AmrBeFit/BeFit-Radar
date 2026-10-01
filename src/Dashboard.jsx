@@ -1736,7 +1736,10 @@ export default function Dashboard({ user, onLogout }) {
 
     // Fetch and Sort Branches Alphabetically (A-Z)
     const unsubBranches = onSnapshot(collection(db, 'branches'), (snapshot) => {
-      const list = snapshot.docs.map(item => ({ id: item.id, name: item.data().name || item.data().title || 'Unnamed' }));
+      // IMPORTANT: keep every field from the branch document (...item.data()), not just name -
+      // the GPS lock fields (locationLat/locationLng/locationRadius) live here too, and dropping
+      // them meant the app could never see a saved location, so the geofence silently never applied.
+      const list = snapshot.docs.map(item => ({ id: item.id, ...item.data(), name: item.data().name || item.data().title || 'Unnamed' }));
       list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
       setBranches(list);
     });
