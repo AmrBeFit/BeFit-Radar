@@ -59,6 +59,41 @@ const distanceInMeters = (lat1, lon1, lat2, lon2) => {
   return R * c;
 };
 
+// Decimal degrees -> "30°01'55.81"N" style text, the format Google Maps shows when you
+// long-press a pin. Used to show the Admin a human-readable version of a saved branch location.
+const decimalToDms = (deg, axis) => {
+  if (deg == null || Number.isNaN(deg)) return '';
+  const dir = axis === 'lat' ? (deg >= 0 ? 'N' : 'S') : (deg >= 0 ? 'E' : 'W');
+  const abs = Math.abs(deg);
+  const d = Math.floor(abs);
+  const minFloat = (abs - d) * 60;
+  const m = Math.floor(minFloat);
+  const s = ((minFloat - m) * 60).toFixed(2);
+  return `${d}°${String(m).padStart(2, '0')}'${s}"${dir}`;
+};
+
+// Parses one or two "30°01'55.81"N" style coordinates out of free text (e.g. pasted straight
+// from Google Maps as "30°01'55.81"N 31°29'54.34"E"), so the Admin can paste that format
+// directly into the Latitude/Longitude fields instead of having to convert it by hand.
+const parseDmsCoordinates = (text) => {
+  const regex = /(\d+(?:\.\d+)?)\s*[°°]\s*(\d+(?:\.\d+)?)\s*['’′]\s*(\d+(?:\.\d+)?)\s*["”″]?\s*([NSEWnsew])/g;
+  const matches = [...text.matchAll(regex)];
+  if (matches.length === 0) return null;
+
+  const toDecimal = (m) => {
+    const [, d, mnt, sec, dir] = m;
+    let val = parseFloat(d) + parseFloat(mnt) / 60 + parseFloat(sec) / 3600;
+    if (/[SW]/i.test(dir)) val = -val;
+    return { val, dir: dir.toUpperCase() };
+  };
+
+  const parsed = matches.map(toDecimal);
+  const lat = parsed.find((p) => p.dir === 'N' || p.dir === 'S');
+  const lng = parsed.find((p) => p.dir === 'E' || p.dir === 'W');
+  if (!lat && !lng) return null;
+  return { lat: lat ? lat.val : null, lng: lng ? lng.val : null };
+};
+
 // Wraps the browser's geolocation API in a promise with a sane timeout, since Check-In/Check-Out
 // need one fresh GPS reading before deciding whether to allow the camera to open.
 const getCurrentPositionAsync = (options = {}) =>
@@ -2222,6 +2257,66 @@ export default function Dashboard({ user, onLogout }) {
     saveAs(blob, fileName);
   };
 
+  const exportLocationViolationsToExcel = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Location Violations');
+
+    worksheet.columns = [
+      { header: '#', key: 'id', width: 6 },
+      { header: 'When', key: 'when', width: 22 },
+      { header: 'Employee', key: 'username', width: 22 },
+      { header: 'Branch', key: 'branch', width: 20 },
+      { header: 'Mode', key: 'mode', width: 14 },
+      { header: 'Reason', key: 'reason', width: 20 },
+      { header: 'Distance (m)', key: 'distance', width: 14 },
+      { header: 'Allowed Radius (m)', key: 'allowedRadius', width: 16 },
+    ];
+
+    worksheet.getRow(1).font = { bold: true };
+
+    const reasonLabel = { denied: 'Location access denied', unavailable: 'Location unavailable', out_of_range: 'Outside allowed area' };
+
+    filteredLocationViolations.forEach((v, index) => {
+      worksheet.addRow({
+        id: index + 1,
+        when: v.createdAt?.toDate ? v.createdAt.toDate().toLocaleString() : '',
+        username: v.username || 'N/A',
+        branch: v.branch || 'N/A',
+        mode: v.mode === 'checkin' ? 'Check-In' : 'Check-Out',
+        reason: reasonLabel[v.reason] || v.reason || '',
+        distance: v.distance ?? '',
+        allowedRadius: v.allowedRadius ?? '',
+      });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const fileName = `Location_Violations_${toLocalYmd()}.xlsx`;
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, fileName);
+  };
+
+  // Admin-only housekeeping for the Location Violations log (matches firestore.rules: delete is
+  // Admin-only there too).
+  const handleDeleteLocationViolation = async (violationId) => {
+    if (!isAdmin) return;
+    try {
+      await deleteDoc(doc(db, 'locationViolations', violationId));
+    } catch (err) {
+      alert('Error deleting entry: ' + err.message);
+    }
+  };
+
+  const handleDeleteAllFilteredViolations = async () => {
+    if (!isAdmin) return;
+    if (filteredLocationViolations.length === 0) return;
+    if (!window.confirm(`Delete all ${filteredLocationViolations.length} location violation entries currently shown (matching your filters)? This cannot be undone.`)) return;
+    try {
+      await Promise.all(filteredLocationViolations.map(v => deleteDoc(doc(db, 'locationViolations', v.id))));
+    } catch (err) {
+      alert('Error deleting entries: ' + err.message);
+    }
+  };
+
   // Called from the Branch Checklist when someone flags an item as "not OK": switches to the real
   // Requests tab and pre-fills the actual "Create Maintenance Request" form (title, branch,
   // description) so they finish it there - with a live photo and a category - instead of a
@@ -3753,11 +3848,33 @@ export default function Dashboard({ user, onLogout }) {
             either refusing to share their location, or while physically outside the branch's
             allowed GPS radius. Uses the same date/user/branch filters as the attendance table above. */}
         <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4 mt-6 print:hidden">
-          <div>
-            <h2 className="text-lg font-black text-slate-900 tracking-tight">LOCATION VIOLATIONS</h2>
-            <p className="text-xs text-slate-500">
-              Blocked Check-In/Check-Out attempts — location access denied, or the employee was outside the branch's allowed radius.
-            </p>
+          <div className="flex flex-col md:flex-row justify-between md:items-center gap-3">
+            <div>
+              <h2 className="text-lg font-black text-slate-900 tracking-tight">LOCATION VIOLATIONS</h2>
+              <p className="text-xs text-slate-500">
+                Blocked Check-In/Check-Out attempts — location access denied, or the employee was outside the branch's allowed radius.
+              </p>
+            </div>
+
+            {filteredLocationViolations.length > 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={exportLocationViolationsToExcel}
+                  style={{ backgroundColor: '#059669', color: '#ffffff' }}
+                  className="hover:opacity-90 active:scale-95 px-3 py-2 rounded-xl text-xs font-black shadow-md transition border-0 cursor-pointer"
+                >
+                  EXPORT EXCEL
+                </button>
+                {isAdmin && (
+                  <button
+                    onClick={handleDeleteAllFilteredViolations}
+                    className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-2 rounded-xl text-xs font-black shadow-md transition cursor-pointer"
+                  >
+                    Delete All ({filteredLocationViolations.length})
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {locationViolationSummary.length === 0 ? (
@@ -3801,6 +3918,7 @@ export default function Dashboard({ user, onLogout }) {
                         <th className="p-2">Mode</th>
                         <th className="p-2">Reason</th>
                         <th className="p-2">Distance</th>
+                        {isAdmin && <th className="p-2">Actions</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -3820,6 +3938,16 @@ export default function Dashboard({ user, onLogout }) {
                           <td className="p-2">
                             {v.reason === 'out_of_range' ? `~${v.distance}m (limit ${v.allowedRadius}m)` : '-'}
                           </td>
+                          {isAdmin && (
+                            <td className="p-2">
+                              <button
+                                onClick={() => handleDeleteLocationViolation(v.id)}
+                                className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition cursor-pointer"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -4321,21 +4449,46 @@ export default function Dashboard({ user, onLogout }) {
                           </span>
                         </div>
 
+                        {hasGeofence && (
+                          <p className="text-[10px] font-mono text-slate-400 tracking-tight">
+                            {decimalToDms(b.locationLat, 'lat')} {decimalToDms(b.locationLng, 'lng')}
+                          </p>
+                        )}
+
                         <div className="grid grid-cols-3 gap-1.5">
                           <input
                             type="text"
                             inputMode="decimal"
-                            placeholder="Latitude"
+                            placeholder={`Latitude (e.g. 30°01'55.81"N)`}
                             value={draft.lat}
-                            onChange={(e) => setBranchLocationField(b.id, 'lat', e.target.value)}
+                            onChange={(e) => {
+                              // Pasting/typing a DMS coordinate (or a full pair, e.g. copied straight from
+                              // Google Maps as `30°01'55.81"N 31°29'54.34"E`) auto-converts to decimal and,
+                              // if both lat and lng were in the text, fills both fields in one go.
+                              const parsed = parseDmsCoordinates(e.target.value);
+                              if (parsed && (parsed.lat != null || parsed.lng != null)) {
+                                if (parsed.lat != null) setBranchLocationField(b.id, 'lat', String(parsed.lat));
+                                if (parsed.lng != null) setBranchLocationField(b.id, 'lng', String(parsed.lng));
+                              } else {
+                                setBranchLocationField(b.id, 'lat', e.target.value);
+                              }
+                            }}
                             className="p-2 bg-white border rounded-lg text-[11px] font-semibold"
                           />
                           <input
                             type="text"
                             inputMode="decimal"
-                            placeholder="Longitude"
+                            placeholder={`Longitude (e.g. 31°29'54.34"E)`}
                             value={draft.lng}
-                            onChange={(e) => setBranchLocationField(b.id, 'lng', e.target.value)}
+                            onChange={(e) => {
+                              const parsed = parseDmsCoordinates(e.target.value);
+                              if (parsed && (parsed.lat != null || parsed.lng != null)) {
+                                if (parsed.lat != null) setBranchLocationField(b.id, 'lat', String(parsed.lat));
+                                if (parsed.lng != null) setBranchLocationField(b.id, 'lng', String(parsed.lng));
+                              } else {
+                                setBranchLocationField(b.id, 'lng', e.target.value);
+                              }
+                            }}
                             className="p-2 bg-white border rounded-lg text-[11px] font-semibold"
                           />
                           <input
