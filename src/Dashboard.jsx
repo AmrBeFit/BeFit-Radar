@@ -45,6 +45,36 @@ const toLocalYmd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()
 // Egyptian mobile numbers: exactly 11 digits, starting with "01" (01xxxxxxxxx).
 const isValidEgyptPhone = (p) => /^01\d{9}$/.test((p || '').trim());
 
+// Straight-line distance between two GPS points, in meters (Haversine formula).
+// Used to check whether someone checking in/out is actually near the branch's saved location.
+const distanceInMeters = (lat1, lon1, lat2, lon2) => {
+  const R = 6371000; // Earth's radius in meters
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+// Wraps the browser's geolocation API in a promise with a sane timeout, since Check-In/Check-Out
+// need one fresh GPS reading before deciding whether to allow the camera to open.
+const getCurrentPositionAsync = (options = {}) =>
+  new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Location services are not available on this device/browser.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 0,
+      ...options
+    });
+  });
+
 // This one Admin account is a hidden "owner" account: it must never show up anywhere in the
 // app's UI (System Users table, any person-picker/assignee dropdown, reports, attendance lists,
 // "who's currently present" panels, etc.) for anyone, including other Admins. Its data in
@@ -236,6 +266,9 @@ export default function Dashboard({ user, onLogout }) {
 
   // Branch & Category Management States
   const [newBranchName, setNewBranchName] = useState('');
+  // Per-branch draft for the GPS geofence (lat/lng/radius) Admin sets in Settings, keyed by branch id.
+  const [branchLocationEdits, setBranchLocationEdits] = useState({});
+  const [isLocatingBranchId, setIsLocatingBranchId] = useState(null);
   const [newCategoryName, setNewCategoryName] = useState('');
 
   // Live "now" ticker - used to recompute Online/Offline status every few seconds
@@ -259,6 +292,14 @@ export default function Dashboard({ user, onLogout }) {
   const [cameraMode, setCameraMode] = useState('request');
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const [isCheckingLocation, setIsCheckingLocation] = useState(false);
+  // Holds the GPS reading captured (and already verified against the branch) right before the
+  // camera opened for Check-In/Check-Out, so handleAttendanceSubmit can save it with the record.
+  const geoRef = useRef(null);
+
+  // Location Violations: every time someone tries to Check-In/Check-Out but is blocked by the
+  // GPS geofence (denied location access, or physically outside the branch's allowed radius).
+  const [locationViolations, setLocationViolations] = useState([]);
 
   // Reports Filter States
   const [reportStartDate, setReportStartDate] = useState('');
@@ -675,6 +716,78 @@ export default function Dashboard({ user, onLogout }) {
       } catch (err) {
         alert('Error deleting branch: ' + err.message);
       }
+    }
+  };
+
+  // GPS geofence (Admin only): reads the field the Admin is currently editing for a branch,
+  // falling back to whatever is already saved on the branch document.
+  const getBranchLocationDraft = (branch) => {
+    const draft = branchLocationEdits[branch.id] || {};
+    return {
+      lat: draft.lat !== undefined ? draft.lat : (branch.locationLat != null ? String(branch.locationLat) : ''),
+      lng: draft.lng !== undefined ? draft.lng : (branch.locationLng != null ? String(branch.locationLng) : ''),
+      radius: draft.radius !== undefined ? draft.radius : (branch.locationRadius != null ? String(branch.locationRadius) : '150')
+    };
+  };
+
+  const setBranchLocationField = (branchId, field, value) => {
+    setBranchLocationEdits(prev => ({
+      ...prev,
+      [branchId]: { ...getBranchLocationDraft(branches.find(b => b.id === branchId) || {}), ...prev[branchId], [field]: value }
+    }));
+  };
+
+  const handleUseMyLocationForBranch = async (branchId) => {
+    setIsLocatingBranchId(branchId);
+    try {
+      const position = await getCurrentPositionAsync();
+      setBranchLocationField(branchId, 'lat', String(position.coords.latitude));
+      setBranchLocationField(branchId, 'lng', String(position.coords.longitude));
+    } catch (err) {
+      alert("Couldn't get your current location: " + err.message);
+    } finally {
+      setIsLocatingBranchId(null);
+    }
+  };
+
+  const handleSaveBranchLocation = async (branch) => {
+    if (!isAdmin) return alert("Only Admin can set a branch's location.");
+    const draft = getBranchLocationDraft(branch);
+    const lat = parseFloat(draft.lat);
+    const lng = parseFloat(draft.lng);
+    const radius = parseInt(draft.radius, 10);
+
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      return alert('Please enter a valid latitude and longitude (or use "Use my current location").');
+    }
+    if (Number.isNaN(radius) || radius <= 0) {
+      return alert('Please enter a valid allowed radius in meters (e.g. 150).');
+    }
+
+    try {
+      await updateDoc(doc(db, 'branches', branch.id), {
+        locationLat: lat,
+        locationLng: lng,
+        locationRadius: radius
+      });
+      setBranchLocationEdits(prev => { const next = { ...prev }; delete next[branch.id]; return next; });
+      alert(`Location saved for ${branch.name}. Check-In/Check-Out there now requires being within ${radius}m.`);
+    } catch (err) {
+      alert('Error saving branch location: ' + err.message);
+    }
+  };
+
+  const handleClearBranchLocation = async (branch) => {
+    if (!isAdmin) return alert("Only Admin can clear a branch's location.");
+    if (!window.confirm(`Remove the GPS requirement for ${branch.name}? Check-In/Check-Out there will no longer be location-restricted.`)) return;
+    try {
+      await updateDoc(doc(db, 'branches', branch.id), {
+        locationLat: null,
+        locationLng: null,
+        locationRadius: null
+      });
+    } catch (err) {
+      alert('Error clearing branch location: ' + err.message);
     }
   };
 
@@ -1184,6 +1297,29 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Records a blocked Check-In/Check-Out attempt (denied location, or outside the branch's allowed
+  // radius) so Admin/managers can see how often - and by whom - this is happening. Best-effort only:
+  // if this write fails for any reason, it must never be the thing that stops the alert the employee
+  // already saw from being the only feedback they get.
+  const logLocationViolation = async ({ reason, mode, branch, distance, allowedRadius, lat, lng, accuracy }) => {
+    try {
+      await addDoc(collection(db, 'locationViolations'), {
+        username: currentUserIdentifier,
+        mode,
+        branch: branch || '',
+        reason, // 'denied' | 'unavailable' | 'out_of_range'
+        distance: distance ?? null,
+        allowedRadius: allowedRadius ?? null,
+        lat: lat ?? null,
+        lng: lng ?? null,
+        accuracy: accuracy ?? null,
+        createdAt: serverTimestamp()
+      });
+    } catch (err) {
+      console.warn('Could not log location violation:', err.message);
+    }
+  };
+
   // CAMERA LOGIC
   const startLiveCamera = async (mode = 'request') => {
     if (mode === 'checkin' && openAttendance) {
@@ -1205,6 +1341,67 @@ export default function Dashboard({ user, onLogout }) {
     ) {
       return alert("You can only check in at a branch assigned to you.");
     }
+
+    // GPS geofence: if this branch has a saved location, you must be physically within its
+    // allowed radius to check in or out - no exceptions, this is a hard requirement.
+    if (mode === 'checkin' || mode === 'checkout') {
+      const targetBranchName = mode === 'checkin' ? attendanceBranch : (openAttendance?.branch || '');
+      const targetBranch = branches.find(b => b.name === targetBranchName);
+
+      if (targetBranch && targetBranch.locationLat != null && targetBranch.locationLng != null) {
+        setIsCheckingLocation(true);
+        let position;
+        try {
+          position = await getCurrentPositionAsync();
+        } catch (geoErr) {
+          setIsCheckingLocation(false);
+          const reason = geoErr.code === 1
+            ? 'Location access was denied. Please allow location access for this site and try again.'
+            : 'We could not get your current location. Please make sure GPS/Location Services are on and try again.';
+          logLocationViolation({
+            reason: geoErr.code === 1 ? 'denied' : 'unavailable',
+            mode,
+            branch: targetBranchName
+          });
+          return alert(reason);
+        }
+
+        const distance = distanceInMeters(
+          position.coords.latitude,
+          position.coords.longitude,
+          targetBranch.locationLat,
+          targetBranch.locationLng
+        );
+        const allowedRadius = targetBranch.locationRadius || 150;
+        setIsCheckingLocation(false);
+
+        if (distance > allowedRadius) {
+          logLocationViolation({
+            reason: 'out_of_range',
+            mode,
+            branch: targetBranchName,
+            distance: Math.round(distance),
+            allowedRadius,
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+            accuracy: position.coords.accuracy
+          });
+          return alert(
+            `You appear to be ~${Math.round(distance)}m away from ${targetBranchName}. ` +
+            `You need to be within ${allowedRadius}m of the branch to ${mode === 'checkin' ? 'check in' : 'check out'}.`
+          );
+        }
+
+        geoRef.current = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy
+        };
+      } else {
+        geoRef.current = null;
+      }
+    }
+
     setCameraMode(mode);
     setShowWebcam(true);
     try {
@@ -1239,9 +1436,17 @@ export default function Dashboard({ user, onLogout }) {
 
   const capturePhotoFromCamera = async () => {
     if (!videoRef.current) return;
+    const sourceWidth = videoRef.current.videoWidth || 1280;
+    const sourceHeight = videoRef.current.videoHeight || 720;
+
+    // Compress before upload: phone cameras capture at 3000-4000px+ which makes multi-MB photos.
+    // Scaling the canvas down to a sensible max dimension while drawing (instead of drawing full-size
+    // then shrinking) keeps this a single, instant canvas operation - no extra processing time.
+    const MAX_DIMENSION = 1600;
+    const scale = Math.min(1, MAX_DIMENSION / Math.max(sourceWidth, sourceHeight));
     const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth || 1280;
-    canvas.height = videoRef.current.videoHeight || 720;
+    canvas.width = Math.round(sourceWidth * scale);
+    canvas.height = Math.round(sourceHeight * scale);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
@@ -1256,7 +1461,7 @@ export default function Dashboard({ user, onLogout }) {
       } else if (cameraMode === 'checkin' || cameraMode === 'checkout') {
         handleAttendanceSubmit(capturedFile, cameraMode);
       }
-    }, 'image/jpeg', 0.9);
+    }, 'image/jpeg', 0.75);
   };
 
   // ATTENDANCE SUBMIT
@@ -1282,12 +1487,17 @@ export default function Dashboard({ user, onLogout }) {
       const todayStr = toLocalYmd();
 
       if (mode === 'checkin') {
+        const geo = geoRef.current;
+        geoRef.current = null;
         await addDoc(collection(db, 'attendance'), {
           username: currentUserIdentifier,
           branch: attendanceBranch || (branches[0]?.name || 'General'),
           dateStr: todayStr,
           checkInTime: serverTimestamp(),
           checkInPhoto: photoUrl,
+          checkInLat: geo?.lat ?? null,
+          checkInLng: geo?.lng ?? null,
+          checkInAccuracy: geo?.accuracy ?? null,
           checkOutTime: null,
           checkOutPhoto: null,
           isArchived: false,
@@ -1309,9 +1519,14 @@ export default function Dashboard({ user, onLogout }) {
         const activeRecord = openSessions.sort((a, b) => sessionTime(b) - sessionTime(a))[0] || null;
 
         if (activeRecord) {
+          const geo = geoRef.current;
+          geoRef.current = null;
           await updateDoc(doc(db, 'attendance', activeRecord.id), {
             checkOutTime: serverTimestamp(),
             checkOutPhoto: photoUrl,
+            checkOutLat: geo?.lat ?? null,
+            checkOutLng: geo?.lng ?? null,
+            checkOutAccuracy: geo?.accuracy ?? null,
             status: 'Completed'
           });
           alert('Check-Out Successful! 🔴');
@@ -1546,6 +1761,14 @@ export default function Dashboard({ user, onLogout }) {
       setAttendanceLoadError(err.message || 'Unknown error');
     });
 
+    // Location Violations: everyone who can view reports sees the full list (mirrors attendance);
+    // other roles don't need it, but the listener is cheap and simplest to just always attach.
+    const unsubLocationViolations = onSnapshot(collection(db, 'locationViolations'), (snapshot) => {
+      setLocationViolations(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
+    }, (err) => {
+      console.warn('Could not load location violations:', err.message);
+    });
+
     const unsubLogs = onSnapshot(collection(db, 'logs'), (snapshot) => {
       const logsData = snapshot.docs.map(item => ({ id: item.id, ...item.data() }));
       logsData.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
@@ -1563,7 +1786,7 @@ export default function Dashboard({ user, onLogout }) {
     });
 
     return () => {
-      unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers();
+      unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers(); unsubLocationViolations();
     };
   }, [user?.id, roleLower, branchesKey, currentUserIdentifier]);
 
@@ -1698,6 +1921,43 @@ export default function Dashboard({ user, onLogout }) {
     return list;
   }, [attendanceRecords, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, currentUserIdentifier, usernameToRole, showArchivedOnly]);
 
+  // Same visibility scoping as attendance above, applied to location-violation attempts: a Branch
+  // Manager/Supervisor only sees their own branches' staff, everyone else only sees their own attempts,
+  // Admin/HR/CEO see everything.
+  const hierarchyFilteredLocationViolations = useMemo(() => {
+    let list = locationViolations.filter(v => !isHiddenAdminUser({ username: v.username }));
+
+    if (isAdmin || isHR || isCEO) {
+      // no filtering
+    } else if (isBranchManager) {
+      if (assignedBranches.length > 0) {
+        list = list.filter(v => assignedBranches.includes(v.branch));
+      } else {
+        list = list.filter(v => v.username === currentUserIdentifier);
+      }
+      list = list.filter(v => {
+        if (v.username === currentUserIdentifier) return true;
+        const role = (usernameToRole[v.username] || 'User').trim().toUpperCase();
+        return role === 'USER' || role === 'STAFF' || role === 'SUPERVISOR';
+      });
+    } else if (isSupervisor) {
+      if (assignedBranches.length > 0) {
+        list = list.filter(v => assignedBranches.includes(v.branch));
+      } else {
+        list = list.filter(v => v.username === currentUserIdentifier);
+      }
+      list = list.filter(v => {
+        if (v.username === currentUserIdentifier) return true;
+        const role = (usernameToRole[v.username] || 'User').trim().toUpperCase();
+        return role === 'USER' || role === 'STAFF';
+      });
+    } else {
+      list = list.filter(v => v.username === currentUserIdentifier);
+    }
+
+    return list;
+  }, [locationViolations, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, currentUserIdentifier, usernameToRole]);
+
   // Update: the "User Filter" dropdown is now derived directly from whoever actually has visible attendance records,
   // so it can never show a name that then yields zero rows (this replaces the old assignedBranches-only guess)
   const visibleReportUsers = useMemo(() => {
@@ -1755,6 +2015,46 @@ export default function Dashboard({ user, onLogout }) {
 
     return list.sort((a, b) => (b.checkInTime?.seconds || 0) - (a.checkInTime?.seconds || 0));
   }, [hierarchyFilteredAttendance, reportUserFilters, reportBranchFilters, reportStartDate, reportEndDate]);
+
+  // Blocked Check-In/Check-Out attempts (location denied, or outside the branch's allowed radius),
+  // filtered with the same Reports tab filters (user, branch, date range) as the attendance table above.
+  const filteredLocationViolations = useMemo(() => {
+    let list = [...hierarchyFilteredLocationViolations];
+
+    if (reportUserFilters.length > 0) list = list.filter(v => reportUserFilters.includes(v.username));
+    if (reportBranchFilters.length > 0) list = list.filter(v => reportBranchFilters.includes(v.branch));
+
+    if (reportStartDate) {
+      const start = new Date(reportStartDate).getTime();
+      list = list.filter(v => {
+        const time = v.createdAt?.toDate ? v.createdAt.toDate().getTime() : 0;
+        return time >= start;
+      });
+    }
+
+    if (reportEndDate) {
+      const end = new Date(reportEndDate).setHours(23, 59, 59, 999);
+      list = list.filter(v => {
+        const time = v.createdAt?.toDate ? v.createdAt.toDate().getTime() : 0;
+        return time <= end;
+      });
+    }
+
+    return list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+  }, [hierarchyFilteredLocationViolations, reportUserFilters, reportBranchFilters, reportStartDate, reportEndDate]);
+
+  // Per-employee violation counts (denied vs out-of-range), for the summary table.
+  const locationViolationSummary = useMemo(() => {
+    const byUser = {};
+    filteredLocationViolations.forEach((v) => {
+      const key = v.username || 'Unknown';
+      if (!byUser[key]) byUser[key] = { username: key, denied: 0, outOfRange: 0, total: 0 };
+      if (v.reason === 'out_of_range') byUser[key].outOfRange += 1;
+      else byUser[key].denied += 1; // 'denied' and 'unavailable' both count as a refused/failed location
+      byUser[key].total += 1;
+    });
+    return Object.values(byUser).sort((a, b) => b.total - a.total);
+  }, [filteredLocationViolations]);
 
   const pendingCeoRequestsForUser = useMemo(() => {
     let list = [...ceoRequests];
@@ -2738,13 +3038,19 @@ export default function Dashboard({ user, onLogout }) {
               </div>
             </div>
 
+            {isCheckingLocation && (
+              <div className="flex items-center justify-center gap-2 p-2.5 bg-indigo-50 border border-indigo-200 rounded-xl text-xs font-bold text-indigo-700">
+                📍 Confirming your location...
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-4 pt-4">
               <button
-                disabled={loading || !!openAttendance}
+                disabled={loading || isCheckingLocation || !!openAttendance}
                 onClick={() => startLiveCamera('checkin')}
                 className={`p-6 rounded-2xl font-black text-sm flex flex-col items-center gap-2 shadow-md transition-all ${
-                  openAttendance 
-                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
+                  openAttendance || isCheckingLocation
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                     : 'bg-emerald-600 hover:bg-emerald-700 text-white active:scale-95'
                 }`}
               >
@@ -2754,11 +3060,11 @@ export default function Dashboard({ user, onLogout }) {
               </button>
 
               <button
-                disabled={loading || !openAttendance}
+                disabled={loading || isCheckingLocation || !openAttendance}
                 onClick={() => startLiveCamera('checkout')}
                 className={`p-6 rounded-2xl font-black text-sm flex flex-col items-center gap-2 shadow-md transition-all ${
-                  !openAttendance 
-                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
+                  !openAttendance || isCheckingLocation
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                     : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95'
                 }`}
               >
@@ -3254,6 +3560,7 @@ export default function Dashboard({ user, onLogout }) {
 
       {/* TAB 4: REPORTS */}
       {activeTab === 'reports' && canViewReports && !isFacilityManager && !isFacilityMember && (
+        <>
         <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-5">
           <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 border-b pb-4">
             <div className="flex items-center gap-3">
@@ -3438,6 +3745,88 @@ export default function Dashboard({ user, onLogout }) {
             </table>
           </div>
         </div>
+
+        {/* LOCATION VIOLATIONS: how many times each employee tried to Check-In/Check-Out while
+            either refusing to share their location, or while physically outside the branch's
+            allowed GPS radius. Uses the same date/user/branch filters as the attendance table above. */}
+        <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4 mt-6 print:hidden">
+          <div>
+            <h2 className="text-lg font-black text-slate-900 tracking-tight">LOCATION VIOLATIONS</h2>
+            <p className="text-xs text-slate-500">
+              Blocked Check-In/Check-Out attempts — location access denied, or the employee was outside the branch's allowed radius.
+            </p>
+          </div>
+
+          {locationViolationSummary.length === 0 ? (
+            <p className="text-sm text-slate-400 italic py-2">No location violations in the selected range. 🎉</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 text-slate-500 text-[11px] uppercase font-bold">
+                      <th className="p-2.5">Employee</th>
+                      <th className="p-2.5">Denied / Unavailable</th>
+                      <th className="p-2.5">Outside Range</th>
+                      <th className="p-2.5">Total Attempts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {locationViolationSummary.map((row) => (
+                      <tr key={row.username} className="border-b border-slate-100">
+                        <td className="p-2.5 font-bold text-slate-800">{row.username}</td>
+                        <td className="p-2.5">{row.denied}</td>
+                        <td className="p-2.5">{row.outOfRange}</td>
+                        <td className="p-2.5 font-black text-rose-600">{row.total}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <details className="pt-2">
+                <summary className="text-xs font-bold text-slate-500 cursor-pointer select-none">
+                  Show individual attempts ({filteredLocationViolations.length})
+                </summary>
+                <div className="overflow-x-auto mt-3">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 text-slate-500 uppercase font-bold">
+                        <th className="p-2">When</th>
+                        <th className="p-2">Employee</th>
+                        <th className="p-2">Branch</th>
+                        <th className="p-2">Mode</th>
+                        <th className="p-2">Reason</th>
+                        <th className="p-2">Distance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredLocationViolations.map((v) => (
+                        <tr key={v.id} className="border-b border-slate-100">
+                          <td className="p-2 whitespace-nowrap">
+                            {v.createdAt?.toDate ? v.createdAt.toDate().toLocaleString() : '-'}
+                          </td>
+                          <td className="p-2 font-semibold text-slate-800">{v.username}</td>
+                          <td className="p-2">{v.branch || '-'}</td>
+                          <td className="p-2 capitalize">{v.mode === 'checkin' ? 'Check-In' : 'Check-Out'}</td>
+                          <td className="p-2">
+                            {v.reason === 'out_of_range' && <span className="text-amber-700 font-bold">Outside allowed area</span>}
+                            {v.reason === 'denied' && <span className="text-rose-600 font-bold">Location access denied</span>}
+                            {v.reason === 'unavailable' && <span className="text-slate-500 font-bold">Location unavailable</span>}
+                          </td>
+                          <td className="p-2">
+                            {v.reason === 'out_of_range' ? `~${v.distance}m (limit ${v.allowedRadius}m)` : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </>
+          )}
+        </div>
+        </>
       )}
 
       {/* TAB: REPORT A CONCERN (integrity / wrongdoing reports) */}
@@ -3904,17 +4293,91 @@ export default function Dashboard({ user, onLogout }) {
               {branches.length === 0 ? (
                 <p className="text-xs text-slate-400 italic">No branches added yet.</p>
               ) : (
-                branches.map((b) => (
-                  <div key={b.id} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs font-bold text-slate-800">
-                    <span>🏢 {b.name}</span>
-                    <button
-                      onClick={() => handleDeleteBranch(b.id)}
-                      className="bg-rose-600 text-white hover:bg-rose-700 px-2.5 py-1 rounded-lg transition text-[11px] font-bold"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ))
+                branches.map((b) => {
+                  const hasGeofence = b.locationLat != null && b.locationLng != null;
+                  const draft = getBranchLocationDraft(b);
+                  return (
+                    <div key={b.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs font-bold text-slate-800 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span>🏢 {b.name}</span>
+                        <button
+                          onClick={() => handleDeleteBranch(b.id)}
+                          className="bg-rose-600 text-white hover:bg-rose-700 px-2.5 py-1 rounded-lg transition text-[11px] font-bold"
+                        >
+                          Delete
+                        </button>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-200 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
+                            📍 Check-In/Out GPS Lock
+                          </span>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${hasGeofence ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}>
+                            {hasGeofence ? `Active (${b.locationRadius}m)` : 'Not set - open to all'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-1.5">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            placeholder="Latitude"
+                            value={draft.lat}
+                            onChange={(e) => setBranchLocationField(b.id, 'lat', e.target.value)}
+                            className="p-2 bg-white border rounded-lg text-[11px] font-semibold"
+                          />
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            placeholder="Longitude"
+                            value={draft.lng}
+                            onChange={(e) => setBranchLocationField(b.id, 'lng', e.target.value)}
+                            className="p-2 bg-white border rounded-lg text-[11px] font-semibold"
+                          />
+                          <input
+                            type="number"
+                            min="10"
+                            placeholder="Radius (m)"
+                            value={draft.radius}
+                            onChange={(e) => setBranchLocationField(b.id, 'radius', e.target.value)}
+                            className="p-2 bg-white border rounded-lg text-[11px] font-semibold"
+                          />
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleUseMyLocationForBranch(b.id)}
+                            disabled={isLocatingBranchId === b.id}
+                            className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-50 cursor-pointer"
+                          >
+                            {isLocatingBranchId === b.id ? 'Locating...' : '📍 Use my current location'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveBranchLocation(b)}
+                            className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer"
+                          >
+                            Save Location
+                          </button>
+                          {hasGeofence && (
+                            <button
+                              type="button"
+                              onClick={() => handleClearBranchLocation(b)}
+                              className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 cursor-pointer"
+                            >
+                              Remove Lock
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-[10px] font-medium text-slate-400 italic normal-case">
+                          Tip: stand at the branch itself and tap "Use my current location" for the most accurate setup.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>

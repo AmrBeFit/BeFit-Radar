@@ -16,9 +16,9 @@ import {
 /* =====================================================================
    Integrity / wrongdoing reports.
    -----------------------------------------------------------------
-   IMPORTANT - this is deliberately anonymous. The employee submitting
-   a report is NOT signed in and their identity , and the
-   UI below says so plainly. Only system Admin can read the list of
+   IMPORTANT - this is deliberately NOT anonymous. The employee submitting
+   a report is signed in and their identity is recorded with it, and the
+   UI below says so plainly. Only Admin and HR can read the list of
    reports and change a report's status; the person who submitted a
    report can also see it (and its status) in their own "My Reports" list,
    but nobody else can.
@@ -152,6 +152,28 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
   }, [reports, statusFilter]);
 
   // ---------- photo capture / upload ----------
+  // Compress a gallery-picked file before upload: same idea as the live-camera capture - draw it
+  // into a canvas capped at 1600px on the long side. The image decode is done by the browser
+  // natively, so this adds no noticeable delay even on a large phone photo.
+  const compressImageFile = (file, maxDimension = 1600, quality = 0.75) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the file'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Could not read the image'));
+      img.onload = () => {
+        const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
   const uploadToCloudinary = async (base64Data) => {
     setIsUploading(true);
     try {
@@ -196,10 +218,14 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
     if (!videoRef.current || !canvasRef.current) return;
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    // Compress before upload: downscale to a max of 1600px on the long side while drawing - one
+    // canvas operation, no added delay, but a JPEG that's a fraction of the full-resolution size.
+    const MAX_DIMENSION = 1600;
+    const scale = Math.min(1, MAX_DIMENSION / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
     setIsCameraOpen(false);
     const url = await uploadToCloudinary(dataUrl);
     if (url) setPhotoUrl(url);
@@ -208,13 +234,15 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const url = await uploadToCloudinary(reader.result);
+    try {
+      const compressedDataUrl = await compressImageFile(file);
+      const url = await uploadToCloudinary(compressedDataUrl);
       if (url) setPhotoUrl(url);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    } catch (err) {
+      alert('Could not process that image. Please try another photo.');
+    } finally {
+      e.target.value = '';
+    }
   };
 
   // ---------- submit ----------
@@ -243,7 +271,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
       setBranch('');
       setReportedAgainst([]);
       setPhotoUrl('');
-      alert('Your report has been submitted. Only Admin can see it.');
+      alert('Your report has been submitted. Only Admin and HR can see it.');
       setView('mine');
     } catch (err) {
       console.error(err);
@@ -296,15 +324,15 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
           <p className="text-xs text-slate-500 max-w-xl">
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
-            Only <span className="font-bold text-slate-700">Admin </span> will read it, and therefore
-            it's not linked to your account.
+            Only <span className="font-bold text-slate-700">Admin and HR</span> will ever read it, and because
+            it's linked to your account, we can actually follow up and make it right.
           </p>
           {/* Arabic version - same honest meaning as the English text above (not a "true anonymity" claim):
-              the report is tied to the reporter's account, and only Admin can read it. */}
+              the report is tied to the reporter's account, and only Admin + HR can read it. */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">هذا البلاغ مجهولاً.</span> لا يتم تسجيله مرتبطًا
-            بحسابك، ولا يطّلع عليه سوى <span className="font-bold text-slate-700">مسئول النظام </span> فقط،
-            دون سواه. يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            <span className="font-bold text-slate-700">هذا البلاغ ليس مجهولاً.</span> يتم تسجيله مرتبطًا
+            بحسابك، ولا يطّلع عليه سوى <span className="font-bold text-slate-700">الأدمن وقسم الموارد البشرية (HR)</span> فقط،
+            دون سواهما. يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">

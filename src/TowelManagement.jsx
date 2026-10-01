@@ -265,11 +265,16 @@ export default function TowelManagement({ currentUser, branchesList }) {
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      // Compress before upload: draw straight into a downscaled canvas (max 1600px on the long side)
+      // instead of full camera resolution, so the JPEG is a fraction of the size with no extra delay -
+      // it's the same single canvas draw, just at smaller dimensions.
+      const MAX_DIMENSION = 1600;
+      const scale = Math.min(1, MAX_DIMENSION / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
       const ctx = canvas.getContext('2d');
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
 
       closeCameraStream();
 
