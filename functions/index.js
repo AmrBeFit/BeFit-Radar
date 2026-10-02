@@ -441,7 +441,33 @@ const sendPushAndCleanup = async (usersSnap, tokens, title, body, data) => {
   const allTokens = [...new Set(tokens)];
   if (allTokens.length === 0) return;
 
-  const message = { notification: { title, body }, data, tokens: allTokens };
+  // "stronger & faster": tell the browser's push service (Chrome/FCM) to treat this as
+  // urgent and deliver it immediately instead of batching/delaying it (which otherwise
+  // happens routinely on mobile under battery-saver/Doze). TTL=2h means if a phone is
+  // offline the push is still waiting when it reconnects, instead of being dropped.
+  // `tag` groups repeated pushes about the same request so the OS re-alerts (vibrates/
+  // sounds again) every time instead of silently collapsing them into one.
+  const tag = (data && (data.requestId || data.type)) ? String(data.requestId || data.type) : 'befit-eye';
+  const message = {
+    notification: { title, body },
+    data,
+    tokens: allTokens,
+    webpush: {
+      headers: {
+        Urgency: 'high',
+        TTL: '7200',
+      },
+      notification: {
+        tag,
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [500, 200, 500, 200, 500],
+      },
+      fcmOptions: {
+        link: '/',
+      },
+    },
+  };
 
   try {
     const response = await getMessaging().sendEachForMulticast(message);

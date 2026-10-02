@@ -6,14 +6,13 @@
 importScripts('https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.13.1/firebase-messaging-compat.js');
 
-// ⚠️ IMPORTANT: this must be the EXACT SAME config values as the ones in your real firebase.js.
 firebase.initializeApp({
-  apiKey: "AIzaSy...",
+  apiKey: "AIzaSyAt08VDdRMJmdyVAwRoGgHS5--h2cisNuc",
   authDomain: "befit-facility.firebaseapp.com",
   projectId: "befit-facility",
   storageBucket: "befit-facility.appspot.com",
-  messagingSenderId: "...",
-  appId: "..."
+  messagingSenderId: "518274931931",
+  appId: "1:518274931931:web:f8c701d4ef744c2fee80fe"
 });
 
 const messaging = firebase.messaging();
@@ -23,12 +22,22 @@ messaging.onBackgroundMessage((payload) => {
   const title = payload.notification?.title || payload.data?.title || 'BeFit Eye';
   const body = payload.notification?.body || payload.data?.body || 'You have a new notification.';
 
+  // tag + renotify: if several pushes arrive about the same request (or the same type of
+  // request), the phone re-alerts (sound/vibration) every single time instead of silently
+  // swallowing the 2nd/3rd one because it looks like "the same notification already shown".
+  const tag = payload.data?.requestId || payload.data?.type || payload.fcmOptions?.tag || 'befit-eye';
+
   self.registration.showNotification(title, {
     body,
-    icon: '/vite.svg', // replace with your own app icon path if you have one, e.g. '/logo192.png'
-    badge: '/vite.svg',
+    // NOTE: these icons live at the ROOT of /public (icon-192.png / icon-512.png), not under
+    // /icons/ - the old /icons/icon-192.png path 404'd, which can make Chrome fall back to a
+    // generic/blank icon and the notification feel weaker/less noticeable.
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
     requireInteraction: true,
     vibrate: [500, 200, 500, 200, 500],
+    tag,
+    renotify: true,
     data: payload.data || {}
   });
 });
