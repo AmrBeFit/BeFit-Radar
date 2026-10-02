@@ -324,15 +324,15 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
           <p className="text-xs text-slate-500 max-w-xl">
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
-            Only <span className="font-bold text-slate-700">Admin and HR</span> will ever read it, and because
-            it's linked to your account, we can actually follow up and make it right.
+            Only <span className="font-bold text-slate-700">system Admin </span> will ever read it, and
+            it's not linked to your account, we will look into your report up and make it right.
           </p>
           {/* Arabic version - same honest meaning as the English text above (not a "true anonymity" claim):
               the report is tied to the reporter's account, and only Admin + HR can read it. */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">هذا البلاغ ليس مجهولاً.</span> يتم تسجيله مرتبطًا
-            بحسابك، ولا يطّلع عليه سوى <span className="font-bold text-slate-700">الأدمن وقسم الموارد البشرية (HR)</span> فقط،
-            دون سواهما. يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            <span className="font-bold text-slate-700">هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
+            بحسابك، ولا يطّلع عليه سوى <span className="font-bold text-slate-700">مدير النظام  (HR)</span> فقط،
+            دون سواه. يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
