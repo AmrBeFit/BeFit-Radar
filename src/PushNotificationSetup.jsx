@@ -26,14 +26,35 @@ export default function PushNotificationSetup({ user }) {
         // Register the background service worker (public/firebase-messaging-sw.js)
         const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
 
-        // Only fetch a token once permission is actually granted (granted elsewhere in the app,
-        // e.g. by CEONotificationListener's silent first-interaction unlock).
-        if (Notification.permission !== 'granted') return;
+        // FIX: this effect only runs once per login (its dependency is just user.id). Before, it
+        // checked `Notification.permission` a single time and quietly gave up if it wasn't
+        // 'granted' yet - but the permission prompt (asked elsewhere, e.g. CEONotificationListener)
+        // is answered by the person a moment AFTER this effect already ran, so on a lot of first
+        // logins the token never got registered at all, even though the person tapped "Allow".
+        // That's a likely reason some devices "never receive anything": they simply never had a
+        // token saved. Now we ask for permission ourselves if it's still undecided, and wait for
+        // the real answer before giving up, so a device that allows notifications always ends up
+        // registered on this same pass.
+        let permission = Notification.permission;
+        if (permission === 'default') {
+          permission = await Notification.requestPermission().catch(() => 'denied');
+        }
+        if (permission !== 'granted') return;
 
-        const token = await getToken(messaging, {
-          vapidKey: VAPID_KEY,
-          serviceWorkerRegistration: registration
-        });
+        // Retry once on failure (a transient network/service-worker hiccup on first load is common
+        // and otherwise silently drops the registration for that device).
+        let token = null;
+        for (let attempt = 0; attempt < 2 && !token; attempt++) {
+          try {
+            token = await getToken(messaging, {
+              vapidKey: VAPID_KEY,
+              serviceWorkerRegistration: registration
+            });
+          } catch (e) {
+            if (attempt === 1) throw e;
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+        }
 
         if (token) {
           // Save this device's token onto the account, so the Cloud Function can push to it later.
