@@ -383,6 +383,20 @@ export default function Dashboard({ user, onLogout }) {
   // maintenance requests - no Towels, Attendance, Schedule, CEO Services, Reports or user management.
   const isQA = userRole === 'QA';
 
+  // Once per browser session, Admin/CEO/Facility Manager accounts silently ping the server to check
+  // for maintenance requests that have sat unattended (status "New") for 24+ hours, and push a
+  // reminder if any are found. This is deliberately a plain callable function (checkStaleRequests),
+  // not a Cloud Scheduler job - it just rides along on these roles opening the app, which they do
+  // routinely anyway, so there's no extra Google Cloud API/billing dependency. sessionStorage keeps
+  // it from firing more than once per browser tab session.
+  useEffect(() => {
+    if (!(isAdmin || isCEO || isFacilityManager)) return;
+    if (sessionStorage.getItem('staleRequestsChecked')) return;
+    sessionStorage.setItem('staleRequestsChecked', '1');
+    const checkStaleRequests = httpsCallable(functions, 'checkStaleRequests');
+    checkStaleRequests().catch(() => {}); // best-effort, never bothers the user if it fails
+  }, [isAdmin, isCEO, isFacilityManager]);
+
   // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
   const canManageStatus = isAdmin || isFacilityManager;
   // HR can view attendance reports for all branches (but not manage users)
