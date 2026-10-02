@@ -397,6 +397,23 @@ export default function Dashboard({ user, onLogout }) {
     checkStaleRequests().catch(() => {}); // best-effort, never bothers the user if it fails
   }, [isAdmin, isCEO, isFacilityManager]);
 
+  // Same idea, for the Schedule tab: once per session, Admin/CEO/Branch Manager/Supervisor accounts
+  // ping the server to check whether anyone planned to start a shift 30+ minutes ago never checked
+  // in at all (a likely no-show) - and push a heads-up if so, early enough that someone can still
+  // call them or arrange cover. todayYmd/nowMinutes are this browser's own local wall clock, since
+  // that's the clock shift times were planned against.
+  useEffect(() => {
+    if (!(isAdmin || isCEO || isBranchManager || isSupervisor)) return;
+    if (sessionStorage.getItem('absencesChecked')) return;
+    sessionStorage.setItem('absencesChecked', '1');
+    const now = new Date();
+    const checkExpectedAbsences = httpsCallable(functions, 'checkExpectedAbsences');
+    checkExpectedAbsences({
+      todayYmd: toLocalYmd(),
+      nowMinutes: now.getHours() * 60 + now.getMinutes()
+    }).catch(() => {}); // best-effort, never bothers the user if it fails
+  }, [isAdmin, isCEO, isBranchManager, isSupervisor]);
+
   // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
   const canManageStatus = isAdmin || isFacilityManager;
   // HR can view attendance reports for all branches (but not manage users)
