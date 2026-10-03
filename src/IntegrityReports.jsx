@@ -389,8 +389,8 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
             <span className="font-bold text-slate-700"> Admin and HR</span> can both read the report itself,
-            but <span className="font-bold text-slate-700">only Admin</span> can see who submitted it — HR
-            sees the report with your identity hidden.
+            but <span className="font-bold text-slate-700"> NOONE </span> can see who submitted it — Just
+            Be Honest, clear and fair when submitting the report.
           </p>
           {/* Arabic version - same honest meaning as the English text above: the report is tied to the
               reporter's account (truly anonymous), Admin and HR both read the content, but NOONE 
@@ -399,7 +399,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
             <span className="font-bold text-slate-700">هذا البلاغ مجهولاً.</span> لا يتم تسجيله مرتبطًا
             بحسابك، ويقدر <span className="font-bold text-slate-700">System Admin و (HR)</span> يطّلعوا
             على محتوى البلاغ، لكن <span className="font-bold text-slate-700">مافيش حد </span>  يقدر يعرف
-            هوية مقدّم البلاغ — هويتك مخفية  . يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            هوية مقدّم البلاغ — هويتك مخفية  . فقط كن امين و عادل و واضح  يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
