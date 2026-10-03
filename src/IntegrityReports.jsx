@@ -365,8 +365,8 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
             <span className="font-bold text-slate-700"> Admin and HR</span> can both read the report itself,
-            but <span className="font-bold text-slate-700">only Admin</span> can see who submitted it — HR
-            sees the report with your identity hidden.
+            but <span className="font-bold text-slate-700"> NOONE </span> can see who submitted it.
+            just be fair and honest.
           </p>
           {/* Arabic version - same honest meaning as the English text above: the report isnot tied to the
               reporter's account (truly anonymous), Admin and HR both read the content, but noone 

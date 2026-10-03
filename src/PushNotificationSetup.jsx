@@ -67,10 +67,26 @@ export default function PushNotificationSetup({ user }) {
         console.log('Push registration skipped:', err.message);
       }
 
-      // While the tab is open and focused, the existing CEONotificationListener (Firestore
-      // listener + local sound) already handles alerts - so we intentionally do nothing extra
-      // here to avoid a duplicate sound/alert firing at the same time.
-      unsubscribeForeground = onMessage(messaging, () => {});
+      // FIX: while the tab is open and focused, Chrome/Android do NOT show a system notification
+      // on their own for an incoming push - this used to be left empty on purpose, on the
+      // assumption that CEONotificationListener's own Firestore listener + sound already covers
+      // it. But that listener only watches new CEO requests - it says nothing for every other
+      // push type (Buzz, leave-request updates, request assignment/completion, stale/absence
+      // reminders...), so for every one of those, the push silently arrived and nothing ever
+      // appeared on screen whenever the tab happened to be open. We now show it ourselves here,
+      // the same way the OS would if the tab were closed, so nothing gets lost either way.
+      unsubscribeForeground = onMessage(messaging, (payload) => {
+        const title = payload?.notification?.title || payload?.data?.title || 'BeFit Eye';
+        const body = payload?.notification?.body || payload?.data?.body || '';
+        try {
+          if (Notification.permission === 'granted') {
+            const n = new Notification(title, { body });
+            n.onclick = () => { window.focus(); n.close(); };
+          }
+        } catch (e) {
+          console.log('Foreground notification display skipped:', e.message);
+        }
+      });
     })();
 
     return () => unsubscribeForeground();
