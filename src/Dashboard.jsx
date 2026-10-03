@@ -233,6 +233,12 @@ export default function Dashboard({ user, onLogout }) {
   // Archive Filter View Toggle for Admin
   const [showArchivedOnly, setShowArchivedOnly] = useState(false);
 
+  // Admin-only "Force Check-Out" modal: for someone who forgot to check out. The date is locked to
+  // their own check-in day (not freely editable) - only the TIME is chosen - so this can never be
+  // used to invent attendance on a day the person never actually showed up for.
+  const [forceCheckoutRec, setForceCheckoutRec] = useState(null);
+  const [forceCheckoutTime, setForceCheckoutTime] = useState('18:00');
+
   // Form states (Maintenance)
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -377,7 +383,12 @@ export default function Dashboard({ user, onLogout }) {
   const isBranchManager = userRole === 'Branch Manager';
   const isFacilityManager = userRole === 'Facility Manager';
   const isFacilityMember = userRole === 'Facility Member';
-  const isStaff = userRole === 'User' || userRole === 'Staff';
+  // "Finance and Administration" is a new role with the exact same permissions as a plain User/Staff
+  // account (submits its own maintenance requests, does its own attendance, etc.) - the one
+  // difference is organizational, not a permission at all: it reports directly to Admin and is
+  // deliberately left OUT of every "who does this Branch Manager/Supervisor manage" list elsewhere
+  // in this file, so it never shows up in their team/approval screens.
+  const isStaff = userRole === 'User' || userRole === 'Staff' || userRole === 'Finance and Administration';
   const isHR = userRole === 'HR';
   // QA: read-only access to the Branch Checklist (never ticks or signs off), and can only submit
   // maintenance requests - no Towels, Attendance, Schedule, CEO Services, Reports or user management.
@@ -723,6 +734,48 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Admin-only: open the "Force Check-Out" modal for a record that was never checked out
+  // (rec.checkOutTime is still null). Pre-fills the time picker with the check-in's own clock time
+  // as a reasonable starting guess, which the Admin then adjusts.
+  const openForceCheckout = (rec) => {
+    if (!isAdmin || rec.checkOutTime) return; // never touches an already-checked-out record
+    const checkInDate = rec.checkInTime?.toDate ? rec.checkInTime.toDate() : new Date();
+    setForceCheckoutTime(`${String(checkInDate.getHours()).padStart(2, '0')}:${String(checkInDate.getMinutes()).padStart(2, '0')}`);
+    setForceCheckoutRec(rec);
+  };
+
+  // Confirms the forced check-out. The DATE is always the same calendar day as the original
+  // check-in (never editable - this can't be used to fabricate a different day's attendance), built
+  // straight from the check-in's own Date object so it's also immune to any timezone drift; only the
+  // TIME (hour:minute) the Admin picked is applied on top of it.
+  const handleConfirmForceCheckout = async () => {
+    if (!isAdmin || !forceCheckoutRec) return;
+    if (forceCheckoutRec.checkOutTime) return alert('This record already has a check-out and cannot be edited.');
+    if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(forceCheckoutTime)) return alert('Choose a valid time.');
+
+    const checkInDate = forceCheckoutRec.checkInTime?.toDate ? forceCheckoutRec.checkInTime.toDate() : new Date();
+    const [h, m] = forceCheckoutTime.split(':').map(Number);
+    const checkOutDate = new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate(), h, m, 0);
+
+    if (checkOutDate < checkInDate) {
+      return alert('The check-out time cannot be before the check-in time on the same day.');
+    }
+
+    try {
+      await updateDoc(doc(db, 'attendance', forceCheckoutRec.id), {
+        checkOutTime: Timestamp.fromDate(checkOutDate),
+        status: 'Completed',
+        isManualCheckout: true,
+        manualCheckoutBy: currentUserIdentifier,
+        manualCheckoutAt: serverTimestamp()
+      });
+      setForceCheckoutRec(null);
+      alert('Check-out recorded.');
+    } catch (err) {
+      alert('Error recording check-out: ' + err.message);
+    }
+  };
+
   // BULK & ARCHIVE ACTIONS (CEO REQUESTS)
   const handleToggleSelectCeo = (id) => {
     setSelectedCeoIds(prev => 
@@ -933,6 +986,36 @@ export default function Dashboard({ user, onLogout }) {
       } catch (err) {
         alert('Error deleting CEO request: ' + err.message);
       }
+    }
+  };
+
+  // "Buzz": force-pushes an immediate alert about one specific request, on top of whatever automatic
+  // notification already fired for it - regardless of the request's current status. Maintenance ->
+  // every Facility Manager/Facility Member. CEO request -> whoever is currently checked in at that
+  // request's target branch. Admin can Buzz anything; a Branch Manager only a request from their own
+  // branch (the button itself is already hidden otherwise - this guard is just defense in depth, the
+  // real check happens server-side in the Cloud Function).
+  const handleBuzzRequest = async (requestId) => {
+    if (!isAdmin && !isBranchManager) return;
+    try {
+      const buzzMaintenanceRequest = httpsCallable(functions, 'buzzMaintenanceRequest');
+      const res = await buzzMaintenanceRequest({ requestId });
+      const notified = res?.data?.notified || 0;
+      alert(notified > 0 ? `Buzzed ${notified} Facility Manager/Member device(s).` : 'No Facility Manager/Member has notifications enabled yet.');
+    } catch (err) {
+      alert('Error sending Buzz: ' + (err.message || err));
+    }
+  };
+
+  const handleBuzzCeoRequest = async (requestId) => {
+    if (!isAdmin && !isBranchManager) return;
+    try {
+      const buzzCeoRequest = httpsCallable(functions, 'buzzCeoRequest');
+      const res = await buzzCeoRequest({ requestId });
+      const notified = res?.data?.notified || 0;
+      alert(notified > 0 ? `Buzzed ${notified} device(s) checked in at this branch.` : 'Nobody is currently checked in at this branch to buzz.');
+    } catch (err) {
+      alert('Error sending Buzz: ' + (err.message || err));
     }
   };
 
@@ -2613,6 +2696,36 @@ export default function Dashboard({ user, onLogout }) {
         </div>
       )}
 
+      {/* Admin-only: force a check-out for someone who forgot. Date is fixed to their own
+          check-in day (shown read-only) - only the time is picked. */}
+      {forceCheckoutRec && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-slate-900 text-sm">Force Check-Out</h3>
+              <button onClick={() => setForceCheckoutRec(null)} className="text-slate-400 font-bold">✕</button>
+            </div>
+            <p className="text-xs text-slate-600">
+              For <strong>{forceCheckoutRec.username}</strong>, who checked in at <strong>{forceCheckoutRec.branch}</strong> and never checked out.
+              This only sets a check-out time on the <strong>same day</strong> they checked in ({forceCheckoutRec.checkInTime?.toDate ? forceCheckoutRec.checkInTime.toDate().toLocaleDateString() : ''}) — the date itself cannot be changed.
+            </p>
+            <div>
+              <label className="block text-xs font-bold text-slate-600 mb-1">Check-out time</label>
+              <input
+                type="time"
+                value={forceCheckoutTime}
+                onChange={(e) => setForceCheckoutTime(e.target.value)}
+                className="w-full p-3 bg-white text-slate-900 border border-slate-200 rounded-xl text-sm font-bold"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setForceCheckoutRec(null)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold">Cancel</button>
+              <button onClick={handleConfirmForceCheckout} className="px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white font-extrabold rounded-xl text-xs shadow-md">Confirm Check-Out</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CEO BANNER */}
       {!isCEO && !isAdmin && !isFacilityManager && !isFacilityMember && isCurrentUserPresentCurrently && pendingCeoRequestsForUser.filter(r => r.status === 'Pending').length > 0 && (
         <div 
@@ -3022,6 +3135,17 @@ export default function Dashboard({ user, onLogout }) {
                           <span className="px-3 py-1 text-xs font-bold text-white rounded-xl" style={{ backgroundColor: statusStyle.bg, color: statusStyle.color }}>
                             {req.status || 'New'}
                           </span>
+                        )}
+
+                        {/* Admin can Buzz any request; a Branch Manager can only Buzz a request from their own branch */}
+                        {(isAdmin || (isBranchManager && assignedBranches.includes(req.branch))) && (
+                          <button
+                            onClick={() => handleBuzzRequest(req.id)}
+                            className="bg-sky-500 hover:bg-sky-600 text-white px-2.5 py-2 md:py-1.5 rounded-xl text-xs font-extrabold shadow-sm cursor-pointer"
+                            title="Alert every Facility Manager and Facility Member about this request, regardless of status"
+                          >
+                            Buzz 🔔
+                          </button>
                         )}
 
                         {isAdmin && (
@@ -3660,6 +3784,17 @@ export default function Dashboard({ user, onLogout }) {
                         </button>
                       )}
 
+                      {/* Admin can Buzz any CEO request; a Branch Manager can only Buzz one targeting their own branch */}
+                      {(isAdmin || (isBranchManager && assignedBranches.includes(cReq.targetBranch))) && (
+                        <button
+                          onClick={() => handleBuzzCeoRequest(cReq.id)}
+                          className="bg-sky-500 hover:bg-sky-600 text-white px-2.5 py-1.5 rounded-xl text-xs font-extrabold shadow-sm"
+                          title="Alert whoever is checked in at this branch that this request needs an urgent response"
+                        >
+                          Buzz 🔔
+                        </button>
+                      )}
+
                       {isAdmin && (
                         <>
                           <button
@@ -3853,6 +3988,16 @@ export default function Dashboard({ user, onLogout }) {
                     <td className="p-2.5"><span className="px-2 py-0.5 rounded font-black text-[9px] uppercase bg-emerald-100 text-emerald-800">{rec.status}</span></td>
                     {isAdmin && (
                       <td className="p-2.5 print:hidden space-x-1">
+                        {!rec.checkOutTime && (
+                          <button
+                            onClick={() => openForceCheckout(rec)}
+                            className="bg-sky-500 hover:bg-sky-600 text-white px-2 py-1 rounded text-[10px] font-extrabold"
+                            title="For someone who forgot to check out: sets a check-out time on their own check-in day"
+                          >
+                            Force Check-Out
+                          </button>
+                        )}
+
                         <button
                           onClick={() => handleArchiveAttendance(rec.id, rec.isArchived)}
                           className="bg-amber-500 hover:bg-amber-600 text-slate-900 px-2 py-1 rounded text-[10px] font-extrabold"
@@ -3860,8 +4005,8 @@ export default function Dashboard({ user, onLogout }) {
                           {rec.isArchived ? 'Unarchive' : 'Archive 📁'}
                         </button>
 
-                        <button 
-                          onClick={() => handleDeleteFullRecord(rec.id)} 
+                        <button
+                          onClick={() => handleDeleteFullRecord(rec.id)}
                           className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold shadow-sm transition"
                         >
                           Delete
@@ -4103,6 +4248,9 @@ export default function Dashboard({ user, onLogout }) {
                       <option value="HR" className="bg-white text-slate-900">HR</option>
                       <option value="CEO" className="bg-white text-slate-900">CEO</option>
                       <option value="QA" className="bg-white text-slate-900">QA</option>
+                      {/* Admin-only: same permissions as a plain User, but reports directly to Admin -
+                          never shown to/created by a Branch Manager or Supervisor. */}
+                      {isAdmin && <option value="Finance and Administration" className="bg-white text-slate-900">Finance and Administration</option>}
                       {isAdmin && <option value="Admin" className="bg-white text-slate-900">Admin</option>}
                     </>
                   )}
@@ -4683,6 +4831,7 @@ export default function Dashboard({ user, onLogout }) {
                     <option value="HR" className="bg-white text-slate-900">HR</option>
                     <option value="CEO" className="bg-white text-slate-900">CEO</option>
                     <option value="QA" className="bg-white text-slate-900">QA</option>
+                    <option value="Finance and Administration" className="bg-white text-slate-900">Finance and Administration</option>
                     <option value="Admin" className="bg-white text-slate-900">Admin</option>
                   </select>
                 </div>
