@@ -95,6 +95,30 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
     return () => unsub();
   }, [canReview]);
 
+  // Admin-only: now that the reporter's identity lives in its own private/reporter subdocument
+  // (not on the main report any more - that's what keeps it out of HR's reach), the `reports`
+  // listener above never carries reporterUsername/reporterRole for a report submitted under the
+  // new schema. Fetch each report's identity doc once, just for Admin, so "reported by" still
+  // shows in the review list. HR never runs this (and the rules would reject it anyway).
+  const [reporterInfoMap, setReporterInfoMap] = useState({});
+  useEffect(() => {
+    if (!isAdminUser) return;
+    const idsToFetch = reports.map((r) => r.id).filter((id) => !(id in reporterInfoMap));
+    if (idsToFetch.length === 0) return;
+    idsToFetch.forEach(async (id) => {
+      try {
+        const snap = await getDoc(doc(db, 'integrityReports', id, 'private', 'reporter'));
+        setReporterInfoMap((prev) => ({
+          ...prev,
+          [id]: snap.exists() ? { reporterUsername: snap.data().reporterUsername, reporterRole: snap.data().reporterRole } : null
+        }));
+      } catch (err) {
+        setReporterInfoMap((prev) => ({ ...prev, [id]: null }));
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reports, isAdminUser]);
+
   // A reporter (whether or not they can review the whole list) can also see their own submitted
   // reports - but reporterUid no longer lives on the content doc (that's what keeps it out of HR's
   // reach), so finding "my reports" is now a two-step process:
@@ -306,7 +330,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
       setBranch('');
       setReportedAgainst([]);
       setPhotoUrl('');
-      alert('Your report has been submitted. Only System Admin and HR can see it.');
+      alert('Your report has been submitted. Only Admin and HR can see it.');
       setView('mine');
     } catch (err) {
       console.error(err);
@@ -365,17 +389,17 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
             <span className="font-bold text-slate-700"> Admin and HR</span> can both read the report itself,
-            but <span className="font-bold text-slate-700"> NOONE </span> can see who submitted it.
-            just be fair and honest.
+            but <span className="font-bold text-slate-700">only Admin</span> can see who submitted it — HR
+            sees the report with your identity hidden.
           </p>
-          {/* Arabic version - same honest meaning as the English text above: the report isnot tied to the
-              reporter's account (truly anonymous), Admin and HR both read the content, but noone 
-              can see the reporter's identity - it's totaly anonymously. */}
+          {/* Arabic version - same honest meaning as the English text above: the report is tied to the
+              reporter's account (truly anonymous), Admin and HR both read the content, but NOONE 
+              can see the reporter's identity - it's TOTALY ANONYMOUS. */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">هذا البلاغ يعد مجهولاً.</span> لا يتم تسجيله مرتبطًا
-            بحسابك، ويقدر <span className="font-bold text-slate-700">    (System admin and HR)</span> يطّلعوا
-            على محتوى البلاغ، لكن <span className="font-bold text-slate-700"> </span>  ما فيش حد يقدر يعرف
-               — هويتك  . يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            <span className="font-bold text-slate-700">هذا البلاغ مجهولاً.</span> لا يتم تسجيله مرتبطًا
+            بحسابك، ويقدر <span className="font-bold text-slate-700">System Admin و (HR)</span> يطّلعوا
+            على محتوى البلاغ، لكن <span className="font-bold text-slate-700">مافيش حد </span>  يقدر يعرف
+            هوية مقدّم البلاغ — هويتك مخفية  . يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
@@ -571,6 +595,14 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
             <div className="space-y-3">
               {visibleReports.map((r) => {
                 const tone = STATUS_TONE[r.status] || STATUS_TONE.New;
+                // New-schema reports have their identity in reporterInfoMap (fetched from the
+                // private/reporter subdocument); a report submitted before this change still has
+                // reporterUsername/reporterRole sitting directly on the main doc (old schema) -
+                // fall back to that so old reports still show a name instead of going blank.
+                const reporterInfo = reporterInfoMap[r.id];
+                const reporterName = reporterInfo?.reporterUsername || r.reporterUsername || '';
+                const reporterRoleDisplay = reporterInfo?.reporterRole || r.reporterRole || '';
+                const reporterLookupDone = r.id in reporterInfoMap || !!r.reporterUsername;
                 return (
                   <div key={r.id} className="border border-slate-200 rounded-2xl p-4 space-y-2">
                     <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
@@ -579,10 +611,16 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
                         <p className="text-[11px] text-slate-400">
                           {r.branch} • {fmtDateTime(tsToDate(r.createdAt))} •{' '}
                           {isAdminUser ? (
-                            <>
-                              reported by <span className="font-bold text-slate-600">{r.reporterUsername}</span>
-                              {r.reporterRole && <span> ({r.reporterRole})</span>}
-                            </>
+                            reporterName ? (
+                              <>
+                                reported by <span className="font-bold text-slate-600">{reporterName}</span>
+                                {reporterRoleDisplay && <span> ({reporterRoleDisplay})</span>}
+                              </>
+                            ) : (
+                              <span className="italic text-slate-400">
+                                {reporterLookupDone ? 'reporter identity unavailable' : 'loading reporter...'}
+                              </span>
+                            )
                           ) : (
                             // HR reviews the report content but never learns who filed it - only Admin can see that.
                             <span className="italic">reporter hidden (Admin only)</span>
