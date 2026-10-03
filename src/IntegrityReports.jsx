@@ -2,8 +2,11 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { db } from './firebase';
 import {
   collection,
+  collectionGroup,
   onSnapshot,
-  addDoc,
+  getDoc,
+  getDocs,
+  writeBatch,
   updateDoc,
   deleteDoc,
   doc,
@@ -16,12 +19,14 @@ import {
 /* =====================================================================
    Integrity / wrongdoing reports.
    -----------------------------------------------------------------
-   IMPORTANT - this is deliberately NOT anonymous. The employee submitting
-   a report is signed in and their identity is recorded with it, and the
-   UI below says so plainly. Only Admin and HR can read the list of
-   reports and change a report's status; the person who submitted a
-   report can also see it (and its status) in their own "My Reports" list,
-   but nobody else can.
+   IMPORTANT - this is deliberately NOT anonymous to Admin, but it IS hidden from HR, by the user's
+   explicit choice. This is enforced by the Firestore security rules (not just this UI): a report's
+   identity-free CONTENT lives at integrityReports/{id}, which both Admin and HR can read, while the
+   reporter's identity (uid/username/role) lives in a separate subdocument,
+   integrityReports/{id}/private/reporter, whose own rule only allows Admin or the exact reporter to
+   read it - HR is never granted access to that subdocument. Submitting a report writes BOTH
+   documents in one atomic batch, so the two can never drift apart (a content doc never ends up
+   without its matching identity doc, or vice versa).
    ===================================================================== */
 
 // Same Cloudinary account already used across the app (Attendance, Towels).
@@ -90,22 +95,41 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
     return () => unsub();
   }, [canReview]);
 
-  // A reporter (whether or not they can review the whole list) can also see their own
-  // submitted reports. This is a separately-scoped query - filtered by reporterUid - so it
-  // matches the security rule's "resource.data.reporterUid == request.auth.uid" clause exactly
-  // (an unfiltered query would be rejected outright for anyone who isn't Admin/HR).
-  // Sorted client-side so no composite index is needed for this query.
-  const [myReports, setMyReports] = useState([]);
+  // A reporter (whether or not they can review the whole list) can also see their own submitted
+  // reports - but reporterUid no longer lives on the content doc (that's what keeps it out of HR's
+  // reach), so finding "my reports" is now a two-step process:
+  //   1. A collection-group query across every integrityReports/*/private/reporter subdocument,
+  //      filtered to reporterUid == my uid - the private subdoc's own rule lets me read exactly
+  //      the ones that are mine, nothing more (an unfiltered query would be rejected outright).
+  //   2. For each matching subdocument, its PARENT's id is the actual report id - live-listen to
+  //      that content doc too, so a later status change (Admin marks it Resolved, say) still
+  //      updates this list without needing a page refresh.
+  const [myReportIds, setMyReportIds] = useState([]);
   useEffect(() => {
-    if (!myUid) { setMyReports([]); return; }
-    const q = query(collection(db, 'integrityReports'), where('reporterUid', '==', myUid));
+    if (!myUid) { setMyReportIds([]); return undefined; }
+    const q = query(collectionGroup(db, 'private'), where('reporterUid', '==', myUid));
     const unsub = onSnapshot(q, (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      list.sort((a, b) => (tsToDate(b.createdAt)?.getTime() || 0) - (tsToDate(a.createdAt)?.getTime() || 0));
-      setMyReports(list);
+      setMyReportIds(snap.docs.map((d) => d.ref.parent.parent.id));
     }, (err) => console.warn('My reports listener error:', err));
     return () => unsub();
   }, [myUid]);
+
+  const [myReports, setMyReports] = useState([]);
+  useEffect(() => {
+    if (myReportIds.length === 0) { setMyReports([]); return undefined; }
+    const unsubs = myReportIds.map((id) =>
+      onSnapshot(doc(db, 'integrityReports', id), (d) => {
+        setMyReports((prev) => {
+          const withoutThis = prev.filter((r) => r.id !== id);
+          const next = d.exists() ? [...withoutThis, { id: d.id, ...d.data() }] : withoutThis;
+          next.sort((a, b) => (tsToDate(b.createdAt)?.getTime() || 0) - (tsToDate(a.createdAt)?.getTime() || 0));
+          return next;
+        });
+      }, (err) => console.warn('My report content listener error:', err))
+    );
+    return () => unsubs.forEach((u) => u());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myReportIds.join(',')]);
 
   // close the people picker when clicking outside it or pressing Escape
   useEffect(() => {
@@ -254,24 +278,35 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
     }
     setSubmitting(true);
     try {
-      await addDoc(collection(db, 'integrityReports'), {
+      // Two documents, written together atomically: the CONTENT doc (what Admin and HR both read)
+      // carries no reporter fields at all, and the identity lives only in the private/reporter
+      // subdocument, which HR's Firestore rule never grants access to. A batch guarantees one is
+      // never created without the other.
+      const reportRef = doc(collection(db, 'integrityReports'));
+      const privateRef = doc(reportRef, 'private', 'reporter');
+      const batch = writeBatch(db);
+      batch.set(reportRef, {
         title: title.trim(),
         description: description.trim(),
         branch,
         reportedAgainst,
         photoUrl: photoUrl || '',
-        reporterUid: myUid,
-        reporterUsername: myUsername,
-        reporterRole: myRole,
         status: 'New',
         createdAt: serverTimestamp()
       });
+      batch.set(privateRef, {
+        reporterUid: myUid,
+        reporterUsername: myUsername,
+        reporterRole: myRole,
+        createdAt: serverTimestamp()
+      });
+      await batch.commit();
       setTitle('');
       setDescription('');
       setBranch('');
       setReportedAgainst([]);
       setPhotoUrl('');
-      alert('Your report has been submitted. Only Admin and HR can see it.');
+      alert('Your report has been submitted. Only System Admin and HR can see it.');
       setView('mine');
     } catch (err) {
       console.error(err);
@@ -304,7 +339,12 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
     if (!confirmed) return;
     setDeletingId(report.id);
     try {
-      await deleteDoc(doc(db, 'integrityReports', report.id));
+      // Clean up the private/reporter subdocument too, so a deleted report never leaves an
+      // orphaned identity record behind (both deletes are Admin-only under the rules either way).
+      const batch = writeBatch(db);
+      batch.delete(doc(db, 'integrityReports', report.id, 'private', 'reporter'));
+      batch.delete(doc(db, 'integrityReports', report.id));
+      await batch.commit();
     } catch (err) {
       console.error(err);
       alert('Could not delete the report.');
@@ -324,15 +364,18 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
           <p className="text-xs text-slate-500 max-w-xl">
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
-            Only <span className="font-bold text-slate-700">system Admin </span> will ever read it, and
-            it's not linked to your account, we will look into your report up and make it right.
+            <span className="font-bold text-slate-700"> Admin and HR</span> can both read the report itself,
+            but <span className="font-bold text-slate-700">only Admin</span> can see who submitted it — HR
+            sees the report with your identity hidden.
           </p>
-          {/* Arabic version - same honest meaning as the English text above (not a "true anonymity" claim):
-              the report is tied to the reporter's account, and only Admin + HR can read it. */}
+          {/* Arabic version - same honest meaning as the English text above: the report isnot tied to the
+              reporter's account (truly anonymous), Admin and HR both read the content, but noone 
+              can see the reporter's identity - it's totaly anonymously. */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
-            بحسابك، ولا يطّلع عليه سوى <span className="font-bold text-slate-700">مدير النظام  (HR)</span> فقط،
-            دون سواه. يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            <span className="font-bold text-slate-700">هذا البلاغ يعد مجهولاً.</span> لا يتم تسجيله مرتبطًا
+            بحسابك، ويقدر <span className="font-bold text-slate-700">    (System admin and HR)</span> يطّلعوا
+            على محتوى البلاغ، لكن <span className="font-bold text-slate-700"> </span>  ما فيش حد يقدر يعرف
+               — هويتك  . يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
@@ -534,9 +577,16 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
                       <div>
                         <h4 className="font-bold text-slate-900 text-sm">{r.title}</h4>
                         <p className="text-[11px] text-slate-400">
-                          {r.branch} • {fmtDateTime(tsToDate(r.createdAt))} • reported by{' '}
-                          <span className="font-bold text-slate-600">{r.reporterUsername}</span>
-                          {r.reporterRole && <span> ({r.reporterRole})</span>}
+                          {r.branch} • {fmtDateTime(tsToDate(r.createdAt))} •{' '}
+                          {isAdminUser ? (
+                            <>
+                              reported by <span className="font-bold text-slate-600">{r.reporterUsername}</span>
+                              {r.reporterRole && <span> ({r.reporterRole})</span>}
+                            </>
+                          ) : (
+                            // HR reviews the report content but never learns who filed it - only Admin can see that.
+                            <span className="italic">reporter hidden (Admin only)</span>
+                          )}
                         </p>
                         {Array.isArray(r.reportedAgainst) && r.reportedAgainst.length > 0 && (
                           <p className="text-[11px] text-slate-500 mt-0.5">

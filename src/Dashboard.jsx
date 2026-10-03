@@ -2720,7 +2720,7 @@ export default function Dashboard({ user, onLogout }) {
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setForceCheckoutRec(null)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold">Cancel</button>
-              <button onClick={handleConfirmForceCheckout} className="px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white font-extrabold rounded-xl text-xs shadow-md">Confirm Check-Out</button>
+              <button onClick={handleConfirmForceCheckout} className="px-4 py-2 font-extrabold rounded-xl text-xs shadow-md border-0" style={{ backgroundColor: '#0284c7', color: '#ffffff' }}>Confirm Check-Out</button>
             </div>
           </div>
         </div>
@@ -3141,7 +3141,8 @@ export default function Dashboard({ user, onLogout }) {
                         {(isAdmin || (isBranchManager && assignedBranches.includes(req.branch))) && (
                           <button
                             onClick={() => handleBuzzRequest(req.id)}
-                            className="bg-sky-500 hover:bg-sky-600 text-white px-2.5 py-2 md:py-1.5 rounded-xl text-xs font-extrabold shadow-sm cursor-pointer"
+                            className="px-2.5 py-2 md:py-1.5 rounded-xl text-xs font-extrabold shadow-sm cursor-pointer border-0"
+                            style={{ backgroundColor: '#0284c7', color: '#ffffff' }}
                             title="Alert every Facility Manager and Facility Member about this request, regardless of status"
                           >
                             Buzz 🔔
@@ -3788,7 +3789,8 @@ export default function Dashboard({ user, onLogout }) {
                       {(isAdmin || (isBranchManager && assignedBranches.includes(cReq.targetBranch))) && (
                         <button
                           onClick={() => handleBuzzCeoRequest(cReq.id)}
-                          className="bg-sky-500 hover:bg-sky-600 text-white px-2.5 py-1.5 rounded-xl text-xs font-extrabold shadow-sm"
+                          className="px-2.5 py-1.5 rounded-xl text-xs font-extrabold shadow-sm border-0"
+                          style={{ backgroundColor: '#0284c7', color: '#ffffff' }}
                           title="Alert whoever is checked in at this branch that this request needs an urgent response"
                         >
                           Buzz 🔔
@@ -3991,7 +3993,8 @@ export default function Dashboard({ user, onLogout }) {
                         {!rec.checkOutTime && (
                           <button
                             onClick={() => openForceCheckout(rec)}
-                            className="bg-sky-500 hover:bg-sky-600 text-white px-2 py-1 rounded text-[10px] font-extrabold"
+                            className="px-2 py-1 rounded text-[10px] font-extrabold border-0"
+                            style={{ backgroundColor: '#0284c7', color: '#ffffff' }}
                             title="For someone who forgot to check out: sets a check-out time on their own check-in day"
                           >
                             Force Check-Out
@@ -4530,7 +4533,8 @@ export default function Dashboard({ user, onLogout }) {
                                 <button
                                   onClick={() => handleForceLogout(u)}
                                   title={online ? 'Force log this user out now' : 'User is offline now - they will be forced to log in again the next time they open the app'}
-                                  className="bg-amber-50 hover:bg-amber-600 hover:text-white border border-amber-300 text-amber-700 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                                  className="px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer border-0 whitespace-nowrap"
+                                  style={{ backgroundColor: '#d97706', color: '#ffffff' }}
                                 >
                                   🔒 Force Logout
                                 </button>
