@@ -27,6 +27,8 @@ import SchedulePlanner, { useAttendancePlans, MyScheduleCard } from './ScheduleP
 import MaintenanceReport from './MaintenanceReport';
 import IntegrityReports from './IntegrityReports';
 import AuditLog from './AuditLog';
+import PermissionsManager from './PermissionsManager';
+import { hasPermission } from './permissions';
 import BranchChecklist from './BranchChecklist';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
@@ -413,6 +415,11 @@ export default function Dashboard({ user, onLogout }) {
   // maintenance requests - no Towels, Attendance, Schedule, CEO Services, Reports or user management.
   const isQA = userRole === 'QA';
 
+  // Per-account permissions: the role gives the DEFAULT, and Admin can switch individual permissions on/off
+  // for one account in the Permissions tab (stored as users/{id}.permissions). liveProfile is used so a
+  // change made by Admin applies immediately, with no need to log out and in.
+  const perm = (key) => hasPermission(liveProfile ? { ...liveProfile, role: userRole } : { role: userRole }, key);
+
   // Once per browser session, Admin/CEO/Facility Manager accounts silently ping the server to check
   // for maintenance requests that have sat unattended (status "New") for 24+ hours, and push a
   // reminder if any are found. This is deliberately a plain callable function (checkStaleRequests),
@@ -445,25 +452,32 @@ export default function Dashboard({ user, onLogout }) {
   }, [isAdmin, isCEO, isBranchManager, isSupervisor]);
 
   // Update: changing a maintenance request's status is now restricted to the Facility Manager and Admin only
-  const canManageStatus = isAdmin || isFacilityManager;
+  const canManageStatus = perm('manageRequestStatus');
   // HR can view attendance reports for all branches (but not manage users)
   // Update: CEO now also sees the full check-in/check-out attendance reports across every branch (view-only, same as everyone else here - this tab was never editable).
-  const canViewReports = isAdmin || isBranchManager || isSupervisor || isHR || isCEO;
+  const canViewReports = perm('tab_reports');
   // The Schedule tab (planned shifts + plan-vs-actual report): those who plan it or need to see it
-  const canSeeSchedule = isAdmin || isCEO || isHR || isBranchManager || isSupervisor;
+  const canSeeSchedule = perm('tab_schedule');
   // The CEO can no longer add, edit or delete users - Admin, Branch Manager and Facility Manager can create,
   // edit and delete; Supervisor can view/edit/delete Users only (cannot create accounts).
-  const canManageUsers = isAdmin || isBranchManager || isFacilityManager || isSupervisor;
+  const canManageUsers = perm('tab_users');
 
   // Integrity / wrongdoing reports: every signed-in account can submit one; only Admin and HR can review the list
-  const canReviewIntegrity = isAdmin || isHR;
+  const canReviewIntegrity = perm('reviewIntegrity');
 
   // Branch checklist: anyone checked in at a branch can tick items; only Admin/Branch Manager/Supervisor sign off
   // the day, and only Admin edits the shared item list - same visibility as the Attendance tab otherwise.
   // CEO can view every branch's checklist but never ticks/edits it (CEO never checks in at a branch, so
   // BranchChecklist's own canTick stays false for them automatically - see isAdmin/openBranch passed below).
-  const canSeeChecklist = !isFacilityManager && !isFacilityMember;
-  const canSignOffChecklist = isAdmin || isBranchManager || isSupervisor;
+  const canSeeChecklist = perm('tab_checklist');
+  const canSignOffChecklist = perm('signOffChecklist');
+  const canApproveLeave = perm('approveLeave');
+  const canViewLeaveQueue = canApproveLeave || perm('viewLeaveQueue');
+  const canSeeTowels = perm('tab_towels');
+  // See every branch's maintenance requests (default: Admin and CEO only)
+  const canViewAllRequests = perm('viewAllRequests');
+  const canSeeAttendance = perm('tab_attendance');
+  const canSeeCeoServices = perm('tab_ceoServices');
 
   // People a maintenance task can be assigned to: Facility Members and Facility Managers
   const taskAssignees = useMemo(() => {
@@ -498,15 +512,15 @@ export default function Dashboard({ user, onLogout }) {
   // A Supervisor also gets this same branch-scoped list, but VIEW ONLY: the Approve/Reject buttons
   // are gated by canApproveLeave below, and the Firestore rule rejects a Supervisor's decision anyway.
   const leaveRequestsForApproval = useMemo(() => {
-    if (isAdmin || isHR) return leaveRequests;
-    if ((isBranchManager || isSupervisor) && assignedBranches.length > 0) {
+    if (isAdmin || (isHR && canViewLeaveQueue)) return leaveRequests;
+    if (canViewLeaveQueue && assignedBranches.length > 0) {
       return leaveRequests.filter(r => {
         const reqBranches = Array.isArray(r.assignedBranches) ? r.assignedBranches : [];
         return reqBranches.some(b => assignedBranches.includes(b));
       });
     }
     return [];
-  }, [leaveRequests, isAdmin, isHR, isBranchManager, isSupervisor, assignedBranches]);
+  }, [leaveRequests, isAdmin, isHR, canViewLeaveQueue, assignedBranches]);
 
   const myLeaveRequests = useMemo(
     () => leaveRequests.filter(r => r.username === currentUserIdentifier),
@@ -1044,9 +1058,6 @@ export default function Dashboard({ user, onLogout }) {
   // LEAVE REQUEST ACTIONS
   // Only these three roles may approve/reject a leave (a Branch Manager only for their own branches,
   // which leaveRequestsForApproval above already enforces on the list they can see).
-  const canApproveLeave = isAdmin || isHR || isBranchManager;
-  // A Supervisor can SEE the leaves of their own branches, but cannot approve or reject them.
-  const canViewLeaveQueue = canApproveLeave || isSupervisor;
 
   const handleCreateLeaveRequest = async (e) => {
     e.preventDefault();
@@ -1172,7 +1183,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   // "Notes" box: only the Facility Manager (or Admin) can write it.
-  const canEditNotes = () => isAdmin || isFacilityManager;
+  const canEditNotes = () => perm('editNotes');
   const getNotesValue = (req) => (notesDrafts[req.id] !== undefined ? notesDrafts[req.id] : (req.notes || ''));
   const handleSaveNotes = async (req) => {
     try {
@@ -1866,6 +1877,9 @@ export default function Dashboard({ user, onLogout }) {
   const roleLower = (userRole || '').trim().toLowerCase();
 
   const buildRequestsQuery = () => {
+    if (canViewAllRequests) {
+      return collection(db, 'requests');
+    }
     if (roleLower === 'user' || roleLower === 'staff') {
       return query(collection(db, 'requests'), where('createdBy', '==', currentUserIdentifier));
     }
@@ -1970,7 +1984,7 @@ export default function Dashboard({ user, onLogout }) {
     return () => {
       unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers(); unsubLocationViolations();
     };
-  }, [user?.id, roleLower, branchesKey, currentUserIdentifier]);
+  }, [user?.id, roleLower, branchesKey, currentUserIdentifier, canViewAllRequests]);
 
   // ACTIVITY LOG BELL (header icon): the log is hidden until the bell is clicked.
   // The red badge counts entries made by OTHER people since the bell was last opened
@@ -2005,9 +2019,11 @@ export default function Dashboard({ user, onLogout }) {
       result = result.filter(r => !r.isArchived);
     }
 
-    if (isStaff) {
+    if (canViewAllRequests) {
+      // sees every branch's requests - no narrowing
+    } else if (isStaff) {
       result = result.filter(r => r.createdBy === currentUserIdentifier);
-    } else if (!isAdmin && !isCEO) {
+    } else {
       // Update: any account (regardless of role) with assigned branches only sees requests from its own branches
       if (assignedBranches.length > 0) {
         result = result.filter(r => assignedBranches.includes(r.branch));
@@ -2019,7 +2035,7 @@ export default function Dashboard({ user, onLogout }) {
     if (assigneeFilters.length > 0) result = result.filter(r => assigneeFilters.includes(r.assignedTo || UNASSIGNED_FILTER));
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
-  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, assigneeFilters, sortOrder, isAdmin, showArchivedOnly]);
+  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
 
   // Options of the "Assigned to" filter: everyone who can be assigned, plus anyone already on a request
   const assigneeFilterOptions = useMemo(() => {
@@ -2032,7 +2048,7 @@ export default function Dashboard({ user, onLogout }) {
   }, [taskAssignees, requests]);
 
   // the "who did what" maintenance report: Admin, Facility Manager and CEO
-  const canSeeMaintReport = isAdmin || isFacilityManager || isCEO;
+  const canSeeMaintReport = perm('maintReport');
 
   // The report follows the same branch rule as the requests list: an account with assigned branches
   // (e.g. a Facility Manager) only reports on those branches; Admin, CEO and accounts with none see everything.
@@ -2821,7 +2837,7 @@ export default function Dashboard({ user, onLogout }) {
 
         {/* TABS NAVIGATION */}
         <div className="flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
-          {!isQA && (
+          {canSeeTowels && (
             <button
               onClick={() => setActiveTab('towels')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'towels' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
@@ -2837,14 +2853,17 @@ export default function Dashboard({ user, onLogout }) {
             🛠️ Maintenance
           </button>
 
-          {!isFacilityManager && !isFacilityMember && !isQA && (
-            <>
+          {canSeeAttendance && (
               <button
                 onClick={() => setActiveTab('attendance')}
                 className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'attendance' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
               >
                 🕒 Attendance
               </button>
+          )}
+
+          {(canSeeSchedule || canSeeCeoServices) && (
+            <>
 
               {canSeeSchedule && (
                 <button 
@@ -2855,6 +2874,7 @@ export default function Dashboard({ user, onLogout }) {
                 </button>
               )}
 
+              {canSeeCeoServices && (
               <button 
                 onClick={() => setActiveTab('ceo_services')}
                 className={`px-4 py-2 rounded-xl text-xs font-bold transition-all relative ${activeTab === 'ceo_services' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
@@ -2866,10 +2886,11 @@ export default function Dashboard({ user, onLogout }) {
                   </span>
                 )}
               </button>
+              )}
             </>
           )}
 
-          {canViewReports && !isFacilityManager && !isFacilityMember && (
+          {canViewReports && (
             <button 
               onClick={() => setActiveTab('reports')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'reports' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
@@ -2914,6 +2935,15 @@ export default function Dashboard({ user, onLogout }) {
 
           {isAdmin && (
             <button
+              onClick={() => setActiveTab('permissions')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'permissions' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              🔑 Permissions
+            </button>
+          )}
+
+          {isAdmin && (
+            <button
               onClick={() => setActiveTab('settings')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
@@ -2952,7 +2982,7 @@ export default function Dashboard({ user, onLogout }) {
       </header>
 
       {/* TAB 0: TOWEL MANAGEMENT */}
-      {activeTab === 'towels' && !isQA && (
+      {activeTab === 'towels' && canSeeTowels && (
         <TowelManagement currentUser={user} branchesList={branchesNamesList} />
       )}
 
@@ -3291,7 +3321,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 2: ATTENDANCE */}
-      {activeTab === 'attendance' && !isFacilityManager && !isFacilityMember && !isQA && (
+      {activeTab === 'attendance' && canSeeAttendance && (
         <div className="space-y-6">
           <div className="max-w-xl mx-auto bg-white border border-slate-200 p-8 rounded-3xl shadow-sm space-y-6 text-center">
             <div className="space-y-2">
@@ -3636,7 +3666,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB: SCHEDULE (planned shifts + plan vs actual) */}
-      {activeTab === 'schedule' && canSeeSchedule && !isFacilityManager && !isFacilityMember && (
+      {activeTab === 'schedule' && canSeeSchedule && (
         <SchedulePlanner
           user={user}
           usersList={usersList}
@@ -3647,7 +3677,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 3: CEO SERVICES */}
-      {activeTab === 'ceo_services' && !isFacilityManager && !isFacilityMember && !isQA && (
+      {activeTab === 'ceo_services' && canSeeCeoServices && (
         <div className="space-y-6">
           {(isCEO || isAdmin) && (
             <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm">
@@ -3887,7 +3917,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 4: REPORTS */}
-      {activeTab === 'reports' && canViewReports && !isFacilityManager && !isFacilityMember && (
+      {activeTab === 'reports' && canViewReports && (
         <>
         <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-5">
           <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 border-b pb-4">
@@ -4209,6 +4239,11 @@ export default function Dashboard({ user, onLogout }) {
           usersList={usersList}
           canReview={canReviewIntegrity}
         />
+      )}
+
+      {/* TAB: PERMISSIONS (Admin only) */}
+      {activeTab === 'permissions' && isAdmin && (
+        <PermissionsManager usersList={usersList.filter(u => !isHiddenAdminUser(u))} />
       )}
 
       {/* TAB: AUDIT LOG (Admin only) */}
