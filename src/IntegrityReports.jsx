@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { db } from './firebase';
+import { db, functions } from './firebase';
+import { httpsCallable } from 'firebase/functions';
 import {
   collection,
   collectionGroup,
@@ -330,7 +331,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
       setBranch('');
       setReportedAgainst([]);
       setPhotoUrl('');
-      alert('Your report has been submitted. Only Admin and HR can see it.');
+      alert('Your report has been submitted. Only System Admin and HR can see it.');
       setView('mine');
     } catch (err) {
       console.error(err);
@@ -357,18 +358,16 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
   };
 
   const handleDelete = async (report) => {
-    const confirmed = window.confirm(
-      `Delete this report permanently ("${report.title}")? This cannot be undone.`
-    );
+    const confirmed = window.confirm(`Delete this report ("${report.title}")? An Admin can restore it later from the Audit Log.`);
     if (!confirmed) return;
     setDeletingId(report.id);
     try {
-      // Clean up the private/reporter subdocument too, so a deleted report never leaves an
-      // orphaned identity record behind (both deletes are Admin-only under the rules either way).
-      const batch = writeBatch(db);
-      batch.delete(doc(db, 'integrityReports', report.id, 'private', 'reporter'));
-      batch.delete(doc(db, 'integrityReports', report.id));
-      await batch.commit();
+      // Goes through the shared deleteRecordWithAudit Cloud Function (not a direct deleteDoc) -
+      // it saves a full snapshot to the Audit Log first (so this can be undone later) and also
+      // cleans up the private/reporter subdocument for this collection specifically, so a deleted
+      // report never leaves an orphaned identity record behind.
+      const deleteRecordWithAudit = httpsCallable(functions, 'deleteRecordWithAudit');
+      await deleteRecordWithAudit({ collectionName: 'integrityReports', docId: report.id });
     } catch (err) {
       console.error(err);
       alert('Could not delete the report.');
@@ -388,18 +387,18 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
           <p className="text-xs text-slate-500 max-w-xl">
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
-            <span className="font-bold text-slate-700"> Admin and HR</span> can both read the report itself,
-            but <span className="font-bold text-slate-700"> NOONE </span> can see who submitted it — Just
-            Be Honest, clear and fair when submitting the report.
+            <span className="font-bold text-slate-700"> System Admin only and HR  </span> Both can  read the report itself,
+            Just be <span className="font-bold text-slate-700">Fair , Clear and Honest </span>    - your account will be  anonymous for all  — 
+             .
           </p>
-          {/* Arabic version - same honest meaning as the English text above: the report is tied to the
-              reporter's account (truly anonymous), Admin and HR both read the content, but NOONE 
-              can see the reporter's identity - it's TOTALY ANONYMOUS. */}
+          {/* Arabic version - same honest meaning as the English text above: the report is not tied to the
+              reporter's account (truly anonymous), System Admin  can read the content, but only Admin
+              can see the reporter's identity - just be Honest , clear and fair . */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">هذا البلاغ مجهولاً.</span> لا يتم تسجيله مرتبطًا
-            بحسابك، ويقدر <span className="font-bold text-slate-700">System Admin و (HR)</span> يطّلعوا
-            على محتوى البلاغ، لكن <span className="font-bold text-slate-700">مافيش حد </span>  يقدر يعرف
-            هوية مقدّم البلاغ — هويتك مخفية  . فقط كن امين و عادل و واضح  يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            <span className="font-bold text-slate-700">هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
+            بحسابك فقط كن امين و واضح و عادل، يستطيع <span className="font-bold text-slate-700">مدير النظام و ال HR   (فقط)</span> الاطلاع
+            على محتوى البلاغ،  <span className="font-bold text-slate-700"> -</span>    سيظل حسابك مجهولا
+               —    .  يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">

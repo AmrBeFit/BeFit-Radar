@@ -221,19 +221,20 @@ export default function SchedulePlanner({ user, usersList = [], branches = [], a
   // people this account may plan:
   //   Admin -> Branch Managers, Supervisors, Users
   //   Branch Manager -> Supervisors and Users who share a branch with them
-  //   Supervisor -> Users who share a branch with them
+  //   Supervisor -> Users who share a branch with them, plus themselves
   const plannableUsers = useMemo(() => {
     return usersList
       .filter((u) => {
         const r = norm(u.role);
         if (isAdmin) return ['branch manager', 'supervisor', 'user', 'staff'].includes(r);
         if (isBM) return ['supervisor', 'user', 'staff'].includes(r) && sharesBranch(u);
-        if (isSupervisor) return ['user', 'staff'].includes(r) && sharesBranch(u);
+        // A Supervisor may plan Users at their branches AND themselves (their own shift).
+        if (isSupervisor) return u.id === user?.id || (['user', 'staff'].includes(r) && sharesBranch(u));
         return false;
       })
       .sort((a, b) => (a.username || '').localeCompare(b.username || ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [usersList, isAdmin, isBM, isSupervisor, myBranches]);
+  }, [usersList, isAdmin, isBM, isSupervisor, myBranches, user?.id]);
 
   // branches this account may plan at (Admin: all)
   const plannableBranches = useMemo(() => {

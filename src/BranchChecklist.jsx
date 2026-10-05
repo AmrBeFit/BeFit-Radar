@@ -12,7 +12,7 @@ import {
 /* =====================================================================
    Branch checklist: the paper "Daily Checklist" clipboard, digitized.
    -----------------------------------------------------------------
-   One master list of items (set by Admin), checked off every 30 minutes
+   One master list of items (set by Admin), checked off every hour
    through the day, per branch. Whoever is checked in at that branch right
    now can tick items for the current (or a recently-passed) time slot -
    never a future one, and never a past day's slots once the day is over.
@@ -24,8 +24,8 @@ const pad = (n) => String(n).padStart(2, '0');
 const toLocalYmd = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const nowHM = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
-// Builds the list of time slots ("06:00", "06:30", ...) between start and end (inclusive of start,
-// exclusive of end), at a fixed interval. Wrapping past midnight (e.g. 07:00 -> next day 09:00, like
+// Builds the list of time slots ("06:00", "06:30", ...) between start and end (inclusive of start AND end,
+// so a 23:00 closing time gives a 23:00 column), at a fixed interval. Wrapping past midnight (e.g. 07:00 -> next day 09:00, like
 // the Arena sheet) is supported: if end <= start, the range is treated as continuing into the next day.
 const buildSlots = (startTime, endTime, intervalMinutes) => {
   const toMin = (t) => {
@@ -36,7 +36,7 @@ const buildSlots = (startTime, endTime, intervalMinutes) => {
   let end = toMin(endTime);
   if (end <= start) end += 24 * 60;
   const slots = [];
-  for (let t = start; t < end; t += intervalMinutes) {
+  for (let t = start; t <= end; t += intervalMinutes) {
     const mins = t % (24 * 60);
     slots.push(`${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`);
   }
@@ -56,7 +56,12 @@ const DEFAULT_ITEMS = [
   'Desk', 'Benches', 'Flooring', 'Cardio machines', 'Toilets', 'Lockers', 'Mirrors', 'Music'
 ].map((label, i) => ({ id: `item${i + 1}`, label }));
 
-const DEFAULT_CONFIG = { items: DEFAULT_ITEMS, startTime: '06:00', endTime: '23:00', intervalMinutes: 30 };
+// The checklist is ticked once per HOUR. This is a fixed constant on purpose: an older config document
+// in Firestore may still say intervalMinutes: 30 (from when this was half-hourly), so the value saved
+// there is deliberately ignored and never read back.
+const INTERVAL_MINUTES = 60;
+
+const DEFAULT_CONFIG = { items: DEFAULT_ITEMS, startTime: '06:00', endTime: '23:00' };
 
 export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, onReportIssue }) {
   const myUsername = currentUser?.username || currentUser?.displayName || '';
@@ -107,8 +112,8 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   }, [docId, selectedBranch, selectedDate]);
 
   const slots = useMemo(
-    () => buildSlots(config.startTime, config.endTime, config.intervalMinutes),
-    [config.startTime, config.endTime, config.intervalMinutes]
+    () => buildSlots(config.startTime, config.endTime, INTERVAL_MINUTES),
+    [config.startTime, config.endTime]
   );
 
   const isToday = selectedDate === today;
@@ -117,7 +122,19 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   const reachableSlots = useMemo(() => new Set(isToday ? slots.filter((s) => isSlotReachable(s, currentHm)) : []), [slots, isToday, tick]);
 
   const isCheckedInHere = isToday && openBranch && openBranch === selectedBranch;
-  const canTick = isCheckedInHere || isAdmin;
+  // Once the day has been signed off, the sheet is frozen for everyone except Admin.
+  const signedOff = !!dayDoc?.signedOffBy;
+  const lockedBySignOff = signedOff && !isAdmin;
+  const canTick = (isCheckedInHere || isAdmin) && !lockedBySignOff;
+
+  // An hour is "missed" once the next hour has begun (always true for any past day). An empty cell in a
+  // missed hour is shaded and labelled "Not Checked!".
+  const toMinutes = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const isMissedSlot = (slot) => {
+    if (selectedDate < today) return true;
+    if (!isToday) return false;
+    return toMinutes(slot) + INTERVAL_MINUTES <= toMinutes(currentHm);
+  };
 
   const checks = dayDoc?.checks || {};
   const cellKey = (slot, itemId) => `${slot}__${itemId}`;
@@ -150,15 +167,15 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   };
 
   const bulkApply = async (kind) => {
-    // kind: 'ok' | 'na'
+    // kind: 'ok' | 'na' | 'nc' (not completed)
     const keys = [...selectedCells];
     if (keys.length === 0) return;
     const patchMap = {};
     keys.forEach((key) => {
-      patchMap[key] =
-        kind === 'ok'
-          ? { checked: true, issue: false, na: false, by: myUsername, at: serverTimestamp() }
-          : { checked: false, issue: false, na: true, by: myUsername, at: serverTimestamp() };
+      const base = { checked: false, issue: false, na: false, notCompleted: false, by: myUsername, at: serverTimestamp() };
+      if (kind === 'ok') patchMap[key] = { ...base, checked: true };
+      else if (kind === 'na') patchMap[key] = { ...base, na: true };
+      else patchMap[key] = { ...base, notCompleted: true };
     });
     try {
       await setDoc(
@@ -187,7 +204,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         {
           branch: selectedBranch,
           dateStr: selectedDate,
-          checks: { [key]: { checked: false, issue: false, na: false, ...patch, by: myUsername, at: serverTimestamp() } },
+          checks: { [key]: { checked: false, issue: false, na: false, notCompleted: false, ...patch, by: myUsername, at: serverTimestamp() } },
           lastUpdatedBy: myUsername,
           lastUpdatedAt: serverTimestamp()
         },
@@ -213,6 +230,15 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
     if (!canTick || !reachableSlots.has(slot)) return;
     const already = checks[cellKey(slot, itemId)]?.na;
     await saveCell(slot, itemId, { na: !already, checked: false });
+    setActiveCell(null);
+  };
+
+  // Fourth outcome: the round happened but this item was NOT completed. Unlike "Report a problem", this
+  // is only a record on the checklist - it never opens or files a maintenance request.
+  const markNotCompleted = async (slot, itemId) => {
+    if (!canTick || !reachableSlots.has(slot)) return;
+    const already = checks[cellKey(slot, itemId)]?.notCompleted;
+    await saveCell(slot, itemId, { notCompleted: !already, checked: false, na: false });
     setActiveCell(null);
   };
 
@@ -294,25 +320,48 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   };
 
   // ---------- Admin settings: edit items / operating hours ----------
-  const [itemsDraft, setItemsDraft] = useState('');
+  // The item list is edited as real rows (add / delete), not a free-text box. Each item keeps a STABLE id:
+  // existing items keep the id they already had, and a newly added one gets a fresh unique id. That
+  // matters because past days' ticks are stored against these ids - re-numbering items by position
+  // (the old behaviour) would silently re-assign old ticks to the wrong item the moment one in the
+  // middle of the list was removed.
+  const [itemsDraft, setItemsDraft] = useState([]); // [{ id, label }]
+  const [newItemLabel, setNewItemLabel] = useState('');
   const [startDraft, setStartDraft] = useState(config.startTime);
   const [endDraft, setEndDraft] = useState(config.endTime);
   useEffect(() => {
-    setItemsDraft(config.items.map((i) => i.label).join('\n'));
+    setItemsDraft(config.items.map((i) => ({ id: i.id, label: i.label })));
+    setNewItemLabel('');
     setStartDraft(config.startTime);
     setEndDraft(config.endTime);
   }, [showSettings]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const addDraftItem = () => {
+    const labelText = newItemLabel.trim();
+    if (!labelText) return;
+    setItemsDraft((prev) => [...prev, { id: `item_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, label: labelText }]);
+    setNewItemLabel('');
+  };
+
+  const removeDraftItem = (id) => {
+    setItemsDraft((prev) => prev.filter((it) => it.id !== id));
+  };
+
+  const renameDraftItem = (id, labelText) => {
+    setItemsDraft((prev) => prev.map((it) => (it.id === id ? { ...it, label: labelText } : it)));
+  };
+
   const saveSettings = async () => {
-    const labels = itemsDraft.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (labels.length === 0) { alert('Add at least one checklist item.'); return; }
-    const items = labels.map((label, i) => ({ id: `item${i + 1}`, label }));
+    const items = itemsDraft
+      .map((it) => ({ id: it.id, label: it.label.trim() }))
+      .filter((it) => it.label);
+    if (items.length === 0) { alert('Add at least one checklist item.'); return; }
     try {
       await setDoc(doc(db, 'branchChecklistConfig', 'config'), {
         items,
         startTime: startDraft,
         endTime: endDraft,
-        intervalMinutes: 30
+        intervalMinutes: INTERVAL_MINUTES
       });
       setShowSettings(false);
     } catch (err) {
@@ -320,6 +369,22 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
       alert('Could not save the settings.');
     }
   };
+
+  // For each hour: the distinct people who ticked ANYTHING in that hour's column, filled in automatically
+  // from the saved ticks (the `by` stamped on every cell) - nobody types this in.
+  const checkersBySlot = useMemo(() => {
+    const map = {};
+    slots.forEach((slot) => {
+      const names = new Set();
+      config.items.forEach((it) => {
+        const c = checks[cellKey(slot, it.id)];
+        if (c && (c.checked || c.na || c.issue || c.notCompleted) && c.by) names.add(c.by);
+      });
+      map[slot] = [...names];
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slots, config.items, checks]);
 
   const label = 'block text-[10px] font-extrabold uppercase text-slate-500 mb-1';
   const field = 'w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium';
@@ -330,7 +395,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         <div>
           <h2 className="text-lg font-black text-slate-900 tracking-tight">✅ Branch Checklist</h2>
           <p className="text-xs text-slate-500 max-w-xl">
-            Tick each item off every 30 minutes as you go through the branch. Anyone checked in here right now can
+            Tick each item off every hour as you go through the branch. Anyone checked in here right now can
             tick the current time slot; only Admin, Branch Manager or Supervisor can sign off the whole day.
           </p>
         </div>
@@ -379,9 +444,51 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
               <input type="time" value={endDraft} onChange={(e) => setEndDraft(e.target.value)} className={field} />
             </div>
           </div>
-          <div>
-            <label className={label}>Checklist items (one per line)</label>
-            <textarea value={itemsDraft} onChange={(e) => setItemsDraft(e.target.value)} rows={8} className={field} />
+          <div className="space-y-2">
+            <label className={label}>Checklist items ({itemsDraft.length})</label>
+            <div className="space-y-1.5">
+              {itemsDraft.map((it) => (
+                <div key={it.id} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={it.label}
+                    onChange={(e) => renameDraftItem(it.id, e.target.value)}
+                    className={field}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeDraftItem(it.id)}
+                    title="Delete this item"
+                    className="shrink-0 px-3 py-2 rounded-xl text-xs font-extrabold border-0 cursor-pointer"
+                    style={{ backgroundColor: '#e11d48', color: '#ffffff' }}
+                  >
+                    🗑️ Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <input
+                type="text"
+                value={newItemLabel}
+                onChange={(e) => setNewItemLabel(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDraftItem(); } }}
+                placeholder="New item name..."
+                className={field}
+              />
+              <button
+                type="button"
+                onClick={addDraftItem}
+                className="shrink-0 px-4 py-2 rounded-xl text-xs font-extrabold border-0 cursor-pointer"
+                style={{ backgroundColor: '#059669', color: '#ffffff' }}
+              >
+                ➕ Add
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-400">
+              Changes only take effect when you press "Save settings". Deleting an item removes it from the list
+              going forward; ticks already recorded on past days are kept.
+            </p>
           </div>
           <button
             onClick={saveSettings}
@@ -419,7 +526,13 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         </div>
       </div>
 
-      {!canTick && isToday && (
+      {lockedBySignOff && (
+        <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+          This checklist has been signed off and is locked. Only an Admin can edit it now.
+        </p>
+      )}
+
+      {!canTick && !lockedBySignOff && isToday && (
         <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
           You can view this branch's checklist, but you need to be checked in at <span className="font-bold">{selectedBranch}</span> to tick items.
         </p>
@@ -452,11 +565,15 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                   const cell = checks[cellKey(slot, item.id)];
                   const reachable = !isToday || reachableSlots.has(slot);
                   const clickable = canTick && isToday && reachableSlots.has(slot);
+                  const hasValue = !!(cell?.issue || cell?.checked || cell?.na || cell?.notCompleted);
+                  const missed = !hasValue && isMissedSlot(slot);
                   const selected = multiSelectMode && selectedCells.has(cellKey(slot, item.id));
                   const tip = cell?.issue
                     ? `Issue reported by ${cell.by || '?'}`
                     : cell?.na
                     ? `Marked not applicable by ${cell.by || '?'}`
+                    : cell?.notCompleted
+                    ? `Not completed - recorded by ${cell.by || '?'}`
                     : cell?.checked && cell.by
                     ? `Checked by ${cell.by}`
                     : '';
@@ -469,11 +586,12 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                         if (multiSelectMode) toggleCellSelection(slot, item.id);
                         else setActiveCell({ slot, itemId: item.id });
                       }}
+                      style={missed ? { backgroundColor: '#ffe4e6' } : undefined}
                       className={`p-2 border border-slate-200 text-center ${
                         clickable ? 'cursor-pointer hover:bg-indigo-50' : ''
                       } ${!reachable && isToday ? 'bg-slate-50' : ''} ${cell?.issue ? 'bg-rose-50' : ''} ${
                         cell?.na ? 'bg-amber-50' : ''
-                      } ${selected ? 'ring-2 ring-inset ring-indigo-500 bg-indigo-50' : ''}`}
+                      } ${cell?.notCompleted ? 'bg-orange-50' : ''} ${selected ? 'ring-2 ring-inset ring-indigo-500 bg-indigo-50' : ''}`}
                     >
                       {cell?.issue ? (
                         <span className="text-rose-600 font-black">🛠️</span>
@@ -481,6 +599,10 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                         <span className="text-emerald-600 font-black">✓</span>
                       ) : cell?.na ? (
                         <span className="text-amber-600 font-black text-[10px]">N/A</span>
+                      ) : cell?.notCompleted ? (
+                        <span className="font-black" style={{ color: '#ea580c' }}>✗</span>
+                      ) : missed ? (
+                        <span className="font-black text-[9px] leading-tight block" style={{ color: '#be123c' }}>Not Checked!</span>
                       ) : reachable ? (
                         <span className="text-slate-300">—</span>
                       ) : (
@@ -492,6 +614,31 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
               </tr>
             ))}
           </tbody>
+          <tfoot>
+            <tr>
+              <td className="p-2 border border-slate-200 font-bold text-slate-600 sticky left-0 bg-slate-50 z-10 whitespace-nowrap text-[10px] uppercase">
+                Checked by
+              </td>
+              {slots.map((slot) => {
+                const names = checkersBySlot[slot] || [];
+                return (
+                  <td key={slot} className="p-1.5 border border-slate-200 align-top bg-slate-50 min-w-[84px]">
+                    {names.length > 0 ? (
+                      <div className="space-y-0.5">
+                        {names.map((n) => (
+                          <div key={n} className="text-[10px] font-bold text-slate-700 bg-white border border-slate-200 rounded-md px-1.5 py-0.5 text-center">
+                            {n}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-slate-300 text-center">—</div>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          </tfoot>
         </table>
       </div>
 
@@ -552,6 +699,14 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                     {cell?.na ? '↩️ Undo (not applicable)' : '➖ Not applicable at this branch'}
                   </button>
 
+                  <button
+                    onClick={() => markNotCompleted(activeCell.slot, activeCell.itemId)}
+                    className="w-full font-extrabold px-4 py-2.5 rounded-xl text-xs shadow-md transition cursor-pointer border-0"
+                    style={cell?.notCompleted ? { backgroundColor: '#f1f5f9', color: '#334155' } : { backgroundColor: '#ea580c', color: '#ffffff' }}
+                  >
+                    {cell?.notCompleted ? '↩️ Undo (not completed)' : '✗ Not Completed (no maintenance request)'}
+                  </button>
+
                   <div className="border-t pt-3 space-y-2">
                     <p className="text-[11px] font-bold text-slate-500 uppercase">Or, if something's wrong:</p>
                     <textarea
@@ -598,6 +753,13 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
             className="bg-amber-500 hover:bg-amber-600 text-white font-extrabold px-4 py-2 rounded-xl text-xs shadow-md transition cursor-pointer whitespace-nowrap"
           >
             ➖ Not applicable
+          </button>
+          <button
+            onClick={() => bulkApply('nc')}
+            className="font-extrabold px-4 py-2 rounded-xl text-xs shadow-md transition cursor-pointer whitespace-nowrap border-0"
+            style={{ backgroundColor: '#ea580c', color: '#ffffff' }}
+          >
+            ✗ Not Completed
           </button>
           <button
             onClick={() => setSelectedCells(new Set())}

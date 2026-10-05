@@ -26,6 +26,7 @@ import MultiSelectFilter from './MultiSelectFilter';
 import SchedulePlanner, { useAttendancePlans, MyScheduleCard } from './SchedulePlanner';
 import MaintenanceReport from './MaintenanceReport';
 import IntegrityReports from './IntegrityReports';
+import AuditLog from './AuditLog';
 import BranchChecklist from './BranchChecklist';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
@@ -41,6 +42,17 @@ const UNASSIGNED_FILTER = '__unassigned__';
 // checked out. This helper reads the LOCAL calendar date instead, so it always matches what the
 // employee actually sees on their own clock.
 const toLocalYmd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Every delete of an audited record (maintenance/CEO requests, leave requests, attendance,
+// location violations, branches, categories) now goes through this instead of a plain deleteDoc -
+// the Cloud Function behind it (deleteRecordWithAudit) saves a full snapshot to the Audit Log
+// BEFORE removing the record, so an Admin can later bring it back with "Undo" there. Throws the
+// same way a failed deleteDoc would, so existing try/catch blocks around each call site don't
+// need to change.
+const deleteWithAudit = async (collectionName, docId) => {
+  const fn = httpsCallable(functions, 'deleteRecordWithAudit');
+  await fn({ collectionName, docId });
+};
 
 // Egyptian mobile numbers: exactly 11 digits, starting with "01" (01xxxxxxxxx).
 const isValidEgyptPhone = (p) => /^01\d{9}$/.test((p || '').trim());
@@ -369,6 +381,13 @@ export default function Dashboard({ user, onLogout }) {
 
   // User identity & Role Checks
   const currentUserIdentifier = user?.username || user?.displayName || user?.email || '';
+  // The hidden admin account ("amr shata") is filtered out of attendance reports, the users list,
+  // open-session list and location violations EVERYWHERE - including this account's own view of
+  // them, which meant this account could never see its own attendance either. This flag relaxes
+  // that filter by exactly one case: when the person currently looking at the screen IS that
+  // hidden admin, their own records stop being hidden FROM THEMSELVES - everyone else still never
+  // sees this account anywhere in these lists, which is the whole point of hiding it.
+  const viewerIsHiddenAdmin = currentUserIdentifier.trim().toLowerCase() === HIDDEN_ADMIN_USERNAME;
   const userRole = user?.role || 'User';
   // Branches come from the live profile, so a change made by a manager or an Admin applies immediately
   // (no need to log out and in again). The key keeps the array stable between the frequent presence updates.
@@ -470,13 +489,16 @@ export default function Dashboard({ user, onLogout }) {
   // Active users currently present in branches
   const currentlyPresentUsers = useMemo(() => {
     const todayStr = toLocalYmd();
-    return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime && !isHiddenAdminUser(a));
-  }, [attendanceRecords]);
+    return attendanceRecords.filter(a => a.dateStr === todayStr && !a.checkOutTime && (viewerIsHiddenAdmin || !isHiddenAdminUser(a)));
+  }, [attendanceRecords, viewerIsHiddenAdmin]);
 
-  // Leave requests this account is allowed to review: Admin/CEO/HR see everyone's,
-  // Branch Manager/Supervisor only see requests from people assigned to one of their own branches.
+  // Leave requests this account is allowed to review: ONLY Admin, HR and the Branch Manager of the
+  // person's branch. Admin/HR see everyone's; a Branch Manager only sees requests from people
+  // assigned to one of their own branches. (CEO and Supervisor no longer approve leaves.)
+  // A Supervisor also gets this same branch-scoped list, but VIEW ONLY: the Approve/Reject buttons
+  // are gated by canApproveLeave below, and the Firestore rule rejects a Supervisor's decision anyway.
   const leaveRequestsForApproval = useMemo(() => {
-    if (isAdmin || isCEO || isHR) return leaveRequests;
+    if (isAdmin || isHR) return leaveRequests;
     if ((isBranchManager || isSupervisor) && assignedBranches.length > 0) {
       return leaveRequests.filter(r => {
         const reqBranches = Array.isArray(r.assignedBranches) ? r.assignedBranches : [];
@@ -484,7 +506,7 @@ export default function Dashboard({ user, onLogout }) {
       });
     }
     return [];
-  }, [leaveRequests, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches]);
+  }, [leaveRequests, isAdmin, isHR, isBranchManager, isSupervisor, assignedBranches]);
 
   const myLeaveRequests = useMemo(
     () => leaveRequests.filter(r => r.username === currentUserIdentifier),
@@ -678,7 +700,7 @@ export default function Dashboard({ user, onLogout }) {
     if (selectedReqIds.length === 0) return alert("Select items first!");
     if (window.confirm(`Delete ${selectedReqIds.length} maintenance request(s)?`)) {
       try {
-        await Promise.all(selectedReqIds.map(id => deleteDoc(doc(db, 'requests', id))));
+        await Promise.all(selectedReqIds.map(id => deleteWithAudit('requests', id)));
         setSelectedReqIds([]);
         alert('Selected requests deleted!');
       } catch (err) {
@@ -716,7 +738,7 @@ export default function Dashboard({ user, onLogout }) {
     if (selectedAttendanceIds.length === 0) return alert("Select records first!");
     if (window.confirm(`Delete ${selectedAttendanceIds.length} attendance record(s)?`)) {
       try {
-        await Promise.all(selectedAttendanceIds.map(id => deleteDoc(doc(db, 'attendance', id))));
+        await Promise.all(selectedAttendanceIds.map(id => deleteWithAudit('attendance', id)));
         setSelectedAttendanceIds([]);
         alert('Selected records deleted!');
       } catch (err) {
@@ -796,7 +818,7 @@ export default function Dashboard({ user, onLogout }) {
     if (selectedCeoIds.length === 0) return alert("Select requests first!");
     if (window.confirm(`Delete ${selectedCeoIds.length} CEO request(s)?`)) {
       try {
-        await Promise.all(selectedCeoIds.map(id => deleteDoc(doc(db, 'ceo_requests', id))));
+        await Promise.all(selectedCeoIds.map(id => deleteWithAudit('ceo_requests', id)));
         setSelectedCeoIds([]);
         alert('Selected requests deleted!');
       } catch (err) {
@@ -831,7 +853,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!isAdmin) return alert("Only Admin can delete branches.");
     if (window.confirm("Are you sure you want to delete this branch?")) {
       try {
-        await deleteDoc(doc(db, 'branches', branchId));
+        await deleteWithAudit('branches', branchId);
       } catch (err) {
         alert('Error deleting branch: ' + err.message);
       }
@@ -926,7 +948,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!isAdmin) return alert("Only Admin can delete categories.");
     if (window.confirm("Are you sure you want to delete this category?")) {
       try {
-        await deleteDoc(doc(db, 'categories', catId));
+        await deleteWithAudit('categories', catId);
       } catch (err) {
         alert('Error deleting category: ' + err.message);
       }
@@ -981,7 +1003,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!isAdmin) return alert("Exclusive to Admin only.");
     if (window.confirm('Are you sure you want to delete this CEO request permanently?')) {
       try {
-        await deleteDoc(doc(db, 'ceo_requests', requestId));
+        await deleteWithAudit('ceo_requests', requestId);
         alert('CEO Request deleted successfully!');
       } catch (err) {
         alert('Error deleting CEO request: ' + err.message);
@@ -1020,7 +1042,11 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   // LEAVE REQUEST ACTIONS
-  const canApproveLeave = isAdmin || isCEO || isHR || isBranchManager || isSupervisor;
+  // Only these three roles may approve/reject a leave (a Branch Manager only for their own branches,
+  // which leaveRequestsForApproval above already enforces on the list they can see).
+  const canApproveLeave = isAdmin || isHR || isBranchManager;
+  // A Supervisor can SEE the leaves of their own branches, but cannot approve or reject them.
+  const canViewLeaveQueue = canApproveLeave || isSupervisor;
 
   const handleCreateLeaveRequest = async (e) => {
     e.preventDefault();
@@ -1065,7 +1091,7 @@ export default function Dashboard({ user, onLogout }) {
   const handleDeleteLeaveRequest = async (requestId) => {
     if (!window.confirm('Delete this leave request permanently?')) return;
     try {
-      await deleteDoc(doc(db, 'leaveRequests', requestId));
+      await deleteWithAudit('leaveRequests', requestId);
     } catch (err) {
       alert('Error deleting leave request: ' + err.message);
     }
@@ -1208,7 +1234,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!isAdmin) return alert("Sorry, this action is exclusive to Admin only.");
     if (window.confirm('Are you sure you want to delete this maintenance request?')) {
       try {
-        await deleteDoc(doc(db, 'requests', reqId));
+        await deleteWithAudit('requests', reqId);
       } catch (err) {
         alert('Error deleting request: ' + err.message);
       }
@@ -1224,6 +1250,10 @@ export default function Dashboard({ user, onLogout }) {
     let targetRole = newUserRole;
     if (isFacilityManager) {
       targetRole = 'Facility Member';
+    }
+    // A Supervisor can only ever create plain Staff (User) accounts.
+    if (isSupervisor) {
+      targetRole = 'User';
     }
 
     // Phone number is required for every new account, EXCEPT an Admin can explicitly
@@ -1252,7 +1282,7 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     // Branch Manager must assign branch(es) to every account they create
-    if (isBranchManager && newUserBranches.length === 0) {
+    if ((isBranchManager || isSupervisor) && newUserBranches.length === 0) {
       return alert("Please assign at least one branch to this account.");
     }
 
@@ -1438,7 +1468,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!isAdmin) return alert("Exclusive to Admin only.");
     if (window.confirm('Are you sure you want to delete this entire attendance record?')) {
       try {
-        await deleteDoc(doc(db, 'attendance', recordId));
+        await deleteWithAudit('attendance', recordId);
         alert('Record deleted successfully!');
       } catch (err) {
         alert('Error deleting record: ' + err.message);
@@ -2026,10 +2056,11 @@ export default function Dashboard({ user, onLogout }) {
 
   // Update: base attendance list after applying only the role/branch hierarchy rules (before user/branch/date filters)
   const hierarchyFilteredAttendance = useMemo(() => {
-    // The hidden owner account's own check-ins never appear in anyone's attendance reports/table
-    // (including Admin's own), even though the account still checks in/out normally itself - its
-    // personal "My Sessions" view reads straight from `attendanceRecords`, not from this list.
-    let list = attendanceRecords.filter(a => !isHiddenAdminUser(a));
+    // The hidden owner account's own check-ins never appear in anyone ELSE's attendance
+    // reports/table, even though the account still checks in/out normally itself - but when this
+    // account IS the one looking at the screen (viewerIsHiddenAdmin), its own records stay visible
+    // to itself here too, instead of only in the separate personal "My Sessions" view.
+    let list = attendanceRecords.filter(a => viewerIsHiddenAdmin || !isHiddenAdminUser(a));
 
     if (isAdmin && showArchivedOnly) {
       list = list.filter(a => a.isArchived === true);
@@ -2071,7 +2102,7 @@ export default function Dashboard({ user, onLogout }) {
     }
 
     return list;
-  }, [attendanceRecords, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, currentUserIdentifier, usernameToRole, showArchivedOnly]);
+  }, [attendanceRecords, isAdmin, isCEO, isHR, isBranchManager, isSupervisor, assignedBranches, currentUserIdentifier, usernameToRole, showArchivedOnly, viewerIsHiddenAdmin]);
 
   // Same visibility scoping as attendance above, applied to location-violation attempts: a Branch
   // Manager/Supervisor only sees their own branches' staff, everyone else only sees their own attempts,
@@ -2352,8 +2383,14 @@ export default function Dashboard({ user, onLogout }) {
 
     worksheet.getRow(1).font = { bold: true };
 
+    // A completed shift shorter than 7 hours (check-in -> check-out) gets its WHOLE row coloured red in
+    // the export. A session that isn't checked out yet has no duration to judge, so it is left alone.
+    const MIN_SHIFT_MS = 7 * 60 * 60 * 1000;
+    const RED_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC7CE' } };
+    const RED_FONT = { color: { argb: 'FF9C0006' }, bold: true };
+
     filteredAttendanceReports.forEach((item, index) => {
-      worksheet.addRow({
+      const row = worksheet.addRow({
         id: index + 1,
         username: item.username || 'N/A',
         branch: item.branch || 'N/A',
@@ -2363,6 +2400,16 @@ export default function Dashboard({ user, onLogout }) {
         checkOutPhoto: (isAdmin || isHR) ? (item.checkOutPhoto || 'No Photo') : 'Restricted',
         status: item.status || 'N/A',
       });
+
+      const inMs = item.checkInTime?.toMillis ? item.checkInTime.toMillis() : null;
+      const outMs = item.checkOutTime?.toMillis ? item.checkOutTime.toMillis() : null;
+      if (inMs != null && outMs != null && outMs >= inMs && (outMs - inMs) < MIN_SHIFT_MS) {
+        for (let c = 1; c <= worksheet.columns.length; c++) {
+          const cell = row.getCell(c);
+          cell.fill = RED_FILL;
+          cell.font = RED_FONT;
+        }
+      }
     });
 
     const buffer = await workbook.xlsx.writeBuffer();
@@ -2414,7 +2461,7 @@ export default function Dashboard({ user, onLogout }) {
   const handleDeleteLocationViolation = async (violationId) => {
     if (!isAdmin) return;
     try {
-      await deleteDoc(doc(db, 'locationViolations', violationId));
+      await deleteWithAudit('locationViolations', violationId);
     } catch (err) {
       alert('Error deleting entry: ' + err.message);
     }
@@ -2425,7 +2472,7 @@ export default function Dashboard({ user, onLogout }) {
     if (filteredLocationViolations.length === 0) return;
     if (!window.confirm(`Delete all ${filteredLocationViolations.length} location violation entries currently shown (matching your filters)? This cannot be undone.`)) return;
     try {
-      await Promise.all(filteredLocationViolations.map(v => deleteDoc(doc(db, 'locationViolations', v.id))));
+      await Promise.all(filteredLocationViolations.map(v => deleteWithAudit('locationViolations', v.id)));
     } catch (err) {
       alert('Error deleting entries: ' + err.message);
     }
@@ -2857,7 +2904,16 @@ export default function Dashboard({ user, onLogout }) {
           )}
 
           {isAdmin && (
-            <button 
+            <button
+              onClick={() => setActiveTab('auditLog')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'auditLog' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              🕵️ Audit Log
+            </button>
+          )}
+
+          {isAdmin && (
+            <button
               onClick={() => setActiveTab('settings')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
@@ -3472,20 +3528,26 @@ export default function Dashboard({ user, onLogout }) {
             )}
           </div>
 
-          {canApproveLeave && (() => {
+          {canViewLeaveQueue && (() => {
             const pendingCount = leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived).length;
             const visibleLeaveRequests = isAdmin
               ? leaveRequestsForApproval
                   .filter(r => (showArchivedOnly ? r.isArchived === true : !r.isArchived))
                   .slice()
                   .sort((a, b) => (a.status === 'Pending' ? -1 : 1) - (b.status === 'Pending' ? -1 : 1))
-              : leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived);
+              : canApproveLeave
+              ? leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived)
+              // Supervisor (view only): every non-archived leave of their branches, pending ones first
+              : leaveRequestsForApproval
+                  .filter(r => !r.isArchived)
+                  .slice()
+                  .sort((a, b) => (a.status === 'Pending' ? -1 : 1) - (b.status === 'Pending' ? -1 : 1));
 
             return (
               <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-3">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
-                    📋 {isAdmin ? 'Leave Requests' : 'Leave Requests Awaiting Approval'}
+                    📋 {isAdmin ? 'Leave Requests' : canApproveLeave ? 'Leave Requests Awaiting Approval' : 'Branch Leave Requests (view only)'}
                     {pendingCount > 0 && (
                       <span className="bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
                         {pendingCount}
@@ -3505,7 +3567,7 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
                 {visibleLeaveRequests.length === 0 ? (
                   <p className="text-xs text-slate-400 italic">
-                    {showArchivedOnly && isAdmin ? 'No archived leave requests.' : 'No pending leave requests.'}
+                    {showArchivedOnly && isAdmin ? 'No archived leave requests.' : canApproveLeave ? 'No pending leave requests.' : 'No leave requests for your branches.'}
                   </p>
                 ) : (
                   <div className="space-y-2">
@@ -3527,7 +3589,7 @@ export default function Dashboard({ user, onLogout }) {
                               {badge.label}
                             </span>
                             <div className="flex gap-2 justify-end">
-                              {r.status === 'Pending' && (
+                              {r.status === 'Pending' && canApproveLeave && (
                                 <>
                                   <button
                                     onClick={() => handleLeaveDecision(r.id, 'Rejected')}
@@ -4149,6 +4211,11 @@ export default function Dashboard({ user, onLogout }) {
         />
       )}
 
+      {/* TAB: AUDIT LOG (Admin only) */}
+      {activeTab === 'auditLog' && isAdmin && (
+        <AuditLog isAdmin={isAdmin} />
+      )}
+
       {activeTab === 'checklist' && canSeeChecklist && (
         <BranchChecklist
           currentUser={liveProfile}
@@ -4163,8 +4230,8 @@ export default function Dashboard({ user, onLogout }) {
       {/* TAB 5: USERS MANAGEMENT */}
       {activeTab === 'users' && canManageUsers && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Supervisors can view/edit/delete Users but cannot create new accounts (Branch Manager or Admin does that). */}
-          {!isSupervisor && (
+          {/* Supervisors can create plain Staff (User) accounts for their own branches, plus view/edit/delete Users. */}
+          {(
           <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
             <h2 className="text-md font-bold text-slate-900 flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span> Add New User
@@ -4236,6 +4303,8 @@ export default function Dashboard({ user, onLogout }) {
                 >
                   {isFacilityManager ? (
                     <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
+                  ) : isSupervisor ? (
+                    <option value="User" className="bg-white text-slate-900">User (Staff)</option>
                   ) : isBranchManager ? (
                     <>
                       <option value="User" className="bg-white text-slate-900">User (Staff)</option>
@@ -4269,7 +4338,7 @@ export default function Dashboard({ user, onLogout }) {
                   <div className="flex items-center gap-3 text-[11px] font-bold">
                     <button
                       type="button"
-                      onClick={() => setNewUserBranches((isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
+                      onClick={() => setNewUserBranches(((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
                       className="text-indigo-600 hover:underline cursor-pointer"
                     >
                       Select all
@@ -4278,7 +4347,7 @@ export default function Dashboard({ user, onLogout }) {
                   </div>
                 </div>
                 <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
+                  {((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                     <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                       <input 
                         type="checkbox" 
@@ -4302,7 +4371,7 @@ export default function Dashboard({ user, onLogout }) {
           </div>
           )}
 
-          <div className={isSupervisor ? 'lg:col-span-3 space-y-4' : 'lg:col-span-2 space-y-4'}>
+          <div className="lg:col-span-2 space-y-4">
             {/* Update: Shared Device Alerts report - filterable by date/time, with per-login history and a Clear History control */}
             {isAdmin && (
               <div className="bg-amber-50 border border-amber-300 p-5 rounded-3xl shadow-sm space-y-3">
@@ -4850,7 +4919,7 @@ export default function Dashboard({ user, onLogout }) {
                   <div className="flex items-center gap-3 text-[11px] font-bold">
                     <button
                       type="button"
-                      onClick={() => setEditUserBranches((isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
+                      onClick={() => setEditUserBranches(((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
                       className="text-indigo-600 hover:underline cursor-pointer"
                     >
                       Select all
@@ -4860,7 +4929,7 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
                 <p className="text-[10px] text-slate-500">If you assign branches here, this account will only see data related to these branches across the app (Attendance, Requests, etc.).</p>
                 <div className="space-y-1 max-h-36 overflow-y-auto">
-                  {(isBranchManager ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
+                  {((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                     <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                       <input 
                         type="checkbox" 

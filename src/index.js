@@ -1,4 +1,4 @@
-const { onDocumentCreated } = require('firebase-functions/v2/firestore');
+const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
@@ -433,6 +433,68 @@ exports.deleteUserAccount = onCall(async (request) => {
   return { success: true };
 });
 
+// Shared by both push triggers below: sends one multicast push to a list of FCM tokens and
+// prunes any token that Firebase reports as no-longer-valid (app uninstalled, token expired, etc.)
+// from every user document that had it. `usersSnap` is the full /users snapshot already fetched by
+// the caller, reused here just for the cleanup pass so we don't query Firestore a second time.
+const sendPushAndCleanup = async (usersSnap, tokens, title, body, data) => {
+  const allTokens = [...new Set(tokens)];
+  if (allTokens.length === 0) return;
+
+  // "stronger & faster": tell the browser's push service (Chrome/FCM) to treat this as
+  // urgent and deliver it immediately instead of batching/delaying it (which otherwise
+  // happens routinely on mobile under battery-saver/Doze). TTL=2h means if a phone is
+  // offline the push is still waiting when it reconnects, instead of being dropped.
+  // `tag` groups repeated pushes about the same request so the OS re-alerts (vibrates/
+  // sounds again) every time instead of silently collapsing them into one.
+  const tag = (data && (data.requestId || data.type)) ? String(data.requestId || data.type) : 'befit-eye';
+  const message = {
+    notification: { title, body },
+    data,
+    tokens: allTokens,
+    webpush: {
+      headers: {
+        Urgency: 'high',
+        TTL: '7200',
+      },
+      notification: {
+        tag,
+        renotify: true,
+        requireInteraction: true,
+        vibrate: [500, 200, 500, 200, 500],
+      },
+      fcmOptions: {
+        link: '/',
+      },
+    },
+  };
+
+  try {
+    const response = await getMessaging().sendEachForMulticast(message);
+    console.log(`Push sent: ${response.successCount} succeeded, ${response.failureCount} failed.`);
+
+    const invalidTokens = [];
+    response.responses.forEach((r, i) => {
+      if (!r.success) invalidTokens.push(allTokens[i]);
+    });
+
+    if (invalidTokens.length > 0) {
+      const batch = db.batch();
+      usersSnap.forEach((docSnap) => {
+        const u = docSnap.data();
+        const tokens2 = Array.isArray(u.fcmTokens) ? u.fcmTokens : [];
+        const stillValid = tokens2.filter((t) => !invalidTokens.includes(t));
+        if (stillValid.length !== tokens2.length) {
+          batch.update(docSnap.ref, { fcmTokens: stillValid });
+        }
+      });
+      await batch.commit();
+    }
+  } catch (err) {
+    console.error('Error sending push notification:', err);
+  }
+};
+
 // Fires automatically every time a new document is added to the "requests" collection,
 // even if every single browser/device is fully closed - this is what makes it a true push notification.
 exports.onNewRequestPush = onDocumentCreated('requests/{requestId}', async (event) => {
@@ -495,46 +557,388 @@ exports.onNewRequestPush = onDocumentCreated('requests/{requestId}', async (even
 
   if (targetUsers.length === 0) return;
 
-  const allTokens = [...new Set(targetUsers.flatMap((u) => u.fcmTokens))];
-
   const title = isManagement
     ? (newRequest.type === 'SUMMON' ? '🚨 Urgent Call From Management' : '🔔 New Management Request')
     : '🔧 New Maintenance Request';
 
   const body = newRequest.title || newRequest.details || `Branch: ${newRequest.branch || newRequest.targetBranch || ''}`;
 
-  const message = {
-    notification: { title, body },
-    data: {
-      requestId: event.params.requestId,
-      type: newRequest.type || 'REQUEST'
-    },
-    tokens: allTokens
-  };
+  await sendPushAndCleanup(
+    usersSnap,
+    targetUsers.flatMap((u) => u.fcmTokens),
+    title,
+    body,
+    { requestId: event.params.requestId, type: newRequest.type || 'REQUEST' }
+  );
+});
 
-  try {
-    const response = await getMessaging().sendEachForMulticast(message);
-    console.log(`Push sent: ${response.successCount} succeeded, ${response.failureCount} failed.`);
+// Fires whenever an existing maintenance request ("requests" collection) is updated. The creation
+// trigger above only tells management/Facility Managers "a new request came in" - it never told
+// (a) the specific technician who actually ends up assigned to do the work, or (b) the person who
+// originally submitted the request, once it's done. Both of those are arguably the two notifications
+// that matter most for maintenance specifically, so this fills both gaps:
+exports.onRequestUpdatedPush = onDocumentUpdated('requests/{requestId}', async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (!before || !after) return;
 
-    // Clean up tokens that are no longer valid (uninstalled, expired, etc.)
-    const invalidTokens = [];
-    response.responses.forEach((r, i) => {
-      if (!r.success) invalidTokens.push(allTokens[i]);
+  const usersSnap = await db.collection('users').get();
+  const usersByUsername = {};
+  usersSnap.forEach((docSnap) => {
+    const u = docSnap.data();
+    if (u.username) usersByUsername[u.username] = u;
+  });
+
+  // (a) Someone new was just put in charge of this task - tell THEM directly, not just whoever
+  // happens to have the app open. Covers both the assignment modal (handleConfirmAssignment) and
+  // reassigning an already-in-progress task to someone else.
+  const assigneeChanged = after.assignedTo && after.assignedTo !== before.assignedTo;
+  if (assigneeChanged) {
+    const assignee = usersByUsername[after.assignedTo];
+    if (assignee && Array.isArray(assignee.fcmTokens) && assignee.fcmTokens.length > 0) {
+      await sendPushAndCleanup(
+        usersSnap,
+        assignee.fcmTokens,
+        '🔧 You were assigned a maintenance task',
+        `${after.title || 'Request'} — Branch: ${after.branch || ''}`,
+        { requestId: event.params.requestId, type: 'REQUEST_ASSIGNED' }
+      );
+    }
+  }
+
+  // (b) The request just became Completed - tell the person who originally submitted it, so they
+  // find out the moment it's fixed instead of having to go check the app themselves.
+  const justCompleted = before.status !== 'Completed' && after.status === 'Completed';
+  if (justCompleted && after.createdBy) {
+    const requester = usersByUsername[after.createdBy];
+    if (requester && Array.isArray(requester.fcmTokens) && requester.fcmTokens.length > 0) {
+      await sendPushAndCleanup(
+        usersSnap,
+        requester.fcmTokens,
+        '✅ Maintenance Request Completed',
+        `${after.title || 'Your request'} — Branch: ${after.branch || ''} is now marked Completed.`,
+        { requestId: event.params.requestId, type: 'REQUEST_COMPLETED' }
+      );
+    }
+  }
+
+  // (c) A previously-Completed request was just REOPENED (status moved away from Completed again -
+  // e.g. the same problem came back). This is new work nobody was expecting, so re-alert the people
+  // who need to act on it: whoever is currently assigned, plus Admin/CEO and the Facility Manager(s)
+  // responsible for that branch (same "who should know about this branch's requests" rule the
+  // creation trigger already uses).
+  const justReopened = before.status === 'Completed' && after.status !== 'Completed';
+  if (justReopened) {
+    const reopenTargets = [];
+    usersSnap.forEach((docSnap) => {
+      const u = docSnap.data();
+      const role = (u.role || '').trim().toUpperCase();
+      const isAdminOrCEO = role === 'ADMIN' || role === 'CEO';
+      const isFacilityManager = role === 'FACILITY MANAGER';
+      const theirBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+      const branchMatches = theirBranches.length === 0 || theirBranches.includes(after.branch);
+      const isCurrentAssignee = after.assignedTo && u.username === after.assignedTo;
+      const shouldNotify = isAdminOrCEO || (isFacilityManager && branchMatches) || isCurrentAssignee;
+      if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+        reopenTargets.push(u);
+      }
     });
 
-    if (invalidTokens.length > 0) {
-      const batch = db.batch();
-      usersSnap.forEach((docSnap) => {
-        const u = docSnap.data();
-        const tokens = Array.isArray(u.fcmTokens) ? u.fcmTokens : [];
-        const stillValid = tokens.filter((t) => !invalidTokens.includes(t));
-        if (stillValid.length !== tokens.length) {
-          batch.update(docSnap.ref, { fcmTokens: stillValid });
-        }
-      });
-      await batch.commit();
+    if (reopenTargets.length > 0) {
+      await sendPushAndCleanup(
+        usersSnap,
+        reopenTargets.flatMap((u) => u.fcmTokens),
+        '♻️ Maintenance Request Reopened',
+        `${after.title || 'Request'} — Branch: ${after.branch || ''} was reopened.`,
+        { requestId: event.params.requestId, type: 'REQUEST_REOPENED' }
+      );
     }
-  } catch (err) {
-    console.error('Error sending push notification:', err);
   }
+});
+
+// Checks for any maintenance request that has sat at status "New" (nobody has even started looking
+// at it) for 24+ hours, and pushes a reminder to Admin/CEO and the Facility Manager(s) for that
+// branch. This is a CALLABLE function (triggered from the app itself), not a Cloud Scheduler job -
+// no new Google Cloud API/billing dependency. The app calls it once per session for Admin/CEO/
+// Facility Manager accounts (see Dashboard.jsx), so the check effectively runs "whenever one of
+// them opens the app" instead of on a fixed clock. Each request is only ever escalated ONCE (marked
+// with `staleReminderSentAt` the first time), so it can't spam the same request on every call.
+exports.checkStaleRequests = onCall(async () => {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const staleSnap = await db
+    .collection('requests')
+    .where('status', '==', 'New')
+    .get();
+
+  const staleRequests = staleSnap.docs.filter((docSnap) => {
+    const r = docSnap.data();
+    if (r.staleReminderSentAt) return false; // already escalated once - don't repeat
+    const createdAt = r.createdAt?.toDate ? r.createdAt.toDate() : null;
+    return createdAt && createdAt <= cutoff;
+  });
+
+  if (staleRequests.length === 0) return;
+
+  const usersSnap = await db.collection('users').get();
+
+  for (const docSnap of staleRequests) {
+    const r = docSnap.data();
+    const targets = [];
+
+    usersSnap.forEach((userDocSnap) => {
+      const u = userDocSnap.data();
+      const role = (u.role || '').trim().toUpperCase();
+      const isAdminOrCEO = role === 'ADMIN' || role === 'CEO';
+      const isFacilityManager = role === 'FACILITY MANAGER';
+      const theirBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+      const branchMatches = theirBranches.length === 0 || theirBranches.includes(r.branch);
+      const shouldNotify = isAdminOrCEO || (isFacilityManager && branchMatches);
+      if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+        targets.push(u);
+      }
+    });
+
+    if (targets.length > 0) {
+      await sendPushAndCleanup(
+        usersSnap,
+        targets.flatMap((u) => u.fcmTokens),
+        '⏰ Unattended Maintenance Request',
+        `${r.title || 'Request'} — Branch: ${r.branch || ''} has had no action for over 24 hours.`,
+        { requestId: docSnap.id, type: 'REQUEST_STALE_REMINDER' }
+      );
+    }
+
+    await docSnap.ref.update({ staleReminderSentAt: FieldValue.serverTimestamp() });
+  }
+
+  return { checked: staleRequests.length };
+});
+
+// How long after a planned shift's start time, with zero check-in at all, before we flag it as a
+// likely no-show. Kept short (30 min) on purpose: the point is to give management time to actually
+// call the employee or arrange cover BEFORE the whole shift is lost, not to just confirm afterwards
+// that someone was absent (the existing "Plan vs Actual" report already does that after the fact).
+const EXPECTED_ABSENCE_GRACE_MINUTES = 30;
+
+// Checks today's planned shifts ("attendancePlans" collection, the Schedule tab) for anyone who was
+// due to start 30+ minutes ago and still has no attendance record at all (not even a late check-in,
+// at ANY branch) - i.e. a likely no-show - and pushes a heads-up to Admin/CEO and the Branch
+// Manager(s)/Supervisor(s) responsible for that branch, so they can act while the shift still matters.
+// Same pattern as checkStaleRequests above: a plain CALLABLE function the app pings once per session
+// for Admin/CEO/Branch Manager/Supervisor accounts (see Dashboard.jsx) - no Cloud Scheduler involved.
+// `todayYmd` and `nowMinutes` are passed in from the browser (its own local wall clock), since that's
+// the clock the shift times (e.g. "09:00") were planned against, and is simpler/safer than trying to
+// reconstruct Egypt local time from the server's UTC clock. Each plan is only ever alerted ONCE
+// (marked with `absenceAlertSentAt`), so it won't re-notify every time someone opens the app.
+exports.checkExpectedAbsences = onCall(async (request) => {
+  const { todayYmd, nowMinutes } = request.data || {};
+  if (!todayYmd || typeof nowMinutes !== 'number') {
+    throw new HttpsError('invalid-argument', 'todayYmd and nowMinutes are required.');
+  }
+
+  const plansSnap = await db
+    .collection('attendancePlans')
+    .where('date', '==', todayYmd)
+    .get();
+
+  if (plansSnap.empty) return { checked: 0 };
+
+  // Anyone with ANY attendance record today (regardless of branch) is not a no-show, even if
+  // they're at the wrong branch - that's a different, already-visible problem ("wrong_branch").
+  const attendanceSnap = await db
+    .collection('attendance')
+    .where('dateStr', '==', todayYmd)
+    .get();
+  const attendedUsernames = new Set();
+  attendanceSnap.forEach((docSnap) => {
+    const a = docSnap.data();
+    if (a.username) attendedUsernames.add(a.username);
+  });
+
+  const duePlans = plansSnap.docs.filter((docSnap) => {
+    const p = docSnap.data();
+    if (p.absenceAlertSentAt) return false; // already alerted once
+    if (!p.startTime || !p.username) return false;
+    if (attendedUsernames.has(p.username)) return false;
+    const [h, m] = p.startTime.split(':').map(Number);
+    const startMinutes = h * 60 + m;
+    return nowMinutes >= startMinutes + EXPECTED_ABSENCE_GRACE_MINUTES;
+  });
+
+  if (duePlans.length === 0) return { checked: 0 };
+
+  const usersSnap = await db.collection('users').get();
+
+  for (const docSnap of duePlans) {
+    const p = docSnap.data();
+    const targets = [];
+
+    usersSnap.forEach((userDocSnap) => {
+      const u = userDocSnap.data();
+      const role = (u.role || '').trim().toUpperCase();
+      const isAdminOrCEO = role === 'ADMIN' || role === 'CEO';
+      const isBranchLevel = role === 'BRANCH MANAGER' || role === 'SUPERVISOR';
+      const theirBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+      const branchMatches = theirBranches.includes(p.branch);
+      const shouldNotify = isAdminOrCEO || (isBranchLevel && branchMatches);
+      if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+        targets.push(u);
+      }
+    });
+
+    if (targets.length > 0) {
+      await sendPushAndCleanup(
+        usersSnap,
+        targets.flatMap((u) => u.fcmTokens),
+        '⚠️ Possible No-Show',
+        `${p.username} was due at ${p.branch} at ${p.startTime} and still hasn't checked in.`,
+        { planId: docSnap.id, type: 'EXPECTED_ABSENCE' }
+      );
+    }
+
+    await docSnap.ref.update({ absenceAlertSentAt: FieldValue.serverTimestamp() });
+  }
+
+  return { checked: duePlans.length };
+});
+
+// Fires automatically every time a new document is added to the "ceo_requests" collection - this is
+// the "CEO Services" tab (a CEO/Admin sending something to whoever is currently checked in at a
+// branch, e.g. "bring me a coffee" or an urgent summon). Without this trigger, these never pushed at
+// all (only the in-app, tab-must-be-open listener caught them), which is the gap being fixed here.
+exports.onNewCeoRequestPush = onDocumentCreated('ceo_requests/{requestId}', async (event) => {
+  const newCeoRequest = event.data.data();
+  if (!newCeoRequest) return;
+
+  // Whoever is currently checked in (no checkOutTime yet) at the targeted branch - these are the
+  // people actually being asked to do something, so they must be notified even with the app closed.
+  let activeUsernamesAtTargetBranch = [];
+  if (newCeoRequest.targetBranch) {
+    const activeAttendanceSnap = await db
+      .collection('attendance')
+      .where('branch', '==', newCeoRequest.targetBranch)
+      .get();
+
+    activeAttendanceSnap.forEach((a) => {
+      const rec = a.data();
+      const isActive = !rec.checkOutTime && !rec.checkOut;
+      if (isActive && rec.username) {
+        activeUsernamesAtTargetBranch.push(rec.username);
+      }
+    });
+  }
+
+  const usersSnap = await db.collection('users').get();
+  const targetUsers = [];
+
+  usersSnap.forEach((docSnap) => {
+    const u = docSnap.data();
+    const role = (u.role || '').trim().toUpperCase();
+    const isAdminOrCEO = role === 'ADMIN' || role === 'CEO';
+    // Notify every Admin/CEO (so management sees its own request went out), plus whoever is
+    // actually present at the targeted branch right now and needs to act on it.
+    const shouldNotify = isAdminOrCEO || activeUsernamesAtTargetBranch.includes(u.username);
+
+    if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+      targetUsers.push(u);
+    }
+  });
+
+  if (targetUsers.length === 0) return;
+
+  const title = '🚨 CEO Service Request';
+  const body = `${newCeoRequest.serviceType || 'Request'}: ${newCeoRequest.itemDetails || ''} — ${newCeoRequest.targetBranch || ''}`;
+
+  await sendPushAndCleanup(
+    usersSnap,
+    targetUsers.flatMap((u) => u.fcmTokens),
+    title,
+    body,
+    { requestId: event.params.requestId, type: 'CEO_REQUEST' }
+  );
+});
+
+// Fires when an employee submits a new leave request ("leaveRequests" collection). The app's own
+// submit screen tells the employee "You will be notified once it is reviewed" - but until now
+// nothing ever pushed anything, for EITHER side: the approver never got told a request came in,
+// and the employee never got told it was approved/rejected (see onLeaveRequestReviewedPush below).
+// This is the same kind of gap as the CEO requests one above, just in a different collection.
+exports.onNewLeaveRequestPush = onDocumentCreated('leaveRequests/{requestId}', async (event) => {
+  const newLeaveRequest = event.data.data();
+  if (!newLeaveRequest) return;
+
+  const requestBranches = Array.isArray(newLeaveRequest.assignedBranches) ? newLeaveRequest.assignedBranches : [];
+
+  const usersSnap = await db.collection('users').get();
+  const targetUsers = [];
+
+  usersSnap.forEach((docSnap) => {
+    const u = docSnap.data();
+    const role = (u.role || '').trim().toUpperCase();
+    const isTopLevelApprover = role === 'ADMIN' || role === 'CEO' || role === 'HR';
+    const isBranchLevelApprover = role === 'BRANCH MANAGER' || role === 'SUPERVISOR';
+    const theirBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
+    // Mirrors the app's own "who can approve this" rule (leaveRequestsForApproval in Dashboard.jsx):
+    // Admin/CEO/HR see every request; a Branch Manager/Supervisor only sees one for a branch they're
+    // actually assigned to.
+    const branchOverlap = theirBranches.some((b) => requestBranches.includes(b));
+    const shouldNotify = isTopLevelApprover || (isBranchLevelApprover && branchOverlap);
+
+    if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+      targetUsers.push(u);
+    }
+  });
+
+  if (targetUsers.length === 0) return;
+
+  const title = '📝 New Leave Request';
+  const body = `${newLeaveRequest.username || 'Someone'} requested leave: ${newLeaveRequest.startDate || ''} to ${newLeaveRequest.endDate || ''}`;
+
+  await sendPushAndCleanup(
+    usersSnap,
+    targetUsers.flatMap((u) => u.fcmTokens),
+    title,
+    body,
+    { requestId: event.params.requestId, type: 'LEAVE_REQUEST' }
+  );
+});
+
+// Fires when a leave request is approved/rejected (handleLeaveDecision in Dashboard.jsx only
+// updates the Firestore doc's `status` - it never notified the employee who asked for the leave,
+// despite the app promising it would). We only push once, the moment status actually changes away
+// from "Pending", so saving the document again later (e.g. archiving it) doesn't re-notify.
+exports.onLeaveRequestReviewedPush = onDocumentUpdated('leaveRequests/{requestId}', async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (!before || !after) return;
+
+  const statusJustChanged = before.status !== after.status && after.status !== 'Pending';
+  if (!statusJustChanged) return;
+
+  if (!after.username) return;
+
+  const usersSnap = await db.collection('users').get();
+  const targetUsers = [];
+
+  usersSnap.forEach((docSnap) => {
+    const u = docSnap.data();
+    if (u.username === after.username && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
+      targetUsers.push(u);
+    }
+  });
+
+  if (targetUsers.length === 0) return;
+
+  const approved = after.status === 'Approved';
+  const title = approved ? '✅ Leave Request Approved' : `ℹ️ Leave Request ${after.status}`;
+  const body = `Your leave request (${after.startDate || ''} to ${after.endDate || ''}) was ${after.status.toLowerCase()}.`;
+
+  await sendPushAndCleanup(
+    usersSnap,
+    targetUsers.flatMap((u) => u.fcmTokens),
+    title,
+    body,
+    { requestId: event.params.requestId, type: 'LEAVE_REQUEST_REVIEWED' }
+  );
 });
