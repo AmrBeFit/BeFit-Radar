@@ -4408,6 +4408,7 @@ export default function Dashboard({ user, onLogout }) {
           openBranch={openAttendance?.branch || null}
           canSignOff={canSignOffChecklist}
           isAdmin={isAdmin}
+          canSeeSummary={perm('checklistDashboard')}
           onReportIssue={handleReportIssueFromChecklist}
         />
       )}

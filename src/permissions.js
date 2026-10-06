@@ -46,6 +46,7 @@ export const PERMISSIONS = [
   { key: 'viewLeaveQueue', group: 'leaves', label: 'View leave requests (view only)', desc: 'See the leave requests of own branches, without deciding.', def: (r) => ['HR', 'Branch Manager', 'Supervisor'].includes(r), grantable: true, server: false },
 
   // ---- Checklist ----
+  { key: 'checklistDashboard', group: 'checklist', label: 'Checklist branches summary', desc: 'Completion %, best branch, requests / OK / Not Completed per branch.', def: (r) => ['Supervisor', 'Branch Manager', 'HR', 'CEO'].includes(r), grantable: true, server: false },
   { key: 'signOffChecklist', group: 'checklist', label: 'Sign off the checklist', desc: 'Sign the day; after signing only Admin can edit it.', def: (r) => ['Branch Manager', 'Supervisor'].includes(r), grantable: true, server: true },
 
   // ---- Maintenance ----

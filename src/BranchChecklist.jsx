@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from './firebase';
+import ChecklistSummary from './ChecklistSummary';
 import {
   collection,
   doc,
@@ -63,7 +64,7 @@ const INTERVAL_MINUTES = 60;
 
 const DEFAULT_CONFIG = { items: DEFAULT_ITEMS, startTime: '06:00', endTime: '23:00' };
 
-export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, onReportIssue }) {
+export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, canSeeSummary = false, onReportIssue }) {
   const myUsername = currentUser?.username || currentUser?.displayName || '';
   const myRole = currentUser?.role || '';
 
@@ -78,6 +79,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [dayDoc, setDayDoc] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
   const [tick, setTick] = useState(Date.now()); // re-renders every minute so "current slot" stays live
 
   // Prefer the branch the employee is actually checked into right now, once known.
@@ -443,6 +445,15 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {canSeeSummary && (
+            <button
+              onClick={() => setShowSummary((v) => !v)}
+              className="font-bold px-3 py-1.5 rounded-xl text-xs transition cursor-pointer border-0"
+              style={showSummary ? { backgroundColor: '#4f46e5', color: '#ffffff' } : { backgroundColor: '#e0e7ff', color: '#3730a3' }}
+            >
+              {showSummary ? '✕ Close summary' : '📊 Branches summary'}
+            </button>
+          )}
           {canTick && (
             <button
               onClick={() => (multiSelectMode ? exitMultiSelect() : setMultiSelectMode(true))}
@@ -470,6 +481,10 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         <p className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-2">
           Tap every item you want to mark, then use the bar at the bottom to apply them all at once.
         </p>
+      )}
+
+      {showSummary && canSeeSummary && (
+        <ChecklistSummary config={config} slots={slots} branchNames={branchNames} intervalMinutes={INTERVAL_MINUTES} />
       )}
 
       {showSettings && isAdmin && (
