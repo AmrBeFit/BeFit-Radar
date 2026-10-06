@@ -49,7 +49,7 @@ export const PERMISSIONS = [
   { key: 'signOffChecklist', group: 'checklist', label: 'Sign off the checklist', desc: 'Sign the day; after signing only Admin can edit it.', def: (r) => ['Branch Manager', 'Supervisor'].includes(r), grantable: true, server: true },
 
   // ---- Maintenance ----
-  { key: 'viewAllRequests', group: 'maintenance', label: 'See ALL maintenance requests', desc: 'Every branch\'s requests, not just own branch / own requests.', def: (r) => r === 'CEO', grantable: true, server: true },
+  { key: 'viewAllRequests', group: 'maintenance', label: 'See ALL maintenance requests', desc: 'Every branch\'s requests, not just own branch / own requests.', def: () => false, grantable: true, server: true },
   { key: 'manageRequestStatus', group: 'maintenance', label: 'Change request status / assign', desc: 'Change status, assign and archive maintenance requests.', def: (r) => r === 'Facility Manager', grantable: true, server: true },
   { key: 'editNotes', group: 'maintenance', label: 'Edit request notes', desc: 'Write the Notes box on maintenance requests.', def: (r) => r === 'Facility Manager', grantable: true, server: true },
 

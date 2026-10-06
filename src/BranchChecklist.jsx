@@ -136,8 +136,49 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
     return toMinutes(slot) + INTERVAL_MINUTES <= toMinutes(currentHm);
   };
 
-  const checks = dayDoc?.checks || {};
+  const rawChecks = dayDoc?.checks || {};
   const cellKey = (slot, itemId) => `${slot}__${itemId}`;
+
+  // A cell flagged "problem" while its maintenance request still exists is LOCKED (it can't be changed
+  // from here). If that request is later deleted, the cell unlocks so it can be corrected. We watch each
+  // linked request; anything we can't confirm is deleted (including a permission error) stays locked.
+  const linkedRequestIds = useMemo(() => {
+    const ids = new Set();
+    Object.values(rawChecks).forEach((c) => { if (c && c.issue && c.requestId) ids.add(c.requestId); });
+    return [...ids].sort();
+  }, [rawChecks]);
+  const linkedKey = linkedRequestIds.join('|');
+  const [deletedRequestIds, setDeletedRequestIds] = useState({});
+  useEffect(() => {
+    if (linkedRequestIds.length === 0) return undefined;
+    const unsubs = linkedRequestIds.map((rid) =>
+      onSnapshot(
+        doc(db, 'requests', rid),
+        (snap) => setDeletedRequestIds((prev) => (prev[rid] === !snap.exists() ? prev : { ...prev, [rid]: !snap.exists() })),
+        () => {}
+      )
+    );
+    return () => unsubs.forEach((u) => u());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedKey]);
+  // What the grid shows: a cell whose maintenance request has been deleted goes back to looking exactly
+  // like a cell nobody has touched yet (no leftover icon, no checker name, counts as not done).
+  const checks = useMemo(() => {
+    const out = {};
+    Object.entries(rawChecks).forEach(([k, c]) => {
+      if (c && c.issue && c.requestId && deletedRequestIds[c.requestId] === true) return;
+      out[k] = c;
+    });
+    return out;
+  }, [rawChecks, deletedRequestIds]);
+  const isCellLocked = (slot, itemId) => {
+    const c = checks[cellKey(slot, itemId)];
+    if (!c || !c.issue) return false;
+    // Older flags (made before the request id was recorded) can't be checked, so only Admin may change them.
+    if (!c.requestId) return !isAdmin;
+    return deletedRequestIds[c.requestId] !== true;
+  };
+  const isCellRequestDeleted = (c) => !!(c && c.issue && c.requestId && deletedRequestIds[c.requestId] === true);
 
   // Tapping a cell opens a small panel (below) instead of toggling directly, because a cell now has
   // three possible outcomes: mark OK, undo, or report a problem (which files an actual maintenance
@@ -152,6 +193,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   const [selectedCells, setSelectedCells] = useState(new Set());
 
   const toggleCellSelection = (slot, itemId) => {
+    if (isCellLocked(slot, itemId)) return;
     const key = cellKey(slot, itemId);
     setSelectedCells((prev) => {
       const next = new Set(prev);
@@ -168,7 +210,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
 
   const bulkApply = async (kind) => {
     // kind: 'ok' | 'na' | 'nc' (not completed)
-    const keys = [...selectedCells];
+    const keys = [...selectedCells].filter((k) => { const [sl, it] = k.split('__'); return !isCellLocked(sl, it); });
     if (keys.length === 0) return;
     const patchMap = {};
     keys.forEach((key) => {
@@ -217,7 +259,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   };
 
   const markOk = async (slot, itemId) => {
-    if (!canTick || !reachableSlots.has(slot)) return;
+    if (!canTick || !reachableSlots.has(slot) || isCellLocked(slot, itemId)) return;
     const already = checks[cellKey(slot, itemId)]?.checked;
     // Marking OK always clears any earlier "Not applicable" flag on this cell.
     await saveCell(slot, itemId, { checked: !already, na: false });
@@ -227,7 +269,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   // Third outcome: the item simply doesn't exist at this branch (e.g. no "Cardio machines" at a
   // small branch). Distinct from OK and from an issue - shown in amber, and doesn't block progress.
   const markNA = async (slot, itemId) => {
-    if (!canTick || !reachableSlots.has(slot)) return;
+    if (!canTick || !reachableSlots.has(slot) || isCellLocked(slot, itemId)) return;
     const already = checks[cellKey(slot, itemId)]?.na;
     await saveCell(slot, itemId, { na: !already, checked: false });
     setActiveCell(null);
@@ -236,22 +278,22 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   // Fourth outcome: the round happened but this item was NOT completed. Unlike "Report a problem", this
   // is only a record on the checklist - it never opens or files a maintenance request.
   const markNotCompleted = async (slot, itemId) => {
-    if (!canTick || !reachableSlots.has(slot)) return;
+    if (!canTick || !reachableSlots.has(slot) || isCellLocked(slot, itemId)) return;
     const already = checks[cellKey(slot, itemId)]?.notCompleted;
     await saveCell(slot, itemId, { notCompleted: !already, checked: false, na: false });
     setActiveCell(null);
   };
 
-  // Reports a problem found during the round: marks this checklist cell as an "issue", then hands
-  // off to the REAL "Create Maintenance Request" form (pre-filled with the branch, a title and a
-  // description) so the person can attach a live photo and pick a category just like any other
-  // maintenance request - instead of silently filing a bare-bones request behind the scenes.
+  // Reports a problem found during the round: hands off to the REAL "Create Maintenance Request" form
+  // (pre-filled with the branch, a title and a description) so the person can attach a live photo and
+  // pick a category just like any other maintenance request. The checklist cell is NOT marked yet -
+  // the parent marks it only once the request has actually been SUBMITTED (checklistRef below carries
+  // everything needed to do that), so merely opening the form never shows "request made".
   const submitIssue = async (slot, item) => {
     setSubmittingIssue(true);
     try {
-      await saveCell(slot, item.id, { checked: false, issue: true, issueNote: issueNote.trim() });
-
       const prefill = {
+        checklistRef: { docId, slot, itemId: item.id, branch: selectedBranch, dateStr: selectedDate, note: issueNote.trim() },
         branch: selectedBranch,
         title: `Checklist: ${item.label} (${selectedBranch})`,
         description: issueNote.trim() || `Flagged as not OK during the ${slot} branch checklist round.`
@@ -265,7 +307,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         onReportIssue(prefill);
       } else {
         // Fallback for older setups that haven't wired up onReportIssue yet: file the request directly.
-        await addDoc(collection(db, 'requests'), {
+        const created = await addDoc(collection(db, 'requests'), {
           title: prefill.title,
           description: prefill.description,
           branch: selectedBranch,
@@ -276,6 +318,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
           createdBy: myUsername,
           createdAt: serverTimestamp()
         });
+        await saveCell(slot, item.id, { checked: false, issue: true, issueNote: issueNote.trim(), requestId: created.id });
         alert('✅ تم تقديم طلب صيانة / Maintenance request submitted.');
       }
     } catch (err) {
@@ -564,12 +607,14 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                 {slots.map((slot) => {
                   const cell = checks[cellKey(slot, item.id)];
                   const reachable = !isToday || reachableSlots.has(slot);
-                  const clickable = canTick && isToday && reachableSlots.has(slot);
+                  const clickable = canTick && isToday && reachableSlots.has(slot) && !isCellLocked(slot, item.id);
                   const hasValue = !!(cell?.issue || cell?.checked || cell?.na || cell?.notCompleted);
                   const missed = !hasValue && isMissedSlot(slot);
                   const selected = multiSelectMode && selectedCells.has(cellKey(slot, item.id));
                   const tip = cell?.issue
-                    ? `Issue reported by ${cell.by || '?'}`
+                    ? (isCellRequestDeleted(cell)
+                        ? `The maintenance request for this item was deleted - you can change this cell now (reported by ${cell.by || '?'})`
+                        : `Maintenance request filed by ${cell.by || '?'} - locked while that request exists`)
                     : cell?.na
                     ? `Marked not applicable by ${cell.by || '?'}`
                     : cell?.notCompleted
@@ -594,7 +639,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                       } ${cell?.notCompleted ? 'bg-orange-50' : ''} ${selected ? 'ring-2 ring-inset ring-indigo-500 bg-indigo-50' : ''}`}
                     >
                       {cell?.issue ? (
-                        <span className="text-rose-600 font-black">🛠️</span>
+                        <span className="text-rose-600 font-black" style={isCellRequestDeleted(cell) ? { opacity: 0.45 } : undefined}>🛠️</span>
                       ) : cell?.checked ? (
                         <span className="text-emerald-600 font-black">✓</span>
                       ) : cell?.na ? (
@@ -675,12 +720,17 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                 <p className="text-[11px] text-slate-400">{selectedBranch} · {activeCell.slot}</p>
               </div>
 
-              {cell?.issue ? (
+              {isCellLocked(activeCell.slot, activeCell.itemId) ? (
                 <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
-                  🛠️ A maintenance request was already submitted for this ({cell.by}).
+                  🛠️ A maintenance request was already submitted for this ({cell.by}). It can be changed again only if that request is deleted.
                 </p>
               ) : (
                 <>
+                  {cell?.issue && (
+                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                      The maintenance request linked to this item no longer exists, so you can set its status again.
+                    </p>
+                  )}
                   <button
                     onClick={() => markOk(activeCell.slot, activeCell.itemId)}
                     className={`w-full font-extrabold px-4 py-2.5 rounded-xl text-xs shadow-md transition cursor-pointer ${

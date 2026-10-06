@@ -7,6 +7,9 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  setDoc,
+  getDoc,
+  writeBatch,
   deleteDoc,
   doc, 
   serverTimestamp,
@@ -365,6 +368,7 @@ export default function Dashboard({ user, onLogout }) {
   // Filter & Sort states (Requests)
   const [statusFilter, setStatusFilter] = useState('All');
   const [branchFilter, setBranchFilter] = useState('All');
+  const [categoryFilter, setCategoryFilter] = useState('All');
   const [assigneeFilters, setAssigneeFilters] = useState([]); // empty = everyone
   const [sortOrder, setSortOrder] = useState('desc');
 
@@ -434,6 +438,27 @@ export default function Dashboard({ user, onLogout }) {
     checkStaleRequests().catch(() => {}); // best-effort, never bothers the user if it fails
   }, [isAdmin, isCEO, isFacilityManager]);
 
+  // Attendance selfies are deleted 60 days after check-in. No Cloud Scheduler: like the check above, this
+  // rides along when HR / Admin / a Branch Manager opens the app (the server only does real work at most
+  // once every 12 hours, whoever calls it).
+  useEffect(() => {
+    if (!(isAdmin || isHR || isBranchManager)) return;
+    if (sessionStorage.getItem('photosPurged')) return;
+    sessionStorage.setItem('photosPurged', '1');
+    const purgeOldAttendancePhotos = httpsCallable(functions, 'purgeOldAttendancePhotos');
+    purgeOldAttendancePhotos().catch(() => {}); // best-effort
+  }, [isAdmin, isHR, isBranchManager]);
+
+  // One-time move of OLD selfies (still sitting on the attendance records) into the locked document.
+  // Admin only; repeats each session until nothing is left to move.
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (sessionStorage.getItem('photosMigrated')) return;
+    sessionStorage.setItem('photosMigrated', '1');
+    const migrateAttendancePhotos = httpsCallable(functions, 'migrateAttendancePhotos');
+    migrateAttendancePhotos().catch(() => {});
+  }, [isAdmin]);
+
   // Same idea, for the Schedule tab: once per session, Admin/CEO/Branch Manager/Supervisor accounts
   // ping the server to check whether anyone planned to start a shift 30+ minutes ago never checked
   // in at all (a likely no-show) - and push a heads-up if so, early enough that someone can still
@@ -473,9 +498,12 @@ export default function Dashboard({ user, onLogout }) {
   const canSignOffChecklist = perm('signOffChecklist');
   const canApproveLeave = perm('approveLeave');
   const canViewLeaveQueue = canApproveLeave || perm('viewLeaveQueue');
+  // Attendance selfies: only HR, Admin and Branch Managers may look at them, and only when really necessary.
+  // They are also deleted automatically 60 days after check-in (see purgeOldAttendancePhotos in functions).
+  const canViewAttendancePhotos = isAdmin || isHR || isBranchManager;
   const canSeeTowels = perm('tab_towels');
   // See every branch's maintenance requests (default: Admin and CEO only)
-  const canViewAllRequests = perm('viewAllRequests');
+  const canViewAllRequests = perm('viewAllRequests') || isCEO;
   const canSeeAttendance = perm('tab_attendance');
   const canSeeCeoServices = perm('tab_ceoServices');
 
@@ -1654,6 +1682,22 @@ export default function Dashboard({ user, onLogout }) {
     }, 'image/jpeg', 0.75);
   };
 
+  // Opens one attendance selfie. The photo web address is not on the attendance record any more: it is read
+  // on demand from a locked document that only HR, Admin and Branch Managers (of that branch) are allowed to open.
+  const openAttendancePhoto = async (rec, which) => {
+    if (!canViewAttendancePhotos) return;
+    try {
+      const legacy = which === 'in' ? rec.checkInPhoto : rec.checkOutPhoto;
+      if (legacy) { setFullscreenImage(legacy); return; }
+      const snap = await getDoc(doc(db, 'attendance', rec.id, 'attendancePhotos', 'photos'));
+      const url = snap.exists() ? (which === 'in' ? snap.data().checkInPhoto : snap.data().checkOutPhoto) : null;
+      if (url) setFullscreenImage(url);
+      else alert('This photo is no longer available (photos are deleted automatically after 60 days).');
+    } catch (err) {
+      alert('You are not allowed to view this photo.');
+    }
+  };
+
   // ATTENDANCE SUBMIT
   const handleAttendanceSubmit = async (file, mode) => {
     setLoading(true);
@@ -1679,20 +1723,33 @@ export default function Dashboard({ user, onLogout }) {
       if (mode === 'checkin') {
         const geo = geoRef.current;
         geoRef.current = null;
-        await addDoc(collection(db, 'attendance'), {
+        // The selfie is NOT stored on the attendance record (which any signed-in account can read). It goes
+        // into a separate, locked-down document that only HR, Admin and the branch's Branch Managers can open.
+        const branchForRecord = attendanceBranch || (branches[0]?.name || 'General');
+        const attRef = doc(collection(db, 'attendance'));
+        const batch = writeBatch(db);
+        batch.set(attRef, {
           username: currentUserIdentifier,
-          branch: attendanceBranch || (branches[0]?.name || 'General'),
+          branch: branchForRecord,
           dateStr: todayStr,
           checkInTime: serverTimestamp(),
-          checkInPhoto: photoUrl,
           checkInLat: geo?.lat ?? null,
           checkInLng: geo?.lng ?? null,
           checkInAccuracy: geo?.accuracy ?? null,
           checkOutTime: null,
-          checkOutPhoto: null,
+          photosPrivate: true,
           isArchived: false,
           status: 'Checked In'
         });
+        batch.set(doc(db, 'attendance', attRef.id, 'attendancePhotos', 'photos'), {
+          attendanceId: attRef.id,
+          username: currentUserIdentifier,
+          branch: branchForRecord,
+          checkInPhoto: photoUrl,
+          checkOutPhoto: null,
+          createdAt: serverTimestamp()
+        });
+        await batch.commit();
         alert('Check-In Successful! 🟢');
       } else if (mode === 'checkout') {
         // Close the MOST RECENT open session (the one actually shown on screen).
@@ -1711,14 +1768,29 @@ export default function Dashboard({ user, onLogout }) {
         if (activeRecord) {
           const geo = geoRef.current;
           geoRef.current = null;
-          await updateDoc(doc(db, 'attendance', activeRecord.id), {
+          const outBatch = writeBatch(db);
+          outBatch.update(doc(db, 'attendance', activeRecord.id), {
             checkOutTime: serverTimestamp(),
-            checkOutPhoto: photoUrl,
             checkOutLat: geo?.lat ?? null,
             checkOutLng: geo?.lng ?? null,
             checkOutAccuracy: geo?.accuracy ?? null,
             status: 'Completed'
           });
+          const photoRef = doc(db, 'attendance', activeRecord.id, 'attendancePhotos', 'photos');
+          if (activeRecord.photosPrivate) {
+            outBatch.update(photoRef, { checkOutPhoto: photoUrl });
+          } else {
+            // A session opened before selfies moved to the private document: create it now.
+            outBatch.set(photoRef, {
+              attendanceId: activeRecord.id,
+              username: currentUserIdentifier,
+              branch: activeRecord.branch,
+              checkInPhoto: activeRecord.checkInPhoto || '',
+              checkOutPhoto: photoUrl,
+              createdAt: serverTimestamp()
+            });
+          }
+          await outBatch.commit();
           alert('Check-Out Successful! 🔴');
         } else {
           alert('No active Check-In found for today.');
@@ -2032,10 +2104,11 @@ export default function Dashboard({ user, onLogout }) {
 
     if (statusFilter !== 'All') result = result.filter(r => (r.status || 'New') === statusFilter);
     if (branchFilter !== 'All') result = result.filter(r => r.branch === branchFilter);
+    if (categoryFilter !== 'All') result = result.filter(r => r.category === categoryFilter);
     if (assigneeFilters.length > 0) result = result.filter(r => assigneeFilters.includes(r.assignedTo || UNASSIGNED_FILTER));
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
-  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
+  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, categoryFilter, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
 
   // Options of the "Assigned to" filter: everyone who can be assigned, plus anyone already on a request
   const assigneeFilterOptions = useMemo(() => {
@@ -2391,9 +2464,7 @@ export default function Dashboard({ user, onLogout }) {
       { header: 'Employee', key: 'username', width: 22 },
       { header: 'Branch', key: 'branch', width: 20 },
       { header: 'Check-In Date/Time', key: 'checkInTime', width: 25 },
-      { header: 'Check-In Photo Link', key: 'checkInPhoto', width: 45 },
       { header: 'Check-Out Date/Time', key: 'checkOutTime', width: 25 },
-      { header: 'Check-Out Photo Link', key: 'checkOutPhoto', width: 45 },
       { header: 'Status', key: 'status', width: 15 },
     ];
 
@@ -2411,9 +2482,7 @@ export default function Dashboard({ user, onLogout }) {
         username: item.username || 'N/A',
         branch: item.branch || 'N/A',
         checkInTime: formatDate(item.checkInTime),
-        checkInPhoto: (isAdmin || isHR) ? (item.checkInPhoto || 'No Photo') : 'Restricted',
         checkOutTime: formatDate(item.checkOutTime),
-        checkOutPhoto: (isAdmin || isHR) ? (item.checkOutPhoto || 'No Photo') : 'Restricted',
         status: item.status || 'N/A',
       });
 
@@ -2498,7 +2567,9 @@ export default function Dashboard({ user, onLogout }) {
   // Requests tab and pre-fills the actual "Create Maintenance Request" form (title, branch,
   // description) so they finish it there - with a live photo and a category - instead of a
   // bare-bones request being filed silently behind the scenes.
-  const handleReportIssueFromChecklist = ({ branch, title: prefTitle, description: prefDescription }) => {
+  const handleReportIssueFromChecklist = ({ branch, title: prefTitle, description: prefDescription, checklistRef }) => {
+    // Remember which checklist cell this request is for; the cell is marked only when the request is submitted.
+    pendingChecklistRef.current = checklistRef ? { ...checklistRef, title: prefTitle || '' } : null;
     setActiveTab('requests');
     setMaintView('list');
     setTitle(prefTitle || '');
@@ -2510,6 +2581,13 @@ export default function Dashboard({ user, onLogout }) {
     setNoImageChecked(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  const pendingChecklistRef = useRef(null);
+  // The link to a checklist cell only lives while the person stays on the request form it opened:
+  // leaving the Requests tab drops it, so a later, unrelated request can never get tied to that cell.
+  useEffect(() => {
+    if (activeTab !== 'requests') pendingChecklistRef.current = null;
+  }, [activeTab]);
 
   const handleAddRequest = async (e) => {
     e.preventDefault();
@@ -2551,7 +2629,7 @@ export default function Dashboard({ user, onLogout }) {
         }
       }
 
-      await addDoc(collection(db, 'requests'), {
+      const createdReq = await addDoc(collection(db, 'requests'), {
         title: title.trim(),
         description: description.trim(),
         branch: selectedBranch,
@@ -2562,6 +2640,28 @@ export default function Dashboard({ user, onLogout }) {
         createdBy: currentUserIdentifier,
         createdAt: serverTimestamp()
       });
+
+      // If this request came from the Checklist's "report a problem", NOW (and only now) mark that
+      // checklist cell as having a maintenance request. Best-effort: the request itself is already saved.
+      const clRef = pendingChecklistRef.current;
+      if (clRef && clRef.branch === selectedBranch) {
+        try {
+          await setDoc(doc(db, 'branchChecklists', clRef.docId), {
+            branch: clRef.branch,
+            dateStr: clRef.dateStr,
+            checks: {
+              [`${clRef.slot}__${clRef.itemId}`]: {
+                checked: false, issue: true, na: false, notCompleted: false,
+                issueNote: clRef.note || '', requestId: createdReq.id,
+                by: currentUserIdentifier, at: serverTimestamp()
+              }
+            },
+            lastUpdatedBy: currentUserIdentifier,
+            lastUpdatedAt: serverTimestamp()
+          }, { merge: true });
+        } catch (markErr) { console.warn('Could not mark checklist cell:', markErr); }
+      }
+      pendingChecklistRef.current = null;
 
       setTitle(''); 
       setDescription(''); 
@@ -2690,6 +2790,9 @@ export default function Dashboard({ user, onLogout }) {
                   {cameraMode === 'checkin'
                     ? '📸 Say cheese! Your check-in selfie is on its way'
                     : '🏁 Shift wrapped? Time for the checkout selfie!'}
+                </p>
+                <p className="text-[11px] font-bold" style={{ color: '#7c2d12' }}>
+                  🔒 Privacy notice: this photo can only be viewed by HR, the System Admin and Branch Managers, and only when strictly necessary. It is deleted automatically after 60 days.
                 </p>
                 <ul className="text-[11px] font-semibold space-y-1">
                   <li>😄 Face front and center, in good light. Shadows, masks and ninja mode stay home!</li>
@@ -3102,6 +3205,17 @@ export default function Dashboard({ user, onLogout }) {
                   </select>
 
                   <select
+                    value={categoryFilter}
+                    onChange={(e) => setCategoryFilter(e.target.value)}
+                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
+                  >
+                    <option value="All" className="bg-white text-slate-900">All Categories</option>
+                    {[...categories].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(c => (
+                      <option key={c.id} value={c.name} className="bg-white text-slate-900">{c.name}</option>
+                    ))}
+                  </select>
+
+                  <select
                     value={branchFilter}
                     onChange={(e) => setBranchFilter(e.target.value)}
                     className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
@@ -3187,6 +3301,11 @@ export default function Dashboard({ user, onLogout }) {
                         )}
 
                         <div>
+                          {req.requestNumber && (
+                            <p className="text-[10px] font-mono font-bold text-indigo-600 mb-0.5" title="Request number: branch code · year · month · day · yearly sequence · random">
+                              # {req.requestNumber}
+                            </p>
+                          )}
                           <h3 className="font-bold text-slate-900">{req.title}</h3>
                           {req.description && <p className="text-xs text-slate-600 mt-0.5 line-clamp-2">{req.description}</p>}
                           <p className="text-xs text-slate-500 font-medium mt-1">{req.branch} • {req.category}</p>
@@ -4051,32 +4170,38 @@ export default function Dashboard({ user, onLogout }) {
                     <td className="p-2.5">{rec.branch}</td>
                     <td className="p-2.5 text-emerald-700 font-bold">{formatDate(rec.checkInTime)}</td>
                     <td className="p-2.5 print:hidden">
-                      {(isAdmin || isHR) ? (
-                        rec.checkInPhoto && (
-                          <img 
-                            src={rec.checkInPhoto} 
-                            alt="In" 
-                            onClick={() => setFullscreenImage(rec.checkInPhoto)}
-                            className="w-8 h-8 object-cover rounded border border-slate-300 cursor-pointer hover:scale-110 transition-transform" 
-                          />
+                      {(rec.checkInPhoto || (rec.photosPrivate && !rec.photosPurgedAt)) && (
+                        canViewAttendancePhotos ? (
+                          <button
+                            type="button"
+                            onClick={() => openAttendancePhoto(rec, 'in')}
+                            className="px-2 py-1 rounded text-[10px] font-extrabold border-0 cursor-pointer"
+                            style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}
+                            title="View check-in photo (only when necessary)"
+                          >
+                            🖼️ View
+                          </button>
+                        ) : (
+                          <span className="text-slate-300 text-[10px]" title="Only HR, Admin and Branch Managers can view attendance photos">🔒</span>
                         )
-                      ) : (
-                        rec.checkInPhoto && <span className="text-slate-300 text-[10px]" title="Only Admin and HR can view attendance photos">🔒</span>
                       )}
                     </td>
                     <td className="p-2.5 text-rose-700 font-bold">{formatDate(rec.checkOutTime)}</td>
                     <td className="p-2.5 print:hidden">
-                      {(isAdmin || isHR) ? (
-                        rec.checkOutPhoto && (
-                          <img 
-                            src={rec.checkOutPhoto} 
-                            alt="Out" 
-                            onClick={() => setFullscreenImage(rec.checkOutPhoto)}
-                            className="w-8 h-8 object-cover rounded border border-slate-300 cursor-pointer hover:scale-110 transition-transform" 
-                          />
+                      {rec.checkOutTime && (rec.checkOutPhoto || (rec.photosPrivate && !rec.photosPurgedAt)) && (
+                        canViewAttendancePhotos ? (
+                          <button
+                            type="button"
+                            onClick={() => openAttendancePhoto(rec, 'out')}
+                            className="px-2 py-1 rounded text-[10px] font-extrabold border-0 cursor-pointer"
+                            style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}
+                            title="View check-out photo (only when necessary)"
+                          >
+                            🖼️ View
+                          </button>
+                        ) : (
+                          <span className="text-slate-300 text-[10px]" title="Only HR, Admin and Branch Managers can view attendance photos">🔒</span>
                         )
-                      ) : (
-                        rec.checkOutPhoto && <span className="text-slate-300 text-[10px]" title="Only Admin and HR can view attendance photos">🔒</span>
                       )}
                     </td>
                     <td className="p-2.5"><span className="px-2 py-0.5 rounded font-black text-[9px] uppercase bg-emerald-100 text-emerald-800">{rec.status}</span></td>
