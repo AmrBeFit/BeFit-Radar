@@ -2040,7 +2040,17 @@ export default function Dashboard({ user, onLogout }) {
 
     // Location Violations: everyone who can view reports sees the full list (mirrors attendance);
     // other roles don't need it, but the listener is cheap and simplest to just always attach.
-    const unsubLocationViolations = onSnapshot(collection(db, 'locationViolations'), (snapshot) => {
+    // Each role asks only for the records its Firestore rule lets it read (same scoping as attendance),
+    // otherwise Firestore refuses the whole query for roles that may only read their own.
+    const buildViolationsQuery = () => {
+      const col = collection(db, 'locationViolations');
+      if (roleLower === 'admin' || roleLower === 'ceo' || roleLower === 'hr') return col;
+      if ((roleLower === 'branch manager' || roleLower === 'supervisor') && assignedBranches.length > 0) {
+        return query(col, where('branch', 'in', assignedBranches.slice(0, 30)));
+      }
+      return query(col, where('username', '==', currentUserIdentifier));
+    };
+    const unsubLocationViolations = onSnapshot(buildViolationsQuery(), (snapshot) => {
       setLocationViolations(snapshot.docs.map(item => ({ id: item.id, ...item.data() })));
     }, (err) => {
       console.warn('Could not load location violations:', err.message);
