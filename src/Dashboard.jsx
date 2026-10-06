@@ -903,6 +903,10 @@ export default function Dashboard({ user, onLogout }) {
         manualCheckoutBy: currentUserIdentifier,
         manualCheckoutAt: serverTimestamp()
       });
+      try {
+        const target = usersList.find(u => u.username === forceCheckoutRec.username);
+        if (target) await deleteDoc(doc(db, 'presence', target.id));
+      } catch (e) { /* the marker also expires on its own after 16 hours */ }
       setForceCheckoutRec(null);
       alert('Check-out recorded.');
     } catch (err) {
@@ -1817,6 +1821,13 @@ export default function Dashboard({ user, onLogout }) {
           isArchived: false,
           status: 'Checked In'
         });
+        // "Checked in at this branch" marker - the maintenance-request rule reads it (see firestore.rules, presence).
+        batch.set(doc(db, 'presence', user.id), {
+          username: currentUserIdentifier,
+          branch: branchForRecord,
+          attendanceId: attRef.id,
+          attendanceCheckIn: serverTimestamp()
+        });
         batch.set(doc(db, 'attendance', attRef.id, 'attendancePhotos', 'photos'), {
           attendanceId: attRef.id,
           username: currentUserIdentifier,
@@ -1866,6 +1877,7 @@ export default function Dashboard({ user, onLogout }) {
               createdAt: serverTimestamp()
             });
           }
+          outBatch.delete(doc(db, 'presence', user.id));
           await outBatch.commit();
           alert('Check-Out Successful! 🔴');
         } else {
@@ -2672,6 +2684,22 @@ export default function Dashboard({ user, onLogout }) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // A plain User (User / Staff) or a Supervisor may only file a maintenance request
+  // for a branch where they are checked in right now (an open attendance session today at that branch).
+  // The Firestore rules enforce the same thing with the presence marker written at check-in.
+  // (Finance and Administration is deliberately exempt.)
+  const mustBeCheckedInForRequests = userRole === 'User' || userRole === 'Staff' || isSupervisor;
+  const supervisorCheckedInBranches = useMemo(() => {
+    const set = new Set();
+    if (!mustBeCheckedInForRequests) return set;
+    const today = toLocalYmd();
+    attendanceRecords.forEach((a) => {
+      if (a.username === currentUserIdentifier && !a.checkOutTime && !a.isArchived && a.dateStr === today && a.branch) set.add(a.branch);
+    });
+    return set;
+  }, [mustBeCheckedInForRequests, attendanceRecords, currentUserIdentifier]);
+  const supervisorBlockedForBranch = mustBeCheckedInForRequests && !!selectedBranch && !supervisorCheckedInBranches.has(selectedBranch);
+
   const pendingChecklistRef = useRef(null);
   // The link to a checklist cell only lives while the person stays on the request form it opened:
   // leaving the Requests tab drops it, so a later, unrelated request can never get tied to that cell.
@@ -2685,6 +2713,11 @@ export default function Dashboard({ user, onLogout }) {
 
     if (!selectedBranch || selectedBranch === "") {
       alert("Please select a branch before submitting the request.");
+      return;
+    }
+
+    if (supervisorBlockedForBranch) {
+      alert(`You can only submit a maintenance request for a branch where you are checked in. Please Check In at ${selectedBranch} first (Attendance tab).`);
       return;
     }
 
@@ -2719,6 +2752,23 @@ export default function Dashboard({ user, onLogout }) {
         }
       }
 
+      // Someone who checked in before the presence marker existed has an open session but no marker yet:
+      // create it from that open session (the rules verify it against the attendance record).
+      if (mustBeCheckedInForRequests) {
+        const today = toLocalYmd();
+        const open = attendanceRecords
+          .filter(a => a.username === currentUserIdentifier && !a.checkOutTime && !a.isArchived && a.dateStr === today && a.branch === selectedBranch)
+          .sort((a, b) => (b.checkInTime?.toMillis ? b.checkInTime.toMillis() : 0) - (a.checkInTime?.toMillis ? a.checkInTime.toMillis() : 0))[0];
+        const presSnap = await getDoc(doc(db, 'presence', user.id));
+        if (open && (!presSnap.exists() || presSnap.data().attendanceId !== open.id || presSnap.data().branch !== selectedBranch)) {
+          await setDoc(doc(db, 'presence', user.id), {
+            username: currentUserIdentifier,
+            branch: open.branch,
+            attendanceId: open.id,
+            attendanceCheckIn: open.checkInTime
+          });
+        }
+      }
       const createdReq = await addDoc(collection(db, 'requests'), {
         title: title.trim(),
         description: description.trim(),
@@ -3210,6 +3260,11 @@ export default function Dashboard({ user, onLogout }) {
                   {categories.map(c => <option key={c.id} value={c.name} className="bg-white text-slate-900">{c.name}</option>)}
                 </select>
               </div>
+              {supervisorBlockedForBranch && (
+                <p className="text-[11px] font-bold rounded-xl p-2.5" style={{ backgroundColor: '#fff1f2', color: '#be123c' }}>
+                  🔒 You are not checked in at {selectedBranch}. Check In at this branch (Attendance tab) before submitting a maintenance request for it.
+                </p>
+              )}
 
               <div className="space-y-3 border p-3.5 rounded-xl bg-slate-50">
                 <label className="block text-xs font-bold text-slate-700">Take Photo (Live Camera Only)</label>
@@ -3234,7 +3289,7 @@ export default function Dashboard({ user, onLogout }) {
               </div>
 
               <textarea rows="3" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description..." className="w-full p-3 bg-slate-50 border rounded-xl text-sm"></textarea>
-              <button type="submit" disabled={loading} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl text-sm shadow-md hover:bg-indigo-700 transition cursor-pointer">
+              <button type="submit" disabled={loading || supervisorBlockedForBranch} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl text-sm shadow-md hover:bg-indigo-700 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
                 {loading ? 'Submitting...' : 'Submit Request'}
               </button>
             </form>
