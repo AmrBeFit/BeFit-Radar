@@ -223,6 +223,73 @@ const formatDuration = (start, end) => {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
 
+// Small clickable photo preview for the attendance table. Only rendered for the roles that may see selfies
+// (Admin, HR, Branch Managers). Previews are fetched only when the row scrolls into view, from the locked
+// attendancePhotos document, and Cloudinary serves a tiny cropped copy - a click opens the full-size image.
+const attendancePhotoCache = new Map();
+const tinyPhotoUrl = (url) => (url && url.includes('/upload/') ? url.replace('/upload/', '/upload/w_96,h_96,c_fill,g_face,q_auto,f_auto/') : url);
+
+function AttendanceThumb({ rec, which, onOpen }) {
+  const legacy = which === 'in' ? rec.checkInPhoto : rec.checkOutPhoto;
+  const [url, setUrl] = useState(legacy || null);
+  const [state, setState] = useState(legacy ? 'ok' : 'idle'); // idle | loading | ok | none
+  const holder = useRef(null);
+  const outKey = rec.checkOutTime && rec.checkOutTime.seconds ? rec.checkOutTime.seconds : 0;
+
+  useEffect(() => {
+    if (legacy) { setUrl(legacy); setState('ok'); return undefined; }
+    if (rec.photosPurgedAt) { setState('none'); return undefined; }
+    let cancelled = false;
+    let obs = null;
+    const load = async () => {
+      setState('loading');
+      try {
+        const key = `${rec.id}|${outKey}`;
+        let data = attendancePhotoCache.get(key);
+        if (data === undefined) {
+          const snap = await getDoc(doc(db, 'attendance', rec.id, 'attendancePhotos', 'photos'));
+          data = snap.exists() ? snap.data() : null;
+          attendancePhotoCache.set(key, data);
+        }
+        const found = data ? (which === 'in' ? data.checkInPhoto : data.checkOutPhoto) : null;
+        if (cancelled) return;
+        if (found) { setUrl(found); setState('ok'); } else { setState('none'); }
+      } catch (err) {
+        if (!cancelled) setState('none');
+      }
+    };
+    const el = holder.current;
+    if (el && typeof IntersectionObserver !== 'undefined') {
+      obs = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) { obs.disconnect(); load(); }
+      }, { rootMargin: '200px' });
+      obs.observe(el);
+    } else {
+      load();
+    }
+    return () => { cancelled = true; if (obs) obs.disconnect(); };
+  }, [rec.id, outKey, which, legacy, rec.photosPurgedAt]);
+
+  return (
+    <span ref={holder} style={{ display: 'inline-block' }}>
+      {state === 'ok' && url ? (
+        <button
+          type="button"
+          onClick={() => onOpen(url)}
+          title="Click to enlarge (view photos only when necessary)"
+          style={{ padding: 0, border: '1px solid #cbd5e1', borderRadius: 8, overflow: 'hidden', width: 44, height: 44, cursor: 'zoom-in', backgroundColor: '#e2e8f0' }}
+        >
+          <img src={tinyPhotoUrl(url)} alt="" loading="lazy" style={{ width: 44, height: 44, objectFit: 'cover', display: 'block' }} onError={() => setState('none')} />
+        </button>
+      ) : state === 'none' ? (
+        <span style={{ color: '#94a3b8', fontSize: 11 }} title="No photo stored for this record">—</span>
+      ) : (
+        <span style={{ display: 'inline-block', width: 44, height: 44, borderRadius: 8, backgroundColor: '#e2e8f0' }} />
+      )}
+    </span>
+  );
+}
+
 export default function Dashboard({ user, onLogout }) {
   // Navigation Tabs
   const [activeTab, setActiveTab] = useState('requests');
@@ -4232,15 +4299,7 @@ export default function Dashboard({ user, onLogout }) {
                     <td className="p-2.5 print:hidden">
                       {(rec.checkInPhoto || !rec.photosPurgedAt) && (
                         canViewAttendancePhotos ? (
-                          <button
-                            type="button"
-                            onClick={() => openAttendancePhoto(rec, 'in')}
-                            className="px-2 py-1 rounded text-[10px] font-extrabold border-0 cursor-pointer"
-                            style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}
-                            title="View check-in photo (only when necessary)"
-                          >
-                            🖼️ View
-                          </button>
+                          <AttendanceThumb rec={rec} which="in" onOpen={(u) => setFullscreenImage(u)} />
                         ) : (
                           <span className="text-slate-300 text-[10px]" title="Only HR, Admin and Branch Managers can view attendance photos">🔒</span>
                         )
@@ -4250,15 +4309,7 @@ export default function Dashboard({ user, onLogout }) {
                     <td className="p-2.5 print:hidden">
                       {rec.checkOutTime && (rec.checkOutPhoto || !rec.photosPurgedAt) && (
                         canViewAttendancePhotos ? (
-                          <button
-                            type="button"
-                            onClick={() => openAttendancePhoto(rec, 'out')}
-                            className="px-2 py-1 rounded text-[10px] font-extrabold border-0 cursor-pointer"
-                            style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}
-                            title="View check-out photo (only when necessary)"
-                          >
-                            🖼️ View
-                          </button>
+                          <AttendanceThumb rec={rec} which="out" onOpen={(u) => setFullscreenImage(u)} />
                         ) : (
                           <span className="text-slate-300 text-[10px]" title="Only HR, Admin and Branch Managers can view attendance photos">🔒</span>
                         )
