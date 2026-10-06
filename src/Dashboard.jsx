@@ -13,6 +13,7 @@ import {
   deleteDoc,
   doc, 
   serverTimestamp,
+  increment,
   getDocs,
   query,
   where,
@@ -30,6 +31,7 @@ import SchedulePlanner, { useAttendancePlans, MyScheduleCard } from './ScheduleP
 import MaintenanceReport from './MaintenanceReport';
 import IntegrityReports from './IntegrityReports';
 import AuditLog from './AuditLog';
+import FacilityPerformance from './FacilityPerformance';
 import PermissionsManager from './PermissionsManager';
 import { hasPermission } from './permissions';
 import BranchChecklist from './BranchChecklist';
@@ -273,7 +275,7 @@ export default function Dashboard({ user, onLogout }) {
   const [assignModalReq, setAssignModalReq] = useState(null);
   const [selectedAssigneeId, setSelectedAssigneeId] = useState('');
   const [assignTargetStatus, setAssignTargetStatus] = useState('In Progress'); // the status the assign pop-up will set
-  const [maintView, setMaintView] = useState('list'); // 'list' | 'report' (who did what)
+  const [maintView, setMaintView] = useState('list'); // 'list' | 'report' (who did what) | 'performance'
 
   // Per-request "Action Taken" (written by the assigned Facility Member) and
   // "Notes" (written by the Facility Manager) - draft text kept locally until saved.
@@ -1176,9 +1178,13 @@ export default function Dashboard({ user, onLogout }) {
     try {
       const updatePayload = {
         status: newStatus,
+        // The first time the team acts on a request (any status other than New) is its "first response".
+        ...((!req.firstResponseAt && newStatus !== 'New') ? { firstResponseAt: serverTimestamp() } : {}),
         ...(newStatus === 'Completed'
           ? { completedAt: serverTimestamp(), completedBy: currentUserIdentifier }
-          : (req.completedAt ? { completedAt: null, completedBy: null } : {})) // re-opened: clear the completion
+          : (req.completedAt ? { completedAt: null, completedBy: null } : {})), // re-opened: clear the completion
+        // Completed -> anything else = the request was re-opened (counted for the "solved first time" figure)
+        ...((currentStatus === 'Completed' && newStatus !== 'Completed') ? { reopenCount: increment(1) } : {})
       };
 
       await updateDoc(doc(db, 'requests', req.id), updatePayload);
@@ -1242,10 +1248,12 @@ export default function Dashboard({ user, onLogout }) {
         assignedTo: selectedMember.username,
         assignedToId: selectedMember.id,
         assignedToPhone: selectedMember.phone || 'N/A',
+        ...(!assignModalReq.firstResponseAt ? { firstResponseAt: serverTimestamp() } : {}),
         ...(targetStatus === 'Completed'
           // completed straight away: we do not know when the work started, so no "assigned at" is invented
           ? { completedAt: serverTimestamp(), completedBy: currentUserIdentifier }
-          : { assignedAt: serverTimestamp(), completedAt: null, completedBy: null })
+          : { assignedAt: serverTimestamp(), completedAt: null, completedBy: null }),
+        ...(((assignModalReq.status || 'New') === 'Completed' && targetStatus !== 'Completed') ? { reopenCount: increment(1) } : {})
       };
 
       await updateDoc(doc(db, 'requests', assignModalReq.id), payload);
@@ -2126,6 +2134,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // the "who did what" maintenance report: Admin, Facility Manager and CEO
   const canSeeMaintReport = perm('maintReport');
+  const canSeeFacilityPerformance = perm('facilityPerformance');
 
   // The report follows the same branch rule as the requests list: an account with assigned branches
   // (e.g. a Facility Manager) only reports on those branches; Admin, CEO and accounts with none see everything.
@@ -3165,9 +3174,17 @@ export default function Dashboard({ user, onLogout }) {
               />
             )}
 
+            {maintView === 'performance' && canSeeFacilityPerformance && (
+              <FacilityPerformance
+                requests={maintReportRequests}
+                branches={maintReportBranches}
+                onBack={() => setMaintView('list')}
+              />
+            )}
+
             <div
               className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4"
-              style={{ display: maintView === 'report' && canSeeMaintReport ? 'none' : undefined }}
+              style={{ display: ((maintView === 'report' && canSeeMaintReport) || (maintView === 'performance' && canSeeFacilityPerformance)) ? 'none' : undefined }}
             >
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div className="flex items-center gap-3">
@@ -3178,6 +3195,14 @@ export default function Dashboard({ user, onLogout }) {
                       className="px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-600 hover:text-white"
                     >
                       📊 Who did what
+                    </button>
+                  )}
+                  {canSeeFacilityPerformance && (
+                    <button
+                      onClick={() => setMaintView('performance')}
+                      className="px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-600 hover:text-white"
+                    >
+                      ⏱️ Team performance
                     </button>
                   )}
                   {isAdmin && (

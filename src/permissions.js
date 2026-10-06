@@ -39,6 +39,7 @@ export const PERMISSIONS = [
   { key: 'tab_schedule', group: 'tabs', label: 'Schedule tab', desc: 'See the shift schedule (planning follows the role).', def: (r) => ['CEO', 'HR', 'Branch Manager', 'Supervisor'].includes(r), grantable: false, server: false },
   { key: 'tab_checklist', group: 'tabs', label: 'Checklist tab', desc: 'See the branch checklist.', def: ALL_BUT('Facility Manager', 'Facility Member'), grantable: true, server: false },
   { key: 'tab_users', group: 'tabs', label: 'Users tab', desc: 'Manage accounts (which roles follows the account role).', def: (r) => ['Branch Manager', 'Facility Manager', 'Supervisor'].includes(r), grantable: false, server: false },
+  { key: 'facilityPerformance', group: 'maintenance', label: 'Facility team performance', desc: 'Response rate, response speed and average time to finish requests.', def: (r) => ['Facility Member', 'Facility Manager', 'CEO'].includes(r), grantable: true, server: false },
   { key: 'maintReport', group: 'tabs', label: 'Maintenance Report', desc: 'The maintenance report inside the Maintenance tab.', def: (r) => ['Facility Manager', 'CEO'].includes(r), grantable: true, server: false },
 
   // ---- Leaves ----
