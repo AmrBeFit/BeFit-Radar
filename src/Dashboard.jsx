@@ -1701,7 +1701,7 @@ export default function Dashboard({ user, onLogout }) {
       const snap = await getDoc(doc(db, 'attendance', rec.id, 'attendancePhotos', 'photos'));
       const url = snap.exists() ? (which === 'in' ? snap.data().checkInPhoto : snap.data().checkOutPhoto) : null;
       if (url) setFullscreenImage(url);
-      else alert('This photo is no longer available (photos are deleted automatically after 60 days).');
+      else alert('No photo is stored for this record (photos are also deleted automatically after 60 days).');
     } catch (err) {
       alert('You are not allowed to view this photo.');
     }
@@ -4230,7 +4230,7 @@ export default function Dashboard({ user, onLogout }) {
                     <td className="p-2.5">{rec.branch}</td>
                     <td className="p-2.5 text-emerald-700 font-bold">{formatDate(rec.checkInTime)}</td>
                     <td className="p-2.5 print:hidden">
-                      {(rec.checkInPhoto || (rec.photosPrivate && !rec.photosPurgedAt)) && (
+                      {(rec.checkInPhoto || !rec.photosPurgedAt) && (
                         canViewAttendancePhotos ? (
                           <button
                             type="button"
@@ -4248,7 +4248,7 @@ export default function Dashboard({ user, onLogout }) {
                     </td>
                     <td className="p-2.5 text-rose-700 font-bold">{formatDate(rec.checkOutTime)}</td>
                     <td className="p-2.5 print:hidden">
-                      {rec.checkOutTime && (rec.checkOutPhoto || (rec.photosPrivate && !rec.photosPurgedAt)) && (
+                      {rec.checkOutTime && (rec.checkOutPhoto || !rec.photosPurgedAt) && (
                         canViewAttendancePhotos ? (
                           <button
                             type="button"
