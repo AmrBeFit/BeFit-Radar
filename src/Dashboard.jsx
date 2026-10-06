@@ -4524,6 +4524,7 @@ export default function Dashboard({ user, onLogout }) {
                 <label className="block text-xs font-bold text-slate-600 mb-1">Password</label>
                 <input 
                   type="password" 
+                  autoComplete="new-password" 
                   required 
                   value={newPassword} 
                   onChange={(e) => setNewPassword(e.target.value)} 

@@ -45,13 +45,27 @@ function BefitEye({ side }) {
 }
 
 // "BeFit Eye" set along a smiling arc (a gentle curve, dipping in the middle) instead of
-// a straight line, using SVG text-on-a-path.
+// a straight line, using SVG text-on-a-path. Together with the eyes (eyes) and the red
+// logo (nose), this is the "mouth" of the little face.
 function BefitSmileTitle() {
   return (
     <svg viewBox="0 0 320 130" className="w-72 sm:w-80 mx-auto block" aria-label="BeFit Eye">
       <path id="befitSmileArc" d="M 4 6 Q 160 124 316 6" fill="none" />
       <text textAnchor="middle" style={{ fontFamily: 'inherit', fontWeight: 900, fontSize: '38px', fill: '#111827', letterSpacing: '0px' }}>
         <textPath href="#befitSmileArc" startOffset="50%">BeFit Eye</textPath>
+      </text>
+    </svg>
+  );
+}
+
+// "Please log in to continue" set along its own, shallower arc right below the smile -
+// the "chin" of the little face.
+function BefitChinSubtitle() {
+  return (
+    <svg viewBox="0 0 320 42" className="w-72 sm:w-80 mx-auto block" aria-label="Please log in to continue">
+      <path id="befitChinArc" d="M 20 4 Q 160 38 300 4" fill="none" />
+      <text textAnchor="middle" style={{ fontFamily: 'inherit', fontWeight: 600, fontSize: '13px', fill: '#6b7280', letterSpacing: '0.3px' }}>
+        <textPath href="#befitChinArc" startOffset="50%">Please log in to continue</textPath>
       </text>
     </svg>
   );
@@ -150,11 +164,35 @@ export default function Login({ onLoginSuccess }) {
         @media (prefers-reduced-motion: reduce) {
           .befit-eye-enter-left, .befit-eye-enter-right, .befit-logo-pop { animation: none; }
         }
+
+        /* A single pale, soft white outline tracing the face's outer contour - an irregular,
+           hand-drawn-looking loop rather than a perfect circle - so the page color behind it
+           still shows through everywhere except that thin, wobbly line. */
+        .befit-halo {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          width: 360px;
+          height: 288px;
+          max-width: 94vw;
+          filter: blur(1.5px);
+          pointer-events: none;
+        }
       `}</style>
 
-      <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full space-y-6 border">
-
-        <div className="text-center">
+      {/* Face header: sits directly on the page background (not inside the white card) so the
+          pale, cloud-like halo behind it can let that background color show through. */}
+      <div className="relative w-full max-w-md flex flex-col items-center py-6">
+        <svg className="befit-halo" viewBox="0 0 400 320" aria-hidden="true">
+          <path
+            d="M 333.5 211 Q 365 160 330.25 112.25 Q 295.5 64.5 247.75 34.75 Q 200 5 150.5 33 Q 101 61 65.5 110.5 Q 30 160 69 206 Q 108 252 154 286 Q 200 320 251 291 Q 302 262 333.5 211 Z"
+            fill="none"
+            stroke="rgba(255,255,255,0.7)"
+            strokeWidth="4"
+          />
+        </svg>
+        <div className="relative text-center">
           <div className="flex items-center justify-center gap-2 sm:gap-3 mb-0">
             <BefitEye side="left" />
             <img
@@ -165,8 +203,13 @@ export default function Login({ onLoginSuccess }) {
             <BefitEye side="right" />
           </div>
           <BefitSmileTitle />
-          <p className="text-xs text-gray-500 -mt-10">Please log in to continue</p>
+          <div className="-mt-10">
+            <BefitChinSubtitle />
+          </div>
         </div>
+      </div>
+
+      <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full space-y-6 border">
 
         {error && (
           <div className="bg-red-50 text-red-600 text-xs p-3 rounded-lg border border-red-200 text-center font-medium">
@@ -181,6 +224,7 @@ export default function Login({ onLoginSuccess }) {
             </label>
             <input
               type="text"
+              autoComplete="username"
               required
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
@@ -195,6 +239,7 @@ export default function Login({ onLoginSuccess }) {
             </label>
             <input
               type="password"
+              autoComplete="current-password"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
