@@ -369,6 +369,7 @@ export default function Dashboard({ user, onLogout }) {
   const [statusFilter, setStatusFilter] = useState('All');
   const [branchFilter, setBranchFilter] = useState('All');
   const [categoryFilter, setCategoryFilter] = useState('All');
+  const [requestSearch, setRequestSearch] = useState('');
   const [assigneeFilters, setAssigneeFilters] = useState([]); // empty = everyone
   const [sortOrder, setSortOrder] = useState('desc');
 
@@ -2105,10 +2106,13 @@ export default function Dashboard({ user, onLogout }) {
     if (statusFilter !== 'All') result = result.filter(r => (r.status || 'New') === statusFilter);
     if (branchFilter !== 'All') result = result.filter(r => r.branch === branchFilter);
     if (categoryFilter !== 'All') result = result.filter(r => r.category === categoryFilter);
+    // Search by request number (any part of it; spaces, dashes and a leading # are ignored)
+    const q = requestSearch.replace(/[\s#-]/g, '').toLowerCase();
+    if (q) result = result.filter(r => String(r.requestNumber || '').toLowerCase().includes(q));
     if (assigneeFilters.length > 0) result = result.filter(r => assigneeFilters.includes(r.assignedTo || UNASSIGNED_FILTER));
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
-  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, categoryFilter, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
+  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, categoryFilter, requestSearch, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
 
   // Options of the "Assigned to" filter: everyone who can be assigned, plus anyone already on a request
   const assigneeFilterOptions = useMemo(() => {
@@ -3189,6 +3193,27 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
                 
                 <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto">
+                  <div className="col-span-2 sm:col-auto relative">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={requestSearch}
+                      onChange={(e) => setRequestSearch(e.target.value)}
+                      placeholder="🔍 Request number..."
+                      className="w-full sm:w-44 p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
+                    />
+                    {requestSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setRequestSearch('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 text-xs font-black border-0 bg-transparent cursor-pointer"
+                        title="Clear search"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
