@@ -395,7 +395,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
               reporter's account (truly anonymous), System Admin  can read the content, but only Admin
               can see the reporter's identity - just be Honest , clear and fair . */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
+            <span className="font-bold text-slate-700">في حال وجود أي شئ خاطئ او مخل بالأمانة او أي مشكلة أخري فهذا هو المكان للابلاغ و هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
             بحسابك فقط كن امين و واضح و عادل، يستطيع <span className="font-bold text-slate-700">مدير النظام و ال HR   (فقط)</span> الاطلاع
             على محتوى البلاغ،  <span className="font-bold text-slate-700"> -</span>    سيظل حسابك مجهولا
                —    .  يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
