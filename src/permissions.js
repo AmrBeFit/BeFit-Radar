@@ -23,7 +23,7 @@ export const PERMISSION_GROUPS = [
   { id: 'tabs', label: 'Tabs / Screens' },
   { id: 'leaves', label: 'Leaves' },
   { id: 'checklist', label: 'Checklist' },
-  { id: 'maintenance', label: 'Maintenance' },
+  { id: 'maintenance', label: 'Facility Management' },
   { id: 'integrity', label: 'Integrity Reports' },
   { id: 'users', label: 'Users & Schedule' }
 ];
@@ -40,7 +40,7 @@ export const PERMISSIONS = [
   { key: 'tab_checklist', group: 'tabs', label: 'Checklist tab', desc: 'See the branch checklist.', def: ALL_BUT('Facility Manager', 'Facility Member'), grantable: true, server: false },
   { key: 'tab_users', group: 'tabs', label: 'Users tab', desc: 'Manage accounts (which roles follows the account role).', def: (r) => ['Branch Manager', 'Facility Manager', 'Supervisor'].includes(r), grantable: false, server: false },
   { key: 'facilityPerformance', group: 'maintenance', label: 'Facility team performance', desc: 'Response rate, response speed and average time to finish requests.', def: (r) => ['Facility Member', 'Facility Manager', 'CEO'].includes(r), grantable: true, server: false },
-  { key: 'maintReport', group: 'tabs', label: 'Maintenance Report', desc: 'The maintenance report inside the Maintenance tab.', def: (r) => ['Facility Manager', 'CEO'].includes(r), grantable: true, server: false },
+  { key: 'maintReport', group: 'tabs', label: 'Maintenance Report', desc: 'The maintenance report inside the Facility Management tab.', def: (r) => ['Facility Manager', 'CEO'].includes(r), grantable: true, server: false },
 
   // ---- Leaves ----
   { key: 'approveLeave', group: 'leaves', label: 'Approve / reject leaves', desc: 'Decide leave requests (Branch Managers: own branches only; HR: all).', def: (r) => ['HR', 'Branch Manager'].includes(r), grantable: true, server: true },
@@ -50,7 +50,7 @@ export const PERMISSIONS = [
   { key: 'checklistDashboard', group: 'checklist', label: 'Checklist branches summary', desc: 'Completion %, best branch, requests / OK / Not Completed per branch.', def: (r) => ['Supervisor', 'Branch Manager', 'HR', 'CEO'].includes(r), grantable: true, server: false },
   { key: 'signOffChecklist', group: 'checklist', label: 'Sign off the checklist', desc: 'Sign the day; after signing only Admin can edit it.', def: (r) => ['Branch Manager', 'Supervisor'].includes(r), grantable: true, server: true },
 
-  // ---- Maintenance ----
+  // ---- Facility Management (maintenance requests) ----
   { key: 'viewAllRequests', group: 'maintenance', label: 'See ALL maintenance requests', desc: 'Every branch\'s requests, not just own branch / own requests.', def: () => false, grantable: true, server: true },
   { key: 'manageRequestStatus', group: 'maintenance', label: 'Change request status / assign', desc: 'Change status, assign and archive maintenance requests.', def: (r) => r === 'Facility Manager', grantable: true, server: true },
   { key: 'editNotes', group: 'maintenance', label: 'Edit request notes', desc: 'Write the Notes box on maintenance requests.', def: (r) => r === 'Facility Manager', grantable: true, server: true },

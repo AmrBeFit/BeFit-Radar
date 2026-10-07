@@ -3152,7 +3152,7 @@ export default function Dashboard({ user, onLogout }) {
             onClick={() => setActiveTab('requests')}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'requests' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
           >
-            🛠️ Maintenance
+            🛠️ Facility Management
           </button>
 
           {canSeeAttendance && (
