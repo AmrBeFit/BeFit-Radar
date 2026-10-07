@@ -4,9 +4,8 @@ import { getStorage } from "firebase/storage";
 import { getAuth } from "firebase/auth";
 import { getMessaging, isSupported } from "firebase/messaging";
 import { getFunctions } from "firebase/functions";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 
-// ⚠️ IMPORTANT: this must be the EXACT SAME config object as the one already
-// in your real firebase.js (the values below are placeholders).
 const firebaseConfig = {
   apiKey: "AIzaSyAt08VDdRMJmdyVAwRoGgHS5--h2cisNuc",
   authDomain: "befit-facility.firebaseapp.com",
@@ -17,6 +16,18 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+
+// App Check: proves requests come from the real BeFit Eye site (must run before the services below).
+if (typeof window !== "undefined") {
+  // Lets you test on localhost: copy the debug token printed in the console and register it in
+  // Firebase Console > App Check > Apps > Manage debug tokens.
+  if (location.hostname === "localhost") self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+  initializeAppCheck(app, {
+    provider: new ReCaptchaEnterpriseProvider("6LcZbOMtAAAAALRoH4LB1yiu2hbXeoS1ny3GzCwV"),
+    isTokenAutoRefreshEnabled: true
+  });
+}
+
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 export const auth = getAuth(app);
