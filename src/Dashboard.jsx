@@ -300,6 +300,9 @@ export default function Dashboard({ user, onLogout }) {
   const [branches, setBranches] = useState([]);
   const [categories, setCategories] = useState([]);
   const [usersList, setUsersList] = useState([]);
+  // Phone numbers are NOT part of the users directory any more (every signed-in account could read it).
+  // They live in userPrivate/{uid}, which only Admin and the managers who need them can read.
+  const [phonesMap, setPhonesMap] = useState({});
   const [attendanceRecords, setAttendanceRecords] = useState([]);
   // Surfaces a query failure (e.g. a missing Firestore index) instead of silently leaving the
   // attendance list empty - a compound query like "username == X AND checkInTime >= cutoff" needs a
@@ -1318,7 +1321,7 @@ export default function Dashboard({ user, onLogout }) {
         status: targetStatus,
         assignedTo: selectedMember.username,
         assignedToId: selectedMember.id,
-        assignedToPhone: selectedMember.phone || 'N/A',
+        assignedToPhone: phonesMap[selectedMember.id] || 'N/A',
         ...(!assignModalReq.firstResponseAt ? { firstResponseAt: serverTimestamp() } : {}),
         ...(targetStatus === 'Completed'
           // completed straight away: we do not know when the work started, so no "assigned at" is invented
@@ -1477,11 +1480,12 @@ export default function Dashboard({ user, onLogout }) {
       // Note: the username is the account's login identity (linked to its Firebase Auth account
       // and the login lookup), so it is intentionally not editable here.
       const updatePayload = {
-        phone: editUserPhone.trim(),
         assignedBranches: editUserBranches
       };
 
       await updateDoc(doc(db, 'users', editingUser.id), updatePayload);
+      // The phone number is stored in its own restricted document, not in the users directory.
+      await setDoc(doc(db, 'userPrivate', editingUser.id), { phone: editUserPhone.trim() }, { merge: true });
 
       // Update: a role change updates the Firebase Auth custom claim too, so it
       // has to go through this Cloud Function instead of a plain Firestore write.
@@ -2160,6 +2164,20 @@ export default function Dashboard({ user, onLogout }) {
       unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers(); unsubLocationViolations();
     };
   }, [user?.id, roleLower, branchesKey, currentUserIdentifier, canViewAllRequests, canViewLeaveQueue]);
+
+  // Phone numbers (userPrivate). Loaded only for the roles the security rules allow to read them.
+  const canReadPhones = isAdmin || isFacilityManager || isBranchManager || isSupervisor || canManageStatus;
+  useEffect(() => {
+    if (!user?.id || !canReadPhones) { setPhonesMap({}); return undefined; }
+    const unsub = onSnapshot(collection(db, 'userPrivate'), (snapshot) => {
+      const map = {};
+      snapshot.docs.forEach((d) => { map[d.id] = d.data().phone || ''; });
+      setPhonesMap(map);
+    }, (err) => {
+      console.warn('Could not load phone numbers:', err.message);
+    });
+    return () => unsub();
+  }, [user?.id, canReadPhones]);
 
   // ACTIVITY LOG BELL (header icon): the log is hidden until the bell is clicked.
   // The red badge counts entries made by OTHER people since the bell was last opened
@@ -3014,7 +3032,7 @@ export default function Dashboard({ user, onLogout }) {
                 <option value="" className="bg-white text-slate-900">-- Select who is in charge --</option>
                 {taskAssignees.map(m => (
                   <option key={m.id} value={m.id} className="bg-white text-slate-900">
-                    {m.username} - {m.role} ({m.phone || 'No Phone'})
+                    {m.username} - {m.role} ({phonesMap[m.id] || 'No Phone'})
                   </option>
                 ))}
               </select>
@@ -4596,8 +4614,9 @@ export default function Dashboard({ user, onLogout }) {
                   required 
                   value={newUsername} 
                   onChange={(e) => setNewUsername(e.target.value)} 
-                  placeholder="Enter username" 
-                  className="w-full p-3 bg-slate-50 border rounded-xl text-sm" 
+                  placeholder="Enter username"
+                  autoComplete="off"
+                  className="w-full p-3 bg-slate-50 border rounded-xl text-sm"
                 />
               </div>
               <div>
@@ -4906,7 +4925,7 @@ export default function Dashboard({ user, onLogout }) {
                             )}
                           </td>
                           <td className="p-3 font-bold text-slate-900">{u.username}</td>
-                          <td className="p-3 font-semibold text-slate-700">{u.phone || 'N/A'}</td>
+                          <td className="p-3 font-semibold text-slate-700">{phonesMap[u.id] || 'N/A'}</td>
                           <td className="p-3">
                             <span className={`px-2 py-0.5 rounded font-black text-[10px] uppercase ${
                               u.role === 'Admin' 
@@ -4968,7 +4987,7 @@ export default function Dashboard({ user, onLogout }) {
                                     setEditingUser(u);
                                     setEditUsername(u.username || '');
                                     setEditPassword(isAdmin ? (u.password || '') : '');
-                                    setEditUserPhone(u.phone || '');
+                                    setEditUserPhone(phonesMap[u.id] || '');
                                     setEditUserRole(u.role || 'User');
                                     setEditUserBranches(Array.isArray(u.assignedBranches) ? u.assignedBranches : []);
                                   }}
