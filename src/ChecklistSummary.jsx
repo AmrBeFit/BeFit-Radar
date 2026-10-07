@@ -192,7 +192,7 @@ function TrendLine({ daily }) {
   );
 }
 
-export default function ChecklistSummary({ config, slots, branchNames, intervalMinutes = 60 }) {
+export default function ChecklistSummary({ config, slots, slotsByBranch = {}, branchNames, intervalMinutes = 60 }) {
   const today = ymd(new Date());
   const [period, setPeriod] = useState('today');
   const [branchFilter, setBranchFilter] = useState('All');
@@ -239,7 +239,7 @@ export default function ChecklistSummary({ config, slots, branchNames, intervalM
       const r = { branch, ok: 0, request: 0, na: 0, notCompleted: 0, notChecked: 0 };
       days.forEach((day) => {
         const checks = byKey[`${branch}__${day}`] || {};
-        slots.forEach((slot) => {
+        (slotsByBranch[branch] || slots).forEach((slot) => {
           const due = day < today ? true : day === today ? toMin(slot) + intervalMinutes <= nowMin : false;
           if (!due) return;
           itemIds.forEach((id) => {
@@ -277,7 +277,7 @@ export default function ChecklistSummary({ config, slots, branchNames, intervalM
       return { day, completion: noNAday > 0 ? ((a.ok + a.request) / noNAday) * 100 : null };
     });
     return { ranked, unranked, total, daily };
-  }, [docs, range, branchNames, branchFilter, config, slots, tick, intervalMinutes, today]);
+  }, [docs, range, branchNames, branchFilter, config, slots, slotsByBranch, tick, intervalMinutes, today]);
 
   const pct = (v) => (v === null || v === undefined ? '—' : `${v.toFixed(1)}%`);
   const tone = (v) => (v === null ? '#94a3b8' : v >= 90 ? '#059669' : v >= 70 ? '#d97706' : '#e11d48');

@@ -40,6 +40,19 @@ const minutesOf = (hhmm) => {
   return h * 60 + m;
 };
 const hhmmOf = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+// Branch working hours (set by Admin in Settings > Branches as openTime / closeTime, "HH:MM").
+// A shift has to stay inside them. A branch whose closing time is not after its opening time works
+// past midnight, so a shift may sit either in [open, midnight] or in [midnight, close].
+const branchHours = (b) => (b && b.openTime && b.closeTime ? { open: b.openTime, close: b.closeTime } : null);
+const shiftFitsHours = (start, end, hours) => {
+  if (!hours) return true;
+  const s = minutesOf(start); const e = minutesOf(end);
+  const o = minutesOf(hours.open); const c = minutesOf(hours.close);
+  if (c > o) return s >= o && e <= c;
+  return (s >= o && e <= 24 * 60) || e <= c;
+};
+const hoursText = (h) => `${fmt12(h.open)} – ${fmt12(h.close)}`;
 const fmt12 = (hhmm) => {
   if (!hhmm || hhmm === '—') return '—';
   const [h, m] = hhmm.split(':').map(Number);
@@ -202,6 +215,112 @@ export function MyScheduleCard({ plans, userId }) {
 /* =====================================================================
    Main component (the "Schedule" tab)
    ===================================================================== */
+
+/* =====================================================================
+   Branch working hours: Admin (all branches), Branch Manager and Supervisor (only the branches
+   assigned to them) set when each branch opens and closes. Shifts cannot be planned outside these
+   hours, and the Branch Checklist only shows the hours inside them.
+   ===================================================================== */
+function BranchHoursPanel({ branches, plannableBranches, isAdmin }) {
+  const [open, setOpen] = useState(false);
+  const [drafts, setDrafts] = useState({});
+  const [savingId, setSavingId] = useState(null);
+  const field = 'p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium';
+
+  const rows = useMemo(
+    () => branches.filter((b) => plannableBranches.includes(b.name)).sort((a, b) => a.name.localeCompare(b.name)),
+    [branches, plannableBranches]
+  );
+
+  const valueOf = (b, key) => (drafts[b.id] && drafts[b.id][key] !== undefined ? drafts[b.id][key] : (b[key] || ''));
+  const setField = (b, key, v) => setDrafts((prev) => ({ ...prev, [b.id]: { ...(prev[b.id] || {}), [key]: v } }));
+
+  const save = async (b) => {
+    const o = valueOf(b, 'openTime');
+    const c = valueOf(b, 'closeTime');
+    if (!o || !c) return alert('Please set both the opening and the closing time.');
+    if (o === c) return alert('The opening and closing time cannot be the same.');
+    setSavingId(b.id);
+    try {
+      await updateDoc(doc(db, 'branches', b.id), { openTime: o, closeTime: c });
+      setDrafts((prev) => { const n = { ...prev }; delete n[b.id]; return n; });
+    } catch (err) {
+      alert('Could not save the hours: ' + err.message);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const clearHours = async (b) => {
+    if (!window.confirm(`Remove the working hours of ${b.name}? Shifts and the checklist there will no longer be limited.`)) return;
+    setSavingId(b.id);
+    try {
+      await updateDoc(doc(db, 'branches', b.id), { openTime: null, closeTime: null });
+      setDrafts((prev) => { const n = { ...prev }; delete n[b.id]; return n; });
+    } catch (err) {
+      alert('Could not remove the hours: ' + err.message);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  if (rows.length === 0) return null;
+  const missing = rows.filter((b) => !(b.openTime && b.closeTime)).length;
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-3xl shadow-sm">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-3 p-4 text-left cursor-pointer bg-transparent border-0"
+      >
+        <span className="text-sm font-bold text-slate-900">
+          🕒 Branch working hours
+          {missing > 0 && <span className="ml-2 text-[11px] font-bold text-amber-600">({missing} branch(es) without hours)</span>}
+        </span>
+        <span className="text-xs font-bold text-indigo-600">{open ? 'Hide' : 'Show / edit'}</span>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 space-y-2">
+          <p className="text-xs text-slate-500">
+            Set when each branch opens and closes. A shift cannot start before the opening time or end after the
+            closing time, and the Branch Checklist only shows the hours inside them.
+          </p>
+          {rows.map((b) => {
+            const dirty = !!drafts[b.id];
+            return (
+              <div key={b.id} className="flex flex-wrap items-center gap-2 p-2.5 bg-slate-50 border border-slate-100 rounded-xl">
+                <span className="text-xs font-bold text-slate-800 min-w-[120px]">🏢 {b.name}</span>
+                <label className="text-[11px] font-bold text-slate-500">Opens</label>
+                <input type="time" value={valueOf(b, 'openTime')} onChange={(e) => setField(b, 'openTime', e.target.value)} className={field} />
+                <label className="text-[11px] font-bold text-slate-500">Closes</label>
+                <input type="time" value={valueOf(b, 'closeTime')} onChange={(e) => setField(b, 'closeTime', e.target.value)} className={field} />
+                <button
+                  type="button"
+                  disabled={!dirty || savingId === b.id}
+                  onClick={() => save(b)}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 cursor-pointer border-0"
+                >
+                  {savingId === b.id ? 'Saving...' : 'Save'}
+                </button>
+                {isAdmin && b.openTime && b.closeTime && (
+                  <button
+                    type="button"
+                    onClick={() => clearHours(b)}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 cursor-pointer border-0"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SchedulePlanner({ user, usersList = [], branches = [], attendanceRecords = [], plans = [] }) {
   const role = user?.role || '';
   const isAdmin = role === 'Admin';
@@ -274,10 +393,14 @@ export default function SchedulePlanner({ user, usersList = [], branches = [], a
 
       {section === 'plan' && (
         <>
+          {canPlan && (
+            <BranchHoursPanel branches={branches} plannableBranches={plannableBranches} isAdmin={isAdmin} />
+          )}
           {canPlan ? (
             <CreatePlanForm
               plannableUsers={plannableUsers}
               plannableBranches={plannableBranches}
+              branches={branches}
               onOpenTeam={(isBM || isSupervisor) ? () => setSection('team') : null}
             />
           ) : (
@@ -290,6 +413,7 @@ export default function SchedulePlanner({ user, usersList = [], branches = [], a
             user={user}
             isAdmin={isAdmin}
             plannableBranches={plannableBranches}
+            branches={branches}
           />
         </>
       )}
@@ -318,7 +442,7 @@ export default function SchedulePlanner({ user, usersList = [], branches = [], a
 /* =====================================================================
    Create a plan (1 day up to 1 month)
    ===================================================================== */
-function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
+function CreatePlanForm({ plannableUsers, plannableBranches, branches = [], onOpenTeam }) {
   const today = toYmd(new Date());
   const [period, setPeriod] = useState('1w');
   const [startDate, setStartDate] = useState(addDays(today, 1));
@@ -347,8 +471,25 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
     [plannableUsers]
   );
 
+  // Picking a branch pulls the shift times into that branch's working hours.
+  const handleBranchChange = (name) => {
+    setBranch(name);
+    const h = branchHours(branches.find((b) => b.name === name));
+    if (!h) return;
+    if (!shiftFitsHours(startTime, endTime, h)) {
+      if (minutesOf(h.close) > minutesOf(h.open)) {
+        setStartTime(h.open);
+        setEndTime(h.close);
+      } else {
+        setStartTime(h.open);
+        setEndTime('23:59');
+      }
+    }
+  };
+
   const toggleDay = (i) => setDays((prev) => (prev.includes(i) ? prev.filter((d) => d !== i) : [...prev, i]));
   const totalShifts = selectedIds.length * plannedDates.length;
+  const createHours = branchHours(branches.find((b) => b.name === branch));
 
   const handleCreate = async () => {
     if (selectedIds.length === 0) return alert('Please choose at least one employee.');
@@ -358,6 +499,10 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
     if (plannedDates.length === 0) return alert('No working day is selected inside this period.');
     if (!startTime || !endTime || endTime <= startTime) {
       return alert('The end time must be after the start time. For a night shift, create two shifts (before and after midnight).');
+    }
+    const hours = branchHours(branches.find((b) => b.name === branch));
+    if (!shiftFitsHours(startTime, endTime, hours)) {
+      return alert(`${branch} works from ${hoursText(hours)}. A shift cannot start before the branch opens or end after it closes.`);
     }
     if (!window.confirm(`Create ${totalShifts} shift(s) for ${selectedIds.length} employee(s) at ${branch}?`)) return;
 
@@ -448,13 +593,18 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
         </div>
         <div>
           <label className={label}>Shift starts</label>
-          <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className={field} />
+          <input type="time" value={startTime} min={createHours && minutesOf(createHours.close) > minutesOf(createHours.open) ? createHours.open : undefined} max={createHours && minutesOf(createHours.close) > minutesOf(createHours.open) ? createHours.close : undefined} onChange={(e) => setStartTime(e.target.value)} className={field} />
         </div>
         <div>
           <label className={label}>Shift ends</label>
-          <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className={field} />
+          <input type="time" value={endTime} min={createHours && minutesOf(createHours.close) > minutesOf(createHours.open) ? createHours.open : undefined} max={createHours && minutesOf(createHours.close) > minutesOf(createHours.open) ? createHours.close : undefined} onChange={(e) => setEndTime(e.target.value)} className={field} />
         </div>
       </div>
+      {createHours && (
+        <p className="text-[11px] font-semibold text-indigo-700 -mt-1">
+          🕒 {branch} works {hoursText(createHours)}. Shifts must stay inside these hours.
+        </p>
+      )}
 
       <div>
         <label className={label}>Working days</label>
@@ -489,7 +639,7 @@ function CreatePlanForm({ plannableUsers, plannableBranches, onOpenTeam }) {
         </div>
         <div>
           <label className={label}>Branch</label>
-          <select value={branch} onChange={(e) => setBranch(e.target.value)} className={field}>
+          <select value={branch} onChange={(e) => handleBranchChange(e.target.value)} className={field}>
             <option value="">Select branch...</option>
             {plannableBranches.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
@@ -752,7 +902,7 @@ function TeamBranchesPanel({ user, isBM, usersList, branches, myBranches }) {
 /* =====================================================================
    The schedule itself: filter, edit, delete, export
    ===================================================================== */
-function ScheduleList({ visiblePlans, user, isAdmin, plannableBranches }) {
+function ScheduleList({ visiblePlans, user, isAdmin, plannableBranches, branches = [] }) {
   const today = toYmd(new Date());
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(addDays(today, 30));
@@ -820,6 +970,10 @@ function ScheduleList({ visiblePlans, user, isAdmin, plannableBranches }) {
     if (!editing.branch) return alert('Please choose the branch.');
     if (!editing.startTime || !editing.endTime || editing.endTime <= editing.startTime) {
       return alert('The end time must be after the start time.');
+    }
+    const editHours = branchHours(branches.find((b) => b.name === editing.branch));
+    if (!shiftFitsHours(editing.startTime, editing.endTime, editHours)) {
+      return alert(`${editing.branch} works from ${hoursText(editHours)}. A shift cannot start before the branch opens or end after it closes.`);
     }
     try {
       await updateDoc(doc(db, 'attendancePlans', editing.id), {

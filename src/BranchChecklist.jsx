@@ -39,7 +39,8 @@ const buildSlots = (startTime, endTime, intervalMinutes) => {
   const slots = [];
   for (let t = start; t <= end; t += intervalMinutes) {
     const mins = t % (24 * 60);
-    slots.push(`${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`);
+    const label = `${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`;
+    if (!slots.includes(label)) slots.push(label);
   }
   return slots;
 };
@@ -113,10 +114,29 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
     return () => unsub();
   }, [docId, selectedBranch, selectedDate]);
 
-  const slots = useMemo(
+  // Each branch has its own working hours (set by Admin / Branch Manager / Supervisor). The checklist only
+  // shows the hours inside them; a branch with no hours of its own falls back to the shared default window.
+  const slotsByBranch = useMemo(() => {
+    const map = {};
+    branchesList.forEach((b) => {
+      if (!b || typeof b === 'string' || !b.name) return;
+      const start = b.openTime && b.closeTime ? b.openTime : config.startTime;
+      const end = b.openTime && b.closeTime ? b.closeTime : config.endTime;
+      map[b.name] = buildSlots(start, end, INTERVAL_MINUTES);
+    });
+    return map;
+  }, [branchesList, config.startTime, config.endTime]);
+
+  const defaultSlots = useMemo(
     () => buildSlots(config.startTime, config.endTime, INTERVAL_MINUTES),
     [config.startTime, config.endTime]
   );
+  const slots = slotsByBranch[selectedBranch] || defaultSlots;
+  const selectedBranchObj = useMemo(
+    () => branchesList.find((b) => b && typeof b !== 'string' && b.name === selectedBranch),
+    [branchesList, selectedBranch]
+  );
+  const branchHasHours = !!(selectedBranchObj && selectedBranchObj.openTime && selectedBranchObj.closeTime);
 
   const isToday = selectedDate === today;
   const currentHm = nowHM();
@@ -443,6 +463,11 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
             Tick each item off every hour as you go through the branch. Anyone checked in here right now can
             tick the current time slot; only Admin, Branch Manager or Supervisor can sign off the whole day.
           </p>
+          {branchHasHours && (
+            <p className="text-[11px] font-semibold text-indigo-700 mt-1">
+              🕒 {selectedBranch} works {selectedBranchObj.openTime} – {selectedBranchObj.closeTime}; only these hours are listed.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {canSeeSummary && (
@@ -484,13 +509,14 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
       )}
 
       {showSummary && canSeeSummary && (
-        <ChecklistSummary config={config} slots={slots} branchNames={branchNames} intervalMinutes={INTERVAL_MINUTES} />
+        <ChecklistSummary config={config} slots={defaultSlots} slotsByBranch={slotsByBranch} branchNames={branchNames} intervalMinutes={INTERVAL_MINUTES} />
       )}
 
       {showSettings && isAdmin && (
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <p className="text-xs text-slate-500">
-            This item list and time window apply to <span className="font-bold">every branch</span> (one shared checklist format).
+            The item list applies to <span className="font-bold">every branch</span> (one shared checklist format). The time window below is only the
+            default for branches that have no working hours of their own; a branch's own hours (set in the Schedule page) take priority.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
