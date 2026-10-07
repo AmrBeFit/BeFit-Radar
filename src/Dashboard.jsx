@@ -2081,7 +2081,12 @@ export default function Dashboard({ user, onLogout }) {
     });
 
     // Leave requests - same broad-read pattern as ceo_requests above (works for every role today).
-    const unsubLeaveReq = onSnapshot(collection(db, 'leaveRequests'), (snapshot) => {
+    // Admin and whoever may review / see the leave queue get every request; everyone else only asks for their own
+    // (the Firestore rule refuses a query that could return other people's requests).
+    const leaveQuery = (roleLower === 'admin' || canViewLeaveQueue)
+      ? collection(db, 'leaveRequests')
+      : query(collection(db, 'leaveRequests'), where('username', '==', currentUserIdentifier));
+    const unsubLeaveReq = onSnapshot(leaveQuery, (snapshot) => {
       const data = snapshot.docs.map(item => ({ id: item.id, ...item.data() }));
       data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
       setLeaveRequests(data);
@@ -2154,7 +2159,7 @@ export default function Dashboard({ user, onLogout }) {
     return () => {
       unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers(); unsubLocationViolations();
     };
-  }, [user?.id, roleLower, branchesKey, currentUserIdentifier, canViewAllRequests]);
+  }, [user?.id, roleLower, branchesKey, currentUserIdentifier, canViewAllRequests, canViewLeaveQueue]);
 
   // ACTIVITY LOG BELL (header icon): the log is hidden until the bell is clicked.
   // The red badge counts entries made by OTHER people since the bell was last opened
@@ -2706,6 +2711,26 @@ export default function Dashboard({ user, onLogout }) {
   useEffect(() => {
     if (activeTab !== 'requests') pendingChecklistRef.current = null;
   }, [activeTab]);
+
+  // Tapping a push notification opens the screen it is about (see PushNotificationSetup / the service worker).
+  useEffect(() => {
+    const onPushNavigate = (e) => {
+      const tab = e?.detail?.tab;
+      const allowed = {
+        requests: true,
+        ceo_services: canSeeCeoServices,
+        attendance: canSeeAttendance,
+        schedule: canSeeSchedule
+      };
+      if (tab && allowed[tab]) {
+        setActiveTab(tab);
+        if (tab === 'requests') setMaintView('list');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    };
+    window.addEventListener('befit-push-navigate', onPushNavigate);
+    return () => window.removeEventListener('befit-push-navigate', onPushNavigate);
+  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule]);
 
   const handleAddRequest = async (e) => {
     e.preventDefault();

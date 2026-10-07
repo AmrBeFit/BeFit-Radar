@@ -15,6 +15,8 @@ export default function PushNotificationSetup({ user }) {
     if (!user?.id) return;
 
     let unsubscribeForeground = () => {};
+    let removeVisibility = () => {};
+    let removeSwMessage = () => {};
 
     (async () => {
       const messaging = await messagingPromise;
@@ -41,28 +43,36 @@ export default function PushNotificationSetup({ user }) {
         }
         if (permission !== 'granted') return;
 
-        // Retry once on failure (a transient network/service-worker hiccup on first load is common
-        // and otherwise silently drops the registration for that device).
-        let token = null;
-        for (let attempt = 0; attempt < 2 && !token; attempt++) {
-          try {
-            token = await getToken(messaging, {
-              vapidKey: VAPID_KEY,
-              serviceWorkerRegistration: registration
-            });
-          } catch (e) {
-            if (attempt === 1) throw e;
-            await new Promise((r) => setTimeout(r, 1500));
+        // Registers (or refreshes) this device's token on the account. Retries once on failure (a transient
+        // network/service-worker hiccup on first load is common).
+        const syncToken = async () => {
+          let token = null;
+          for (let attempt = 0; attempt < 2 && !token; attempt++) {
+            try {
+              token = await getToken(messaging, { vapidKey: VAPID_KEY, serviceWorkerRegistration: registration });
+            } catch (e) {
+              if (attempt === 1) throw e;
+              await new Promise((r) => setTimeout(r, 1500));
+            }
           }
-        }
+          if (token) {
+            // arrayUnion avoids duplicates if the same device registers more than once.
+            await updateDoc(doc(db, 'users', user.id), { fcmTokens: arrayUnion(token) }).catch(() => {});
+          }
+        };
+        await syncToken();
 
-        if (token) {
-          // Save this device's token onto the account, so the Cloud Function can push to it later.
-          // arrayUnion avoids duplicates if the same device registers more than once.
-          await updateDoc(doc(db, 'users', user.id), {
-            fcmTokens: arrayUnion(token)
-          }).catch(() => {});
-        }
+        // A token can change silently (browser update, cleared data, long idle). Re-check it whenever the
+        // person comes back to the app, at most once every 6 hours, so a device never goes quiet unnoticed.
+        let lastSync = Date.now();
+        const onVisible = () => {
+          if (document.visibilityState !== 'visible') return;
+          if (Date.now() - lastSync < 6 * 60 * 60 * 1000) return;
+          lastSync = Date.now();
+          syncToken().catch(() => {});
+        };
+        document.addEventListener('visibilitychange', onVisible);
+        removeVisibility = () => document.removeEventListener('visibilitychange', onVisible);
       } catch (err) {
         console.log('Push registration skipped:', err.message);
       }
@@ -75,21 +85,55 @@ export default function PushNotificationSetup({ user }) {
       // reminders...), so for every one of those, the push silently arrived and nothing ever
       // appeared on screen whenever the tab happened to be open. We now show it ourselves here,
       // the same way the OS would if the tab were closed, so nothing gets lost either way.
-      unsubscribeForeground = onMessage(messaging, (payload) => {
+      unsubscribeForeground = onMessage(messaging, async (payload) => {
         const title = payload?.notification?.title || payload?.data?.title || 'BeFit Eye';
         const body = payload?.notification?.body || payload?.data?.body || '';
+        const data = payload?.data || {};
+        const tag = data.requestId || data.type || 'befit-eye';
         try {
-          if (Notification.permission === 'granted') {
-            const n = new Notification(title, { body });
-            n.onclick = () => { window.focus(); n.close(); };
-          }
+          if (Notification.permission !== 'granted') return;
+          // Android Chrome refuses `new Notification(...)` ("Illegal constructor"), so the system
+          // notification is always raised through the service worker, which works everywhere.
+          const reg = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js')
+            || await navigator.serviceWorker.ready;
+          await reg.showNotification(title, {
+            body,
+            icon: '/icon-192.png',
+            badge: '/icon-192.png',
+            tag,
+            renotify: true,
+            requireInteraction: true,
+            vibrate: data.urgent === '1' ? [800, 200, 800, 200, 800, 200, 800] : [500, 200, 500, 200, 500],
+            data
+          });
         } catch (e) {
-          console.log('Foreground notification display skipped:', e.message);
+          try { const n = new Notification(title, { body }); n.onclick = () => { window.focus(); n.close(); }; } catch (e2) { /* ignore */ }
         }
       });
+
+      // Tapping a notification while the app is already open: the service worker tells the app which screen to show.
+      const onSwMessage = (event) => {
+        if (event?.data?.type === 'PUSH_NAVIGATE') {
+          window.dispatchEvent(new CustomEvent('befit-push-navigate', { detail: event.data }));
+        }
+      };
+      navigator.serviceWorker.addEventListener('message', onSwMessage);
+      removeSwMessage = () => navigator.serviceWorker.removeEventListener('message', onSwMessage);
+
+      // Opened from a notification while the app was closed: the link carries ?tab=...
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const tab = params.get('tab');
+        if (tab) {
+          window.dispatchEvent(new CustomEvent('befit-push-navigate', { detail: { type: 'PUSH_NAVIGATE', tab } }));
+          params.delete('tab');
+          const qs = params.toString();
+          window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
+        }
+      } catch (e) { /* ignore */ }
     })();
 
-    return () => unsubscribeForeground();
+    return () => { unsubscribeForeground(); removeVisibility(); removeSwMessage(); };
   }, [user?.id]);
 
   return null;
