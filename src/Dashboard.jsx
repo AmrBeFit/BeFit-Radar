@@ -303,6 +303,7 @@ export default function Dashboard({ user, onLogout }) {
   // Phone numbers are NOT part of the users directory any more (every signed-in account could read it).
   // They live in userPrivate/{uid}, which only Admin and the managers who need them can read.
   const [phonesMap, setPhonesMap] = useState({});
+  const [migratingPhones, setMigratingPhones] = useState(false);
   const [attendanceRecords, setAttendanceRecords] = useState([]);
   // Surfaces a query failure (e.g. a missing Firestore index) instead of silently leaving the
   // attendance list empty - a compound query like "username == X AND checkInTime >= cutoff" needs a
@@ -1321,7 +1322,7 @@ export default function Dashboard({ user, onLogout }) {
         status: targetStatus,
         assignedTo: selectedMember.username,
         assignedToId: selectedMember.id,
-        assignedToPhone: phonesMap[selectedMember.id] || 'N/A',
+        assignedToPhone: phonesMap[selectedMember.id] || selectedMember.phone || 'N/A',
         ...(!assignModalReq.firstResponseAt ? { firstResponseAt: serverTimestamp() } : {}),
         ...(targetStatus === 'Completed'
           // completed straight away: we do not know when the work started, so no "assigned at" is invented
@@ -2164,6 +2165,21 @@ export default function Dashboard({ user, onLogout }) {
       unsubReq(); unsubCeoReq(); unsubLeaveReq(); unsubBranches(); unsubCategories(); unsubAttendance(); unsubLogs(); unsubUsers(); unsubLocationViolations();
     };
   }, [user?.id, roleLower, branchesKey, currentUserIdentifier, canViewAllRequests, canViewLeaveQueue]);
+
+  // One-time Admin action: moves every phone number out of the users directory into userPrivate.
+  const handleMigratePhones = async () => {
+    if (!window.confirm('Move all phone numbers to the private store now? This is safe to run more than once.')) return;
+    setMigratingPhones(true);
+    try {
+      const migrate = httpsCallable(functions, 'migratePhonesToPrivate');
+      const res = await migrate({});
+      alert(`Done. ${res.data?.moved ?? 0} account(s) moved. Refresh the page to see the result.`);
+    } catch (err) {
+      alert('Could not move the phone numbers: ' + (err.message || err));
+    } finally {
+      setMigratingPhones(false);
+    }
+  };
 
   // Phone numbers (userPrivate). Loaded only for the roles the security rules allow to read them.
   const canReadPhones = isAdmin || isFacilityManager || isBranchManager || isSupervisor || canManageStatus;
@@ -3032,7 +3048,7 @@ export default function Dashboard({ user, onLogout }) {
                 <option value="" className="bg-white text-slate-900">-- Select who is in charge --</option>
                 {taskAssignees.map(m => (
                   <option key={m.id} value={m.id} className="bg-white text-slate-900">
-                    {m.username} - {m.role} ({phonesMap[m.id] || 'No Phone'})
+                    {m.username} - {m.role} ({phonesMap[m.id] || m.phone || 'No Phone'})
                   </option>
                 ))}
               </select>
@@ -4818,6 +4834,16 @@ export default function Dashboard({ user, onLogout }) {
               <h2 className="text-lg font-bold text-slate-900">
                 {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
               </h2>
+              {isAdmin && (
+                <button
+                  onClick={handleMigratePhones}
+                  disabled={migratingPhones}
+                  className="bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white font-bold px-3 py-2 rounded-xl text-[11px] shadow transition cursor-pointer"
+                  title="One-time: move phone numbers to the private store"
+                >
+                  {migratingPhones ? 'Moving...' : 'Move phone numbers (one-time)'}
+                </button>
+              )}
               {selectedUserIds.size > 0 && (
                 <button
                   onClick={handleBulkDeleteUsers}
@@ -4925,7 +4951,7 @@ export default function Dashboard({ user, onLogout }) {
                             )}
                           </td>
                           <td className="p-3 font-bold text-slate-900">{u.username}</td>
-                          <td className="p-3 font-semibold text-slate-700">{phonesMap[u.id] || 'N/A'}</td>
+                          <td className="p-3 font-semibold text-slate-700">{phonesMap[u.id] || u.phone || 'N/A'}</td>
                           <td className="p-3">
                             <span className={`px-2 py-0.5 rounded font-black text-[10px] uppercase ${
                               u.role === 'Admin' 
@@ -4987,7 +5013,7 @@ export default function Dashboard({ user, onLogout }) {
                                     setEditingUser(u);
                                     setEditUsername(u.username || '');
                                     setEditPassword(isAdmin ? (u.password || '') : '');
-                                    setEditUserPhone(phonesMap[u.id] || '');
+                                    setEditUserPhone(phonesMap[u.id] || u.phone || '');
                                     setEditUserRole(u.role || 'User');
                                     setEditUserBranches(Array.isArray(u.assignedBranches) ? u.assignedBranches : []);
                                   }}
