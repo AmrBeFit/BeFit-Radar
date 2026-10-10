@@ -65,7 +65,7 @@ const INTERVAL_MINUTES = 60;
 
 const DEFAULT_CONFIG = { items: DEFAULT_ITEMS, startTime: '06:00', endTime: '23:00' };
 
-export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, canSeeSummary = false, onReportIssue }) {
+export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, canSeeSummary = false, onReportIssue, plans = [], plansAvailable = false }) {
   const myUsername = currentUser?.username || currentUser?.displayName || '';
   const myRole = currentUser?.role || '';
 
@@ -451,6 +451,31 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slots, config.items, checks]);
 
+  // A whole hour that went by with NOTHING ticked in its column, plus who was scheduled on shift at this
+  // branch during that hour (from the schedule). Shown in red under the column so it is clear who was
+  // responsible for the round that was skipped. Only roles that can read the roster have this data.
+  const missedShiftNamesBySlot = useMemo(() => {
+    const map = {};
+    if (!selectedBranch || !selectedDate) return map;
+    slots.forEach((slot) => {
+      if (!isMissedSlot(slot)) return;
+      const anyTick = config.items.some((it) => {
+        const c = checks[cellKey(slot, it.id)];
+        return c && (c.checked || c.na || c.issue || c.notCompleted);
+      });
+      if (anyTick) return;
+      const slotStart = toMinutes(slot);
+      const names = new Set();
+      plans.forEach((p) => {
+        if (p.branch !== selectedBranch || p.date !== selectedDate || !p.username || !p.startTime || !p.endTime) return;
+        if (toMinutes(p.startTime) < slotStart + INTERVAL_MINUTES && toMinutes(p.endTime) > slotStart) names.add(p.username);
+      });
+      map[slot] = [...names];
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slots, config.items, checks, plans, selectedBranch, selectedDate, tick]);
+
   const label = 'block text-[10px] font-extrabold uppercase text-slate-500 mb-1';
   const field = 'w-full p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-medium';
 
@@ -717,6 +742,18 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
                           </div>
                         ))}
                       </div>
+                    ) : missedShiftNamesBySlot[slot] && plansAvailable ? (
+                      missedShiftNamesBySlot[slot].length > 0 ? (
+                        <div className="space-y-0.5" title="Nothing was checked this hour. These people were scheduled on shift.">
+                          {missedShiftNamesBySlot[slot].map((n) => (
+                            <div key={n} className="text-[10px] font-extrabold text-rose-700 bg-rose-50 border border-rose-300 rounded-md px-1.5 py-0.5 text-center">
+                              {n}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-[9px] italic text-slate-400 text-center leading-tight">No shift planned</div>
+                      )
                     ) : (
                       <div className="text-[10px] text-slate-300 text-center">—</div>
                     )}

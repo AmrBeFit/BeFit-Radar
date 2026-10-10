@@ -4647,6 +4647,8 @@ export default function Dashboard({ user, onLogout }) {
           isAdmin={isAdmin}
           canSeeSummary={perm('checklistDashboard')}
           onReportIssue={handleReportIssueFromChecklist}
+          plans={attendancePlans}
+          plansAvailable={!isFacilityManager && !isFacilityMember}
         />
       )}
 
