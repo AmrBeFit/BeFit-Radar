@@ -53,6 +53,7 @@ export const PERMISSIONS = [
   // ---- Facility Management (maintenance requests) ----
   { key: 'viewAllRequests', group: 'maintenance', label: 'See ALL maintenance requests', desc: 'Every branch\'s requests, not just own branch / own requests.', def: () => false, grantable: true, server: true },
   { key: 'manageRequestStatus', group: 'maintenance', label: 'Change request status / assign', desc: 'Change status, assign and archive maintenance requests.', def: (r) => r === 'Facility Manager', grantable: true, server: true },
+  { key: 'editRequestCategory', group: 'maintenance', label: 'Edit request category', desc: 'Change the category of a maintenance request (when it was filed under the wrong one).', def: (r) => r === 'Facility Manager', grantable: true, server: true },
   { key: 'editNotes', group: 'maintenance', label: 'Edit request notes', desc: 'Write the Notes box on maintenance requests.', def: (r) => r === 'Facility Manager', grantable: true, server: true },
 
   // ---- Integrity ----

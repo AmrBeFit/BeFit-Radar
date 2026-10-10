@@ -303,7 +303,6 @@ export default function Dashboard({ user, onLogout }) {
   // Phone numbers are NOT part of the users directory any more (every signed-in account could read it).
   // They live in userPrivate/{uid}, which only Admin and the managers who need them can read.
   const [phonesMap, setPhonesMap] = useState({});
-  const [migratingPhones, setMigratingPhones] = useState(false);
   const [attendanceRecords, setAttendanceRecords] = useState([]);
   // Surfaces a query failure (e.g. a missing Firestore index) instead of silently leaving the
   // attendance list empty - a compound query like "username == X AND checkInTime >= cutoff" needs a
@@ -1294,6 +1293,18 @@ export default function Dashboard({ user, onLogout }) {
 
   // "Notes" box: only the Facility Manager (or Admin) can write it.
   const canEditNotes = () => perm('editNotes');
+
+  // Category fix: Admin / Facility Manager (or anyone granted "Edit request category") can move a request
+  // to the right category when it was filed under the wrong one.
+  const canEditCategory = perm('editRequestCategory');
+  const handleChangeCategory = async (req, newCategory) => {
+    if (!newCategory || newCategory === req.category) return;
+    try {
+      await updateDoc(doc(db, 'requests', req.id), { category: newCategory });
+    } catch (err) {
+      alert('Error changing the category: ' + err.message);
+    }
+  };
   const getNotesValue = (req) => (notesDrafts[req.id] !== undefined ? notesDrafts[req.id] : (req.notes || ''));
   const handleSaveNotes = async (req) => {
     try {
@@ -2166,23 +2177,23 @@ export default function Dashboard({ user, onLogout }) {
     };
   }, [user?.id, roleLower, branchesKey, currentUserIdentifier, canViewAllRequests, canViewLeaveQueue]);
 
-  // One-time Admin action: moves every phone number out of the users directory into userPrivate.
-  const handleMigratePhones = async () => {
-    if (!window.confirm('Move all phone numbers to the private store now? This is safe to run more than once.')) return;
-    setMigratingPhones(true);
-    try {
-      const migrate = httpsCallable(functions, 'migratePhonesToPrivate');
-      const res = await migrate({});
-      alert(`Done. ${res.data?.moved ?? 0} account(s) moved. Refresh the page to see the result.`);
-    } catch (err) {
-      alert('Could not move the phone numbers: ' + (err.message || err));
-    } finally {
-      setMigratingPhones(false);
-    }
-  };
-
   // Phone numbers (userPrivate). Loaded only for the roles the security rules allow to read them.
   const canReadPhones = isAdmin || isFacilityManager || isBranchManager || isSupervisor || canManageStatus;
+
+  // Repair requests whose assignee phone was saved as "N/A" (for example the task was assigned while the number was
+  // not readable yet): whoever can manage requests copies the real number onto the request, so the requester sees it too.
+  const phoneRepairedRef = useRef(new Set());
+  useEffect(() => {
+    if (!canManageStatus || !canReadPhones) return;
+    requests.forEach((r) => {
+      if (!r.assignedToId || (r.assignedToPhone && r.assignedToPhone !== 'N/A')) return;
+      const real = phonesMap[r.assignedToId];
+      if (!real || phoneRepairedRef.current.has(r.id)) return;
+      phoneRepairedRef.current.add(r.id);
+      updateDoc(doc(db, 'requests', r.id), { assignedToPhone: real }).catch(() => { phoneRepairedRef.current.delete(r.id); });
+    });
+  }, [requests, phonesMap, canManageStatus, canReadPhones]);
+
   useEffect(() => {
     if (!user?.id || !canReadPhones) { setPhonesMap({}); return undefined; }
     const unsub = onSnapshot(collection(db, 'userPrivate'), (snapshot) => {
@@ -3549,13 +3560,29 @@ export default function Dashboard({ user, onLogout }) {
                           )}
                           <h3 className="font-bold text-slate-900">{req.title}</h3>
                           {req.description && <p className="text-xs text-slate-600 mt-0.5 line-clamp-2">{req.description}</p>}
-                          <p className="text-xs text-slate-500 font-medium mt-1">{req.branch} • {req.category}</p>
+                          <p className="text-xs text-slate-500 font-medium mt-1 flex flex-wrap items-center gap-1">
+                            <span>{req.branch} •</span>
+                            {canEditCategory ? (
+                              <select
+                                value={req.category || ''}
+                                onChange={(e) => handleChangeCategory(req, e.target.value)}
+                                title="Change the category of this request"
+                                className="text-xs font-semibold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-0.5 cursor-pointer"
+                              >
+                                {[...new Set([req.category, ...categories.map((c) => c.name)].filter(Boolean))].map((name) => (
+                                  <option key={name} value={name}>{name}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span>{req.category}</span>
+                            )}
+                          </p>
                           <p className="text-[11px] text-slate-400">By {req.createdBy} - {formatDate(req.createdAt)}</p>
                           
                           {req.assignedTo && (
                             <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-900">
                               <span>👤 In Charge: <strong>{req.assignedTo}</strong></span>
-                              <span>📞 <strong>{req.assignedToPhone || 'N/A'}</strong></span>
+                              <span>📞 <strong>{(req.assignedToPhone && req.assignedToPhone !== 'N/A') ? req.assignedToPhone : (phonesMap[req.assignedToId] || 'N/A')}</strong></span>
                             </div>
                           )}
                         </div>
@@ -3642,6 +3669,11 @@ export default function Dashboard({ user, onLogout }) {
                           ) : (
                             <p className="text-xs text-slate-600 italic">{req.actionTaken || 'Nothing recorded yet.'}</p>
                           )}
+                          {req.actionTaken && req.actionTakenBy && (
+                            <p className="text-[10px] font-semibold text-slate-400 mt-1">
+                              ✍️ {req.actionTakenBy} · {formatDate(req.actionTakenAt)}
+                            </p>
+                          )}
                         </div>
 
                         <div>
@@ -3666,6 +3698,11 @@ export default function Dashboard({ user, onLogout }) {
                             </div>
                           ) : (
                             <p className="text-xs text-slate-600 italic">{req.notes || 'No notes yet.'}</p>
+                          )}
+                          {req.notes && req.notesBy && (
+                            <p className="text-[10px] font-semibold text-slate-400 mt-1">
+                              ✍️ {req.notesBy} · {formatDate(req.notesAt)}
+                            </p>
                           )}
                         </div>
                       </div>
@@ -4834,16 +4871,6 @@ export default function Dashboard({ user, onLogout }) {
               <h2 className="text-lg font-bold text-slate-900">
                 {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
               </h2>
-              {isAdmin && (
-                <button
-                  onClick={handleMigratePhones}
-                  disabled={migratingPhones}
-                  className="bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white font-bold px-3 py-2 rounded-xl text-[11px] shadow transition cursor-pointer"
-                  title="One-time: move phone numbers to the private store"
-                >
-                  {migratingPhones ? 'Moving...' : 'Move phone numbers (one-time)'}
-                </button>
-              )}
               {selectedUserIds.size > 0 && (
                 <button
                   onClick={handleBulkDeleteUsers}
