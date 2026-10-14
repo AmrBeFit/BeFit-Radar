@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { db } from './firebase';
 import { doc, updateDoc, deleteField } from 'firebase/firestore';
-import { PERMISSIONS, PERMISSION_GROUPS, roleDefault } from './permissions';
+import { PERMISSIONS, PERMISSION_GROUPS, roleDefault, roleLabel } from './permissions';
 
 /* =====================================================================
    Permissions - Admin only.
@@ -81,7 +81,7 @@ export default function PermissionsManager({ usersList = [] }) {
 
   const resetDefaults = async () => {
     if (!selected) return;
-    if (!window.confirm(`Reset ${selected.username} to the default permissions of the ${selected.role} role?`)) return;
+    if (!window.confirm(`Reset ${selected.username} to the default permissions of the ${roleLabel(selected.role)} role?`)) return;
     setSaving(true);
     try {
       await updateDoc(doc(db, 'users', selected.id), { permissions: deleteField() });
@@ -104,7 +104,7 @@ export default function PermissionsManager({ usersList = [] }) {
         <h2 className="text-lg font-black text-slate-900 tracking-tight">🔑 Permissions</h2>
         <p className="text-xs text-slate-500 max-w-2xl">
           Choose an account and tick what it may do. Everything starts from the account's role; any change you make
-          here applies to that one account only. Features that belong to Admin alone (Settings, Audit Log, this tab,
+          here applies to that one account only. Features that belong to System Admin alone (Settings, Audit Log, this tab,
           deleting records, who filed an integrity report...) are not listed.
         </p>
       </div>
@@ -120,7 +120,7 @@ export default function PermissionsManager({ usersList = [] }) {
             <option value="">— Select an account —</option>
             {accounts.map((u) => (
               <option key={u.id} value={u.id}>
-                {u.name || u.username} ({u.role}){u.permissions && Object.keys(u.permissions).length ? ' • custom' : ''}
+                {u.name || u.username} ({roleLabel(u.role)}){u.permissions && Object.keys(u.permissions).length ? ' • custom' : ''}
               </option>
             ))}
           </select>
@@ -133,13 +133,26 @@ export default function PermissionsManager({ usersList = [] }) {
         <div className="space-y-5">
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="font-black text-slate-900">{selected.name || selected.username}</span>
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-black" style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}>{selected.role}</span>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-black" style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}>{roleLabel(selected.role)}</span>
             {customCount > 0 && (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-black" style={{ backgroundColor: '#fef3c7', color: '#92400e' }}>
                 {customCount} custom
               </span>
             )}
           </div>
+
+          {(() => {
+            const granted = PERMISSIONS.filter((p) => draft[p.key] === true && !roleDefault(selected.role, p.key));
+            const removed = PERMISSIONS.filter((p) => draft[p.key] === false && roleDefault(selected.role, p.key));
+            if (!granted.length && !removed.length) return null;
+            return (
+              <div className="border border-amber-200 bg-amber-50 rounded-2xl px-4 py-3 text-[11px] space-y-1">
+                <p className="font-black text-amber-900 uppercase text-[10px]">Differences from the {roleLabel(selected.role)} role</p>
+                {granted.length > 0 && <p className="text-emerald-800"><span className="font-black">Granted:</span> {granted.map((p) => p.label).join(' · ')}</p>}
+                {removed.length > 0 && <p className="text-rose-800"><span className="font-black">Removed:</span> {removed.map((p) => p.label).join(' · ')}</p>}
+              </div>
+            );
+          })()}
 
           {PERMISSION_GROUPS.map((g) => {
             const items = PERMISSIONS.filter((p) => p.group === g.id);

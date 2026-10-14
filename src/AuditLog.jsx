@@ -9,7 +9,7 @@ import { httpsCallable } from 'firebase/functions';
    Every create/update/delete across the app's main collections lands in the `auditLog`
    collection, written only by Cloud Functions (see functions/index.js: the onDocumentWritten
    triggers for create/update, and deleteRecordWithAudit for delete). The Firestore rule for
-   `auditLog` is read-only for Admin and `allow write: if false` for everyone including Admin -
+   `auditLog` is read-only for System Admin and `allow write: if false` for everyone including System Admin -
    nobody in the app itself can edit or erase an entry, which is what keeps it trustworthy as a
    record of what actually happened.
 
@@ -192,7 +192,7 @@ export default function AuditLog({ isAdmin }) {
   if (!isAdmin) {
     return (
       <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm">
-        <p className="text-xs text-slate-400 italic">Only Admin can view the audit log.</p>
+        <p className="text-xs text-slate-400 italic">Only System Admin can view the audit log.</p>
       </div>
     );
   }
@@ -304,7 +304,7 @@ export default function AuditLog({ isAdmin }) {
                       </p>
                       {e.restored && (
                         <p className="text-[11px] font-bold mt-0.5" style={{ color: '#059669' }}>
-                          ✓ Undone by {e.restoredBy || 'Admin'} on {fmtDateTime(tsToDate(e.restoredAt))}
+                          ✓ Undone by {e.restoredBy || 'System Admin'} on {fmtDateTime(tsToDate(e.restoredAt))}
                         </p>
                       )}
                     </td>

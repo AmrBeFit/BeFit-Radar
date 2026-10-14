@@ -14,6 +14,7 @@ import { httpsCallable } from 'firebase/functions';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import MultiSelectFilter from './MultiSelectFilter';
+import { roleLabel } from './permissions';
 
 /* =====================================================================
    Attendance roster ("Schedule")
@@ -322,7 +323,8 @@ function BranchHoursPanel({ branches, plannableBranches, isAdmin }) {
 }
 
 export default function SchedulePlanner({ user, usersList = [], branches = [], attendanceRecords = [], plans = [] }) {
-  const role = user?.role || '';
+  // Branch Manager+ plans exactly like a Branch Manager
+  const role = user?.role === 'Branch Manager+' ? 'Branch Manager' : (user?.role || '');
   const isAdmin = role === 'Admin';
   const isBM = role === 'Branch Manager';
   const isSupervisor = role === 'Supervisor';
@@ -405,7 +407,7 @@ export default function SchedulePlanner({ user, usersList = [], branches = [], a
             />
           ) : (
             <div className="bg-white border border-slate-200 p-4 rounded-3xl shadow-sm text-xs text-slate-500">
-              You can view the schedule here. Only an Admin, Branch Manager or Supervisor can change it.
+              You can view the schedule here. Only a System Admin, Branch Manager or Supervisor can change it.
             </div>
           )}
           <ScheduleList
@@ -467,7 +469,7 @@ function CreatePlanForm({ plannableUsers, plannableBranches, branches = [], onOp
   }, [startDate, periodDays, days]);
 
   const userOptions = useMemo(
-    () => plannableUsers.map((u) => ({ value: u.id, label: u.username, hint: u.role || '' })),
+    () => plannableUsers.map((u) => ({ value: u.id, label: u.username, hint: roleLabel(u.role) })),
     [plannableUsers]
   );
 
@@ -565,7 +567,7 @@ function CreatePlanForm({ plannableUsers, plannableBranches, branches = [], onOp
       {(plannableUsers.length === 0 || plannableBranches.length === 0) && (
         <div className="p-3 rounded-xl text-xs font-semibold" style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', color: '#78350f' }}>
           {plannableBranches.length === 0
-            ? 'No branch is assigned to your account yet, so you cannot plan. Ask an Admin to assign your branches.'
+            ? 'No branch is assigned to your account yet, so you cannot plan. Ask a System Admin to assign your branches.'
             : 'No employees were found in your branches yet. Add your team to your branches first.'}
           {plannableBranches.length > 0 && onOpenTeam && (
             <button
@@ -780,7 +782,7 @@ function TeamBranchesPanel({ user, isBM, usersList, branches, myBranches }) {
 
       {myBranchNames.length === 0 && (
         <div className="p-3 rounded-xl text-xs font-semibold" style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', color: '#78350f' }}>
-          No branch is assigned to your account yet. Ask an Admin to assign your branches first.
+          No branch is assigned to your account yet. Ask a System Admin to assign your branches first.
         </div>
       )}
 
@@ -839,7 +841,7 @@ function TeamBranchesPanel({ user, isBM, usersList, branches, myBranches }) {
                     <td className="p-3"><input type="checkbox" checked={selectedIds.includes(u.id)} onChange={() => toggleOne(u.id)} /></td>
                     <td className="p-3">
                       <span className="font-bold text-slate-900">{u.username}</span>
-                      <span className="ml-1.5 text-[10px] text-slate-400">{u.role}</span>
+                      <span className="ml-1.5 text-[10px] text-slate-400">{roleLabel(u.role)}</span>
                     </td>
                     <td className="p-3">
                       <div className="flex flex-wrap gap-1">
@@ -1094,7 +1096,7 @@ function ScheduleList({ visiblePlans, user, isAdmin, plannableBranches, branches
                   <td className="p-3 font-bold text-slate-900 whitespace-nowrap">{dayLabel(p.date)}</td>
                   <td className="p-3">
                     <span className="font-bold text-slate-900">{p.username}</span>
-                    <span className="ml-1.5 text-[10px] text-slate-400">{p.userRole}</span>
+                    <span className="ml-1.5 text-[10px] text-slate-400">{roleLabel(p.userRole)}</span>
                   </td>
                   <td className="p-3 text-slate-700">📍 {p.branch}</td>
                   <td className="p-3 text-slate-700 whitespace-nowrap">{fmt12(p.startTime)} – {fmt12(p.endTime)}</td>
@@ -1504,7 +1506,7 @@ function PlanVsActualReport({ visiblePlans, attendanceRecords, scopeUsernames })
                   <td className="p-3 font-bold text-slate-900 whitespace-nowrap">{dayLabel(r.date)}</td>
                   <td className="p-3">
                     <span className="font-bold text-slate-900">{r.username}</span>
-                    {r.role && <span className="ml-1.5 text-[10px] text-slate-400">{r.role}</span>}
+                    {r.role && <span className="ml-1.5 text-[10px] text-slate-400">{roleLabel(r.role)}</span>}
                   </td>
                   <td className="p-3 text-slate-700 whitespace-nowrap">
                     {r.category === 'unplanned' ? '—' : (<>📍 {r.plannedBranch}<br /><span className="text-slate-500">{fmt12(r.plannedStart)} – {fmt12(r.plannedEnd)}</span></>)}

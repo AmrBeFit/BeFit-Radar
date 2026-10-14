@@ -33,8 +33,10 @@ import IntegrityReports from './IntegrityReports';
 import AuditLog from './AuditLog';
 import FacilityPerformance from './FacilityPerformance';
 import PermissionsManager from './PermissionsManager';
-import { hasPermission } from './permissions';
+import { hasPermission, roleLabel } from './permissions';
 import BranchChecklist from './BranchChecklist';
+import LeaveReport from './LeaveReport';
+import OutsourceMaintenance, { OutsourceAreasSettings, useOutsourceWaiting } from './OutsourceMaintenance';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
 const UNASSIGNED_FILTER = '__unassigned__';
@@ -359,6 +361,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // Leave Request States
   const [leaveRequests, setLeaveRequests] = useState([]);
+  const [leaveBranch, setLeaveBranch] = useState('');
   const [leaveStartDate, setLeaveStartDate] = useState('');
   const [leaveEndDate, setLeaveEndDate] = useState('');
   const [leaveReason, setLeaveReason] = useState('');
@@ -368,7 +371,7 @@ export default function Dashboard({ user, onLogout }) {
   const [newPassword, setNewPassword] = useState('');
   const [newUserPhone, setNewUserPhone] = useState('');
   const [newUserRole, setNewUserRole] = useState(
-    user?.role === 'Facility Manager' ? 'Facility Member' : 'User'
+    user?.role === 'Facility Manager' ? 'Facility Member' : user?.role === 'QA Manager' ? 'QA' : 'User'
   );
   const [newUserBranches, setNewUserBranches] = useState([]);
   // Admin-only exception: lets an Admin create an account without a phone number
@@ -467,7 +470,19 @@ export default function Dashboard({ user, onLogout }) {
   // hidden admin, their own records stop being hidden FROM THEMSELVES - everyone else still never
   // sees this account anywhere in these lists, which is the whole point of hiding it.
   const viewerIsHiddenAdmin = currentUserIdentifier.trim().toLowerCase() === HIDDEN_ADMIN_USERNAME;
-  const userRole = user?.role || 'User';
+  // Stored role (what the account really is) vs. the role the rest of this screen reasons with:
+  //  - "Branch Manager+" = a Branch Manager who can also manage Coaches   -> behaves as Branch Manager
+  //  - "QA Manager"     = a QA who can also create QA Members            -> behaves as QA
+  //  - "Coach"          = limited account (check in/out, maintenance request, leave) -> behaves as User,
+  //                       and the Permissions catalog hides every other tab from it
+  const rawRole = user?.role || 'User';
+  const isBMPlus = rawRole === 'Branch Manager+';
+  const isQAManager = rawRole === 'QA Manager';
+  const isCoach = rawRole === 'Coach';
+  //  - "Fitness Manager" = sits between Branch Manager+ and Coach: check in/out, sees the checklist (never ticks it),
+  //                       creates / edits Coaches and gives a Coach's leave a first (pre-)approval -> behaves as User
+  const isFitnessManager = rawRole === 'Fitness Manager';
+  const userRole = isBMPlus ? 'Branch Manager' : isQAManager ? 'QA' : (isCoach || isFitnessManager) ? 'User' : rawRole;
   // Branches come from the live profile, so a change made by a manager or an Admin applies immediately
   // (no need to log out and in again). The key keeps the array stable between the frequent presence updates.
   const liveProfile = usersList.find(u => u.id === user?.id) || user;
@@ -486,6 +501,14 @@ export default function Dashboard({ user, onLogout }) {
   // difference is organizational, not a permission at all: it reports directly to Admin and is
   // deliberately left OUT of every "who does this Branch Manager/Supervisor manage" list elsewhere
   // in this file, so it never shows up in their team/approval screens.
+  // Which accounts this role may create / edit / delete (Admin: everyone).
+  const managedRolesBase = isBMPlus ? ['Supervisor', 'User', 'Coach', 'Fitness Manager']
+    : isFitnessManager ? ['Coach']
+    : userRole === 'Branch Manager' ? ['Supervisor', 'User']
+    : userRole === 'Supervisor' ? ['User']
+    : userRole === 'Facility Manager' ? ['Facility Member']
+    : isQAManager ? ['QA']
+    : [];
   const isStaff = userRole === 'User' || userRole === 'Staff' || userRole === 'Finance and Administration';
   const isHR = userRole === 'HR';
   // QA: read-only access to the Branch Checklist (never ticks or signs off), and can only submit
@@ -495,7 +518,14 @@ export default function Dashboard({ user, onLogout }) {
   // Per-account permissions: the role gives the DEFAULT, and Admin can switch individual permissions on/off
   // for one account in the Permissions tab (stored as users/{id}.permissions). liveProfile is used so a
   // change made by Admin applies immediately, with no need to log out and in.
-  const perm = (key) => hasPermission(liveProfile ? { ...liveProfile, role: userRole } : { role: userRole }, key);
+  const perm = (key) => hasPermission(liveProfile ? { ...liveProfile, role: rawRole } : { role: rawRole }, key);
+  // The System Admin can switch off creating / editing / deleting Coaches, Fitness Managers or QA Members for one account
+  const managedRoles = managedRolesBase.filter((r) => (
+    r === 'Coach' ? perm('manageCoaches')
+      : r === 'Fitness Manager' ? perm('manageFitnessManagers')
+      : (r === 'QA' && isQAManager) ? perm('createQAMembers')
+      : true
+  ));
 
   // Once per browser session, Admin/CEO/Facility Manager accounts silently ping the server to check
   // for maintenance requests that have sat unattended (status "New") for 24+ hours, and push a
@@ -570,7 +600,9 @@ export default function Dashboard({ user, onLogout }) {
   const canSeeChecklist = perm('tab_checklist');
   const canSignOffChecklist = perm('signOffChecklist');
   const canApproveLeave = perm('approveLeave');
-  const canViewLeaveQueue = canApproveLeave || perm('viewLeaveQueue');
+  // Fitness Manager: first (pre-)approval of a Coach's leave; the Branch Manager decides afterwards
+  const canPreApproveLeave = perm('preApproveLeave');
+  const canViewLeaveQueue = canApproveLeave || canPreApproveLeave || perm('viewLeaveQueue');
   // Attendance selfies: only HR, Admin and Branch Managers may look at them, and only when really necessary.
   // They are also deleted automatically 60 days after check-in (see purgeOldAttendancePhotos in functions).
   const canViewAttendancePhotos = isAdmin || isHR || isBranchManager;
@@ -579,6 +611,7 @@ export default function Dashboard({ user, onLogout }) {
   const canViewAllRequests = perm('viewAllRequests') || isCEO;
   const canSeeAttendance = perm('tab_attendance');
   const canSeeCeoServices = perm('tab_ceoServices');
+  const canSeeOutsource = perm('tab_outsource');
 
   // People a maintenance task can be assigned to: Facility Members and Facility Managers
   const taskAssignees = useMemo(() => {
@@ -617,16 +650,51 @@ export default function Dashboard({ user, onLogout }) {
     if (canViewLeaveQueue && assignedBranches.length > 0) {
       return leaveRequests.filter(r => {
         const reqBranches = Array.isArray(r.assignedBranches) ? r.assignedBranches : [];
-        return reqBranches.some(b => assignedBranches.includes(b));
+        if (!reqBranches.some(b => assignedBranches.includes(b))) return false;
+        // A Fitness Manager only handles the leaves of Coaches (their own leave goes straight to the Branch Manager)
+        if (canPreApproveLeave && !canApproveLeave) return usersList.find(u => u.username === r.username)?.role === 'Coach';
+        return true;
       });
     }
     return [];
-  }, [leaveRequests, isAdmin, isHR, canViewLeaveQueue, assignedBranches]);
+  }, [leaveRequests, isAdmin, isHR, canViewLeaveQueue, canApproveLeave, assignedBranches, isFitnessManager, usersList]);
 
   const myLeaveRequests = useMemo(
     () => leaveRequests.filter(r => r.username === currentUserIdentifier),
     [leaveRequests, currentUserIdentifier]
   );
+
+  // Leave balance of the people whose requests this account is deciding (shown to the approver only - never to the
+  // person asking). Comes from the server: { [year]: { [username lower-case]: { balance, taken, waiting, remaining } } }
+  const [leaveBalanceInfo, setLeaveBalanceInfo] = useState({});
+  const leaveInfoKey = useMemo(() => {
+    if (!(canApproveLeave || canPreApproveLeave) || !perm('viewLeaveBalances')) return '';
+    return leaveRequestsForApproval
+      .filter(r => r.status === 'Pending' || r.status === 'Pre-approved' || r.status === 'Pre-rejected')
+      .map(r => `${(r.startDate || '').slice(0, 4)}:${(r.username || '').toLowerCase()}:${r.status}`)
+      .sort().join('|');
+  }, [leaveRequestsForApproval, canApproveLeave, canPreApproveLeave]);
+  useEffect(() => {
+    if (!leaveInfoKey) return undefined;
+    let cancelled = false;
+    const wantedByYear = {};
+    leaveInfoKey.split('|').forEach((k) => {
+      const [yr, name] = k.split(':');
+      if (!yr || !name) return;
+      (wantedByYear[yr] = wantedByYear[yr] || new Set()).add(name);
+    });
+    Object.entries(wantedByYear).forEach(([yr, names]) => {
+      httpsCallable(functions, 'getLeaveBalances')({ year: Number(yr), usernames: [...names] })
+        .then((res) => {
+          if (cancelled) return;
+          const map = {};
+          (res.data.rows || []).forEach((row) => { map[String(row.username).toLowerCase()] = row; });
+          setLeaveBalanceInfo((prev) => ({ ...prev, [yr]: map }));
+        })
+        .catch((err) => console.warn('Could not load leave balances:', err.message));
+    });
+    return () => { cancelled = true; };
+  }, [leaveInfoKey]);
 
   // Update: nobody can see accounts except the ones they created themselves, except Admin who always sees everyone.
   // Facility Managers, Branch Managers and Supervisors are the exception: their teams are shared -
@@ -635,13 +703,11 @@ export default function Dashboard({ user, onLogout }) {
   const manageableUsersList = useMemo(() => {
     return usersList.filter(u => {
       if (isAdmin) return true;
-      if (isFacilityManager) return u.role === 'Facility Member';
-      if (isBranchManager) return ['Supervisor', 'User'].includes(u.role);
-      if (isSupervisor) return u.role === 'User';
+      if (managedRoles.length > 0) return managedRoles.includes(u.role);
       // Any other role with user-management permission (e.g. CEO) only sees the accounts they created
       return u.createdBy === user?.id;
     });
-  }, [usersList, isAdmin, isFacilityManager, isBranchManager, isSupervisor, user?.id]);
+  }, [usersList, isAdmin, managedRoles.join('|'), user?.id]);
 
   // Update: device/browser login history log (Admin only) - a real report with date/time filtering + clearable history
   const [viewingDeviceInfoUser, setViewingDeviceInfoUser] = useState(null);
@@ -773,7 +839,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // LOG DELETION ACTIONS
   const handleDeleteLog = async (logId) => {
-    if (!isAdmin) return alert("Only Admin can delete activity logs.");
+    if (!isAdmin) return alert("Only System Admin can delete activity logs.");
     try {
       await deleteDoc(doc(db, 'logs', logId));
     } catch (err) {
@@ -782,7 +848,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleClearAllLogs = async () => {
-    if (!isAdmin) return alert("Only Admin can clear all logs.");
+    if (!isAdmin) return alert("Only System Admin can clear all logs.");
     if (activityLogs.length === 0) return alert("Logs list is already empty.");
 
     if (window.confirm("Are you sure you want to clear all activity notifications logs?")) {
@@ -958,7 +1024,7 @@ export default function Dashboard({ user, onLogout }) {
   // BRANCH & CATEGORY ACTIONS
   const handleAddBranch = async (e) => {
     e.preventDefault();
-    if (!isAdmin) return alert("Only Admin can add branches.");
+    if (!isAdmin) return alert("Only System Admin can add branches.");
     if (!newBranchName.trim()) return;
     try {
       await addDoc(collection(db, 'branches'), { name: newBranchName.trim() });
@@ -969,7 +1035,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleDeleteBranch = async (branchId) => {
-    if (!isAdmin) return alert("Only Admin can delete branches.");
+    if (!isAdmin) return alert("Only System Admin can delete branches.");
     if (window.confirm("Are you sure you want to delete this branch?")) {
       try {
         await deleteWithAudit('branches', branchId);
@@ -1011,7 +1077,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleSaveBranchLocation = async (branch) => {
-    if (!isAdmin) return alert("Only Admin can set a branch's location.");
+    if (!isAdmin) return alert("Only System Admin can set a branch's location.");
     const draft = getBranchLocationDraft(branch);
     const lat = parseFloat(draft.lat);
     const lng = parseFloat(draft.lng);
@@ -1038,7 +1104,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleClearBranchLocation = async (branch) => {
-    if (!isAdmin) return alert("Only Admin can clear a branch's location.");
+    if (!isAdmin) return alert("Only System Admin can clear a branch's location.");
     if (!window.confirm(`Remove the GPS requirement for ${branch.name}? Check-In/Check-Out there will no longer be location-restricted.`)) return;
     try {
       await updateDoc(doc(db, 'branches', branch.id), {
@@ -1053,7 +1119,7 @@ export default function Dashboard({ user, onLogout }) {
 
   const handleAddCategory = async (e) => {
     e.preventDefault();
-    if (!isAdmin) return alert("Only Admin can add categories.");
+    if (!isAdmin) return alert("Only System Admin can add categories.");
     if (!newCategoryName.trim()) return;
     try {
       await addDoc(collection(db, 'categories'), { name: newCategoryName.trim() });
@@ -1064,7 +1130,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleDeleteCategory = async (catId) => {
-    if (!isAdmin) return alert("Only Admin can delete categories.");
+    if (!isAdmin) return alert("Only System Admin can delete categories.");
     if (window.confirm("Are you sure you want to delete this category?")) {
       try {
         await deleteWithAudit('categories', catId);
@@ -1077,7 +1143,7 @@ export default function Dashboard({ user, onLogout }) {
   // CEO SPECIAL REQUEST ACTIONS
   const handleCreateCeoRequest = async (e) => {
     e.preventDefault();
-    if (!isCEO && !isAdmin) return alert("Exclusive to CEO / Admin.");
+    if (!isCEO && !isAdmin) return alert("Exclusive to CEO / System Admin.");
     if (!ceoSelectedBranch) return alert("Please select a branch.");
 
     if (!ceoItemDetails.trim()) {
@@ -1119,7 +1185,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleDeleteCeoRequest = async (requestId) => {
-    if (!isAdmin) return alert("Exclusive to Admin only.");
+    if (!isAdmin) return alert("Exclusive to System Admin only.");
     if (window.confirm('Are you sure you want to delete this CEO request permanently?')) {
       try {
         await deleteWithAudit('ceo_requests', requestId);
@@ -1160,27 +1226,35 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Branches the person can request leave for: their assigned branches (or any branch if none are assigned).
+  const leaveBranchOptions = useMemo(
+    () => ((assignedBranches && assignedBranches.length > 0) ? [...assignedBranches] : branchesNamesList).slice().sort((a, b) => a.localeCompare(b)),
+    [assignedBranches, branchesNamesList]
+  );
+
   // LEAVE REQUEST ACTIONS
   // Only these three roles may approve/reject a leave (a Branch Manager only for their own branches,
   // which leaveRequestsForApproval above already enforces on the list they can see).
 
   const handleCreateLeaveRequest = async (e) => {
     e.preventDefault();
+    const leaveBranchChoice = leaveBranch || (leaveBranchOptions.length === 1 ? leaveBranchOptions[0] : '');
+    if (!leaveBranchChoice) return alert('Please choose the branch this leave is for.');
     if (!leaveStartDate || !leaveEndDate) return alert('Please select a start and end date.');
+    if (leaveStartDate < toLocalYmd()) return alert('You cannot request leave for a day that has already passed.');
     if (leaveEndDate < leaveStartDate) return alert('The end date cannot be before the start date.');
 
     setLoading(true);
     try {
-      await addDoc(collection(db, 'leaveRequests'), {
-        username: currentUserIdentifier,
-        assignedBranches: assignedBranches || [],
+      // Made by the server (createLeaveRequest) so the yearly leave balance is enforced; the balance itself is never shown here.
+      await httpsCallable(functions, 'createLeaveRequest')({
+        branch: leaveBranchChoice,
+        requesterRole: userRole,
         startDate: leaveStartDate,
         endDate: leaveEndDate,
-        reason: leaveReason.trim(),
-        status: 'Pending',
-        createdAt: serverTimestamp(),
-        createdById: user?.id || null
+        reason: leaveReason.trim()
       });
+      setLeaveBranch('');
       setLeaveStartDate('');
       setLeaveEndDate('');
       setLeaveReason('');
@@ -1201,6 +1275,19 @@ export default function Dashboard({ user, onLogout }) {
       });
     } catch (err) {
       alert('Error updating the leave request: ' + err.message);
+    }
+  };
+
+  // Fitness Manager: first opinion on a Coach's leave (pre-approve or pre-reject). The Branch Manager has the final decision.
+  const handleLeavePreReview = async (requestId, status) => {
+    try {
+      await updateDoc(doc(db, 'leaveRequests', requestId), {
+        status, // 'Pre-approved' or 'Pre-rejected'
+        preReviewedBy: currentUserIdentifier,
+        preReviewedAt: serverTimestamp()
+      });
+    } catch (err) {
+      alert('Error saving your opinion on the leave request: ' + err.message);
     }
   };
 
@@ -1236,7 +1323,7 @@ export default function Dashboard({ user, onLogout }) {
     // Only Admin may ever set a request back to (New) - Facility Manager can reverse
     // status any other way (e.g. Completed -> Pending), just not back to New.
     if (newStatus === 'New' && !isAdmin) {
-      return alert("Only Admin can set a request back to (New).");
+      return alert("Only System Admin can set a request back to (New).");
     }
 
     // The Facility Manager and the Admin must say WHO carries out the task:
@@ -1365,7 +1452,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleDeleteRequest = async (reqId) => {
-    if (!isAdmin) return alert("Sorry, this action is exclusive to Admin only.");
+    if (!isAdmin) return alert("Sorry, this action is exclusive to System Admin only.");
     if (window.confirm('Are you sure you want to delete this maintenance request?')) {
       try {
         await deleteWithAudit('requests', reqId);
@@ -1384,6 +1471,12 @@ export default function Dashboard({ user, onLogout }) {
     let targetRole = newUserRole;
     if (isFacilityManager) {
       targetRole = 'Facility Member';
+    }
+    if (isQAManager) {
+      targetRole = 'QA';
+    }
+    if (isFitnessManager) {
+      targetRole = 'Coach';
     }
     // A Supervisor can only ever create plain Staff (User) accounts.
     if (isSupervisor) {
@@ -1408,15 +1501,15 @@ export default function Dashboard({ user, onLogout }) {
 
     // Only an Admin can create another Admin account
     if (targetRole === 'Admin' && !isAdmin) {
-      return alert("Only an Admin can create an Admin account.");
+      return alert("Only a System Admin can create a System Admin account.");
     }
 
-    if (isBranchManager && !['Supervisor', 'User'].includes(targetRole)) {
-      return alert("Branch Managers are only allowed to create Supervisor or Staff (User) accounts.");
+    if (!isAdmin && managedRoles.length > 0 && !managedRoles.includes(targetRole)) {
+      return alert(`Your account can only create: ${managedRoles.map(roleLabel).join(', ')}.`);
     }
 
     // Branch Manager must assign branch(es) to every account they create
-    if ((isBranchManager || isSupervisor) && newUserBranches.length === 0) {
+    if ((isBranchManager || isSupervisor || isFitnessManager) && newUserBranches.length === 0) {
       return alert("Please assign at least one branch to this account.");
     }
 
@@ -1463,12 +1556,8 @@ export default function Dashboard({ user, onLogout }) {
     // Facility Manager / Branch Manager / Supervisor share their team - they can edit any account of the
     // right role, regardless of who created it. Everyone else may only edit accounts they created themselves
     // (Admin always has full permission).
-    if (isFacilityManager) {
-      if (editingUser.role !== 'Facility Member') return alert("Facility Managers can only edit Facility Members.");
-    } else if (isBranchManager) {
-      if (!['Supervisor', 'User'].includes(editingUser.role)) return alert("Branch Managers can only edit Supervisor or Staff (User) accounts.");
-    } else if (isSupervisor) {
-      if (editingUser.role !== 'User') return alert("Supervisors can only edit Staff (User) accounts.");
+    if (!isAdmin && managedRoles.length > 0) {
+      if (!managedRoles.includes(editingUser.role)) return alert(`Your account can only edit: ${managedRoles.map(roleLabel).join(', ')}.`);
     } else if (!isAdmin && editingUser.createdBy !== user?.id) {
       return alert("You can only edit accounts that you created yourself.");
     }
@@ -1535,9 +1624,7 @@ export default function Dashboard({ user, onLogout }) {
     if (!canManageUsers) return false;
     // Facility Manager / Branch Manager / Supervisor share their team: any of them can manage any
     // account of the right role, regardless of who created it.
-    if (isFacilityManager) return targetUser.role === 'Facility Member';
-    if (isBranchManager) return ['Supervisor', 'User'].includes(targetUser.role);
-    if (isSupervisor) return targetUser.role === 'User';
+    if (!isAdmin && managedRoles.length > 0) return managedRoles.includes(targetUser.role);
     if (!isAdmin && targetUser.createdBy !== user?.id) return false;
     return true;
   };
@@ -1545,9 +1632,7 @@ export default function Dashboard({ user, onLogout }) {
   const handleDeleteUser = async (targetUser) => {
     if (!canDeleteUser(targetUser)) {
       if (!canManageUsers) return alert("Permission denied.");
-      if (isFacilityManager) return alert("Facility Managers can only delete Facility Members.");
-      if (isBranchManager) return alert("Branch Managers can only delete Supervisor or Staff (User) accounts.");
-      if (isSupervisor) return alert("Supervisors can only delete Staff (User) accounts.");
+      if (managedRoles.length > 0) return alert(`Your account can only delete: ${managedRoles.map(roleLabel).join(', ')}.`);
       if (!isAdmin && targetUser.createdBy !== user?.id) return alert("You can only delete accounts that you created yourself.");
       return alert("Permission denied.");
     }
@@ -1600,7 +1685,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const handleDeleteFullRecord = async (recordId) => {
-    if (!isAdmin) return alert("Exclusive to Admin only.");
+    if (!isAdmin) return alert("Exclusive to System Admin only.");
     if (window.confirm('Are you sure you want to delete this entire attendance record?')) {
       try {
         await deleteWithAudit('attendance', recordId);
@@ -2325,7 +2410,7 @@ export default function Dashboard({ user, onLogout }) {
       list = list.filter(a => {
         if (a.username === currentUserIdentifier) return true;
         const role = (usernameToRole[a.username] || 'User').trim().toUpperCase();
-        return role === 'USER' || role === 'STAFF' || role === 'SUPERVISOR';
+        return role === 'USER' || role === 'STAFF' || role === 'SUPERVISOR' || role === 'COACH' || role === 'FITNESS MANAGER';
       });
     } else if (isSupervisor) {
       if (assignedBranches.length > 0) {
@@ -2362,7 +2447,7 @@ export default function Dashboard({ user, onLogout }) {
       list = list.filter(v => {
         if (v.username === currentUserIdentifier) return true;
         const role = (usernameToRole[v.username] || 'User').trim().toUpperCase();
-        return role === 'USER' || role === 'STAFF' || role === 'SUPERVISOR';
+        return role === 'USER' || role === 'STAFF' || role === 'SUPERVISOR' || role === 'COACH' || role === 'FITNESS MANAGER';
       });
     } else if (isSupervisor) {
       if (assignedBranches.length > 0) {
@@ -2502,6 +2587,8 @@ export default function Dashboard({ user, onLogout }) {
 
   // the session that is still open (checked in, not checked out yet) - decides which button is available
   const openAttendance = todaySessions.find(a => !a.checkOutTime) || null;
+  // Number of outsource-maintenance requests waiting for this account's approval (badge on the tab)
+  const outsourceWaiting = useOutsourceWaiting(liveProfile, openAttendance?.branch || null, canSeeOutsource && perm('outsourceApprove'));
   // the most recent session - shown in the status card
   const todayUserAttendance = todaySessions[0] || null;
 
@@ -2765,7 +2852,8 @@ export default function Dashboard({ user, onLogout }) {
         requests: true,
         ceo_services: canSeeCeoServices,
         attendance: canSeeAttendance,
-        schedule: canSeeSchedule
+        schedule: canSeeSchedule,
+        outsource: canSeeOutsource
       };
       if (tab && allowed[tab]) {
         setActiveTab(tab);
@@ -2775,7 +2863,7 @@ export default function Dashboard({ user, onLogout }) {
     };
     window.addEventListener('befit-push-navigate', onPushNavigate);
     return () => window.removeEventListener('befit-push-navigate', onPushNavigate);
-  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule]);
+  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule, canSeeOutsource]);
 
   const handleAddRequest = async (e) => {
     e.preventDefault();
@@ -3059,7 +3147,7 @@ export default function Dashboard({ user, onLogout }) {
                 <option value="" className="bg-white text-slate-900">-- Select who is in charge --</option>
                 {taskAssignees.map(m => (
                   <option key={m.id} value={m.id} className="bg-white text-slate-900">
-                    {m.username} - {m.role} ({phonesMap[m.id] || m.phone || 'No Phone'})
+                    {m.username} - {roleLabel(m.role)} ({phonesMap[m.id] || m.phone || 'No Phone'})
                   </option>
                 ))}
               </select>
@@ -3137,7 +3225,7 @@ export default function Dashboard({ user, onLogout }) {
             <h1 className="text-lg font-bold text-slate-900">BeFit Eye • Welcome, <span className="text-indigo-600">{currentUserIdentifier}</span></h1>
             <div className="flex items-center gap-2 mt-1">
               <span className="inline-block text-[10px] uppercase font-black px-3 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
-                ROLE: {userRole}
+                ROLE: {roleLabel(rawRole)}
               </span>
               {assignedBranches.length > 0 && (
                 <span className="inline-block text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border">
@@ -3218,6 +3306,18 @@ export default function Dashboard({ user, onLogout }) {
           >
             🚩 Report a Concern
           </button>
+
+          {canSeeOutsource && (
+            <button
+              onClick={() => setActiveTab('outsource')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'outsource' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              🧑‍🔧 Outsource Maintenance
+              {outsourceWaiting > 0 && (
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-white text-[10px] font-black">{outsourceWaiting}</span>
+              )}
+            </button>
+          )}
 
           {canSeeChecklist && (
             <button
@@ -3730,7 +3830,7 @@ export default function Dashboard({ user, onLogout }) {
               <div className="text-left bg-rose-50 border border-rose-200 rounded-2xl p-4 space-y-1">
                 <p className="text-xs font-bold text-rose-700">⚠️ Could not load your attendance history.</p>
                 <p className="text-[11px] text-rose-600">
-                  Your Check-In / Check-Out buttons may not reflect a session that's already open. Please tell Admin
+                  Your Check-In / Check-Out buttons may not reflect a session that's already open. Please tell the System Admin
                   and try again shortly. (Error: {attendanceLoadError})
                 </p>
               </div>
@@ -3878,12 +3978,25 @@ export default function Dashboard({ user, onLogout }) {
           <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
             <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">🗓️ Request Leave</h2>
             <form onSubmit={handleCreateLeaveRequest} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 mb-1">Branch</label>
+                <select
+                  required
+                  value={leaveBranch || (leaveBranchOptions.length === 1 ? leaveBranchOptions[0] : '')}
+                  onChange={(e) => setLeaveBranch(e.target.value)}
+                  className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
+                >
+                  <option value="">Select branch...</option>
+                  {leaveBranchOptions.map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-600 mb-1">From</label>
                   <input
                     type="date"
                     required
+                    min={toLocalYmd()}
                     value={leaveStartDate}
                     onChange={(e) => setLeaveStartDate(e.target.value)}
                     className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
@@ -3894,6 +4007,7 @@ export default function Dashboard({ user, onLogout }) {
                   <input
                     type="date"
                     required
+                    min={leaveStartDate || toLocalYmd()}
                     value={leaveEndDate}
                     onChange={(e) => setLeaveEndDate(e.target.value)}
                     className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
@@ -3927,11 +4041,18 @@ export default function Dashboard({ user, onLogout }) {
                     ? { bg: '#059669', label: 'Approved' }
                     : r.status === 'Rejected'
                     ? { bg: '#e11d48', label: 'Rejected' }
+                    : r.status === 'Pre-approved'
+                    ? { bg: '#0284c7', label: 'Pre-approved - waiting for the Branch Manager' }
+                    : r.status === 'Pre-rejected'
+                    ? { bg: '#ea580c', label: 'Rejected by the Fitness Manager - the Branch Manager decides' }
                     : { bg: '#f59e0b', label: 'Pending' };
                   return (
                     <div key={r.id} className="flex items-center justify-between gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs">
                       <div>
                         <p className="font-bold text-slate-800">{r.startDate} → {r.endDate}</p>
+                        {(r.branch || (r.assignedBranches || []).length > 0) && (
+                          <p className="text-slate-500 mt-0.5">🏢 {r.branch || (r.assignedBranches || []).join(', ')}</p>
+                        )}
                         {r.reason && <p className="text-slate-500 mt-0.5">{r.reason}</p>}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
@@ -3956,14 +4077,18 @@ export default function Dashboard({ user, onLogout }) {
           </div>
 
           {canViewLeaveQueue && (() => {
-            const pendingCount = leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived).length;
+            const isOpenLeave = (r) => r.status === 'Pending' || r.status === 'Pre-approved' || r.status === 'Pre-rejected';
+            const isCoachLeave = (r) => usersList.find((u) => u.username === r.username)?.role === 'Coach';
+            const pendingCount = leaveRequestsForApproval.filter(r => (canApproveLeave ? isOpenLeave(r) : r.status === 'Pending') && !r.isArchived).length;
             const visibleLeaveRequests = isAdmin
               ? leaveRequestsForApproval
                   .filter(r => (showArchivedOnly ? r.isArchived === true : !r.isArchived))
                   .slice()
-                  .sort((a, b) => (a.status === 'Pending' ? -1 : 1) - (b.status === 'Pending' ? -1 : 1))
+                  .sort((a, b) => (isOpenLeave(a) ? -1 : 1) - (isOpenLeave(b) ? -1 : 1))
               : canApproveLeave
-              ? leaveRequestsForApproval.filter(r => r.status === 'Pending' && !r.isArchived)
+              ? leaveRequestsForApproval.filter(r => isOpenLeave(r) && !r.isArchived)
+                  .slice()
+                  .sort((a, b) => (a.status !== 'Pending' ? -1 : 1) - (b.status !== 'Pending' ? -1 : 1))
               // Supervisor (view only): every non-archived leave of their branches, pending ones first
               : leaveRequestsForApproval
                   .filter(r => !r.isArchived)
@@ -3974,7 +4099,7 @@ export default function Dashboard({ user, onLogout }) {
               <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-3">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
-                    📋 {isAdmin ? 'Leave Requests' : canApproveLeave ? 'Leave Requests Awaiting Approval' : 'Branch Leave Requests (view only)'}
+                    📋 {isAdmin ? 'Leave Requests' : canApproveLeave ? 'Leave Requests Awaiting Approval' : canPreApproveLeave ? 'Coach Leave Requests (your opinion first)' : 'Branch Leave Requests (view only)'}
                     {pendingCount > 0 && (
                       <span className="bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
                         {pendingCount}
@@ -4003,20 +4128,69 @@ export default function Dashboard({ user, onLogout }) {
                         ? { bg: '#059669', label: 'Approved' }
                         : r.status === 'Rejected'
                         ? { bg: '#e11d48', label: 'Rejected' }
+                        : r.status === 'Pre-approved'
+                        ? { bg: '#0284c7', label: `Pre-approved${r.preReviewedBy ? ` by ${r.preReviewedBy}` : ''}` }
+                        : r.status === 'Pre-rejected'
+                        ? { bg: '#ea580c', label: `Rejected by ${r.preReviewedBy || 'the Fitness Manager'} (final decision: Branch Manager)` }
                         : { bg: '#f59e0b', label: 'Pending' };
                       return (
                         <div key={r.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                           <div className="flex items-center justify-between gap-2">
-                            <span className="font-black text-slate-800">👤 {r.username}</span>
+                            <span className="font-black text-slate-800">
+                              👤 {r.username}
+                              {(r.requesterRole || usersList.find((u) => u.username === r.username)?.role) && (
+                                <span className="ml-1.5 px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-700 text-[10px] font-extrabold align-middle">
+                                  {roleLabel(r.requesterRole || usersList.find((u) => u.username === r.username)?.role)}
+                                </span>
+                              )}
+                            </span>
                             <span className="text-slate-500 font-bold">{r.startDate} → {r.endDate}</span>
                           </div>
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 font-semibold">
+                            <span>🏢 {r.branch || (r.assignedBranches || []).join(', ') || '—'}</span>
+                            <span>🗓️ Requested {formatDate(r.createdAt)}</span>
+                          </div>
                           {r.reason && <p className="text-slate-500">{r.reason}</p>}
+                          {(() => {
+                            const yr = (r.startDate || '').slice(0, 4);
+                            const info = leaveBalanceInfo[yr]?.[(r.username || '').toLowerCase()];
+                            if (!info || !(canApproveLeave || canPreApproveLeave) || !perm('viewLeaveBalances')) return null;
+                            const s0 = Date.parse(r.startDate); const e0 = Date.parse(r.endDate);
+                            const yearEnd = Date.parse(`${yr}-12-31`);
+                            const reqDays = Number.isNaN(s0) || Number.isNaN(e0) ? 0 : Math.round((Math.min(e0, yearEnd) - s0) / 86400000) + 1;
+                            const after = info.balance - info.taken - (r.status === 'Approved' ? 0 : reqDays);
+                            const approved = r.status === 'Approved';
+                            return (
+                              <p className="text-[11px] font-bold rounded-lg px-2 py-1.5 border" style={{ backgroundColor: after < 0 ? '#fff1f2' : '#f0fdf4', borderColor: after < 0 ? '#fecdd3' : '#bbf7d0', color: after < 0 ? '#be123c' : '#166534' }}>
+                                💳 Leave balance {yr}: {info.balance} day(s) · taken {info.taken} · this request {reqDays} day(s)
+                                {approved ? '' : ` → remaining after approving: ${after}`}
+                              </p>
+                            );
+                          })()}
                           <div className="flex items-center justify-between gap-2">
                             <span className="px-2 py-0.5 rounded-full text-[10px] font-black text-white" style={{ backgroundColor: badge.bg }}>
                               {badge.label}
                             </span>
                             <div className="flex gap-2 justify-end">
-                              {r.status === 'Pending' && canApproveLeave && (
+                              {r.status === 'Pending' && canPreApproveLeave && !canApproveLeave && isCoachLeave(r) && (
+                                <>
+                                  <button
+                                    onClick={() => handleLeavePreReview(r.id, 'Pre-rejected')}
+                                    className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-300 hover:bg-rose-200 transition"
+                                    title="Your opinion only - the Branch Manager makes the final decision"
+                                  >
+                                    Reject
+                                  </button>
+                                  <button
+                                    onClick={() => handleLeavePreReview(r.id, 'Pre-approved')}
+                                    className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-sky-100 text-sky-700 border border-sky-300 hover:bg-sky-200 transition"
+                                    title="Your opinion only - the Branch Manager makes the final decision"
+                                  >
+                                    Pre-approve
+                                  </button>
+                                </>
+                              )}
+                              {isOpenLeave(r) && canApproveLeave && (
                                 <>
                                   <button
                                     onClick={() => handleLeaveDecision(r.id, 'Rejected')}
@@ -4059,6 +4233,13 @@ export default function Dashboard({ user, onLogout }) {
               </div>
             );
           })()}
+
+          {(perm('viewLeaveBalances') || perm('editLeaveBalance')) && (
+            <LeaveReport
+              canEdit={perm('editLeaveBalance')}
+              hideUser={(row) => !viewerIsHiddenAdmin && isHiddenAdminUser(row)}
+            />
+          )}
         </div>
       )}
 
@@ -4452,7 +4633,7 @@ export default function Dashboard({ user, onLogout }) {
                         canViewAttendancePhotos ? (
                           <AttendanceThumb rec={rec} which="in" onOpen={(u) => setFullscreenImage(u)} />
                         ) : (
-                          <span className="text-slate-300 text-[10px]" title="Only HR, Admin and Branch Managers can view attendance photos">🔒</span>
+                          <span className="text-slate-300 text-[10px]" title="Only HR, System Admin and Branch Managers can view attendance photos">🔒</span>
                         )
                       )}
                     </td>
@@ -4462,7 +4643,7 @@ export default function Dashboard({ user, onLogout }) {
                         canViewAttendancePhotos ? (
                           <AttendanceThumb rec={rec} which="out" onOpen={(u) => setFullscreenImage(u)} />
                         ) : (
-                          <span className="text-slate-300 text-[10px]" title="Only HR, Admin and Branch Managers can view attendance photos">🔒</span>
+                          <span className="text-slate-300 text-[10px]" title="Only HR, System Admin and Branch Managers can view attendance photos">🔒</span>
                         )
                       )}
                     </td>
@@ -4638,8 +4819,21 @@ export default function Dashboard({ user, onLogout }) {
         <AuditLog isAdmin={isAdmin} />
       )}
 
+      {activeTab === 'outsource' && canSeeOutsource && (
+        <OutsourceMaintenance
+          currentUser={liveProfile}
+          branchesList={branches}
+          usersList={usersList}
+          categories={categories}
+          openBranch={openAttendance?.branch || null}
+          canRequestOs={perm('outsourceRequest')}
+          canApproveOs={perm('outsourceApprove')}
+        />
+      )}
+
       {activeTab === 'checklist' && canSeeChecklist && (
         <BranchChecklist
+          readOnly={!perm('tickChecklist')}
           currentUser={liveProfile}
           branchesList={visibleBranchesForUser}
           openBranch={openAttendance?.branch || null}
@@ -4715,7 +4909,7 @@ export default function Dashboard({ user, onLogout }) {
                       }}
                     />
                     <label htmlFor="skipPhoneForAdmin" className="text-[11px] text-slate-500">
-                      Register without a phone number (Admin exception)
+                      Register without a phone number (System Admin exception)
                     </label>
                   </div>
                 )}
@@ -4730,27 +4924,42 @@ export default function Dashboard({ user, onLogout }) {
                 >
                   {isFacilityManager ? (
                     <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
+                  ) : isQAManager ? (
+                    <option value="QA" className="bg-white text-slate-900">QA Member</option>
+                  ) : isFitnessManager ? (
+                    <option value="Coach" className="bg-white text-slate-900">Coach</option>
+                  ) : isBMPlus ? (
+                    <>
+                      <option value="User" className="bg-white text-slate-900">Admin</option>
+                      <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
+                      <option value="Coach" className="bg-white text-slate-900">Coach</option>
+                      <option value="Fitness Manager" className="bg-white text-slate-900">Fitness Manager</option>
+                    </>
                   ) : isSupervisor ? (
-                    <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                    <option value="User" className="bg-white text-slate-900">Admin</option>
                   ) : isBranchManager ? (
                     <>
-                      <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                      <option value="User" className="bg-white text-slate-900">Admin</option>
                       <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
                     </>
                   ) : (
                     <>
-                      <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                      <option value="User" className="bg-white text-slate-900">Admin</option>
                       <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
+                      <option value="Coach" className="bg-white text-slate-900">Coach</option>
                       <option value="Branch Manager" className="bg-white text-slate-900">Branch Manager</option>
+                      <option value="Branch Manager+" className="bg-white text-slate-900">Branch Manager+</option>
+                      <option value="Fitness Manager" className="bg-white text-slate-900">Fitness Manager</option>
                       <option value="Facility Manager" className="bg-white text-slate-900">Facility Manager</option>
                       <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                       <option value="HR" className="bg-white text-slate-900">HR</option>
                       <option value="CEO" className="bg-white text-slate-900">CEO</option>
-                      <option value="QA" className="bg-white text-slate-900">QA</option>
+                      <option value="QA" className="bg-white text-slate-900">QA Member</option>
+                      <option value="QA Manager" className="bg-white text-slate-900">QA Manager</option>
                       {/* Admin-only: same permissions as a plain User, but reports directly to Admin -
                           never shown to/created by a Branch Manager or Supervisor. */}
                       {isAdmin && <option value="Finance and Administration" className="bg-white text-slate-900">Finance and Administration</option>}
-                      {isAdmin && <option value="Admin" className="bg-white text-slate-900">Admin</option>}
+                      {isAdmin && <option value="Admin" className="bg-white text-slate-900">System Admin</option>}
                     </>
                   )}
                 </select>
@@ -4765,7 +4974,7 @@ export default function Dashboard({ user, onLogout }) {
                   <div className="flex items-center gap-3 text-[11px] font-bold">
                     <button
                       type="button"
-                      onClick={() => setNewUserBranches(((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
+                      onClick={() => setNewUserBranches(((isBranchManager || isSupervisor || isFitnessManager) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
                       className="text-indigo-600 hover:underline cursor-pointer"
                     >
                       Select all
@@ -4774,7 +4983,7 @@ export default function Dashboard({ user, onLogout }) {
                   </div>
                 </div>
                 <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
+                  {((isBranchManager || isSupervisor || isFitnessManager) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                     <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                       <input 
                         type="checkbox" 
@@ -4960,9 +5169,7 @@ export default function Dashboard({ user, onLogout }) {
                     .map((u) => {
                       // Facility Managers share one team: any Facility Manager can edit/delete any Facility Member.
                       const canEditThisUser = isAdmin || u.createdBy === user?.id
-                        || (isFacilityManager && u.role === 'Facility Member')
-                        || (isBranchManager && ['Supervisor', 'User'].includes(u.role))
-                        || (isSupervisor && u.role === 'User');
+                        || managedRoles.includes(u.role);
                       const canDeleteThisUser = canDeleteUser(u);
                       const userBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
                       const online = isUserOnline(u);
@@ -4989,7 +5196,7 @@ export default function Dashboard({ user, onLogout }) {
                                 ? 'bg-amber-100 text-amber-800 border border-amber-300'
                                 : 'bg-indigo-100 text-indigo-800 border border-indigo-300'
                             }`}>
-                              {u.role || 'User'}
+                              {roleLabel(u.role)}
                             </span>
                           </td>
                           <td className="p-3">
@@ -5258,6 +5465,8 @@ export default function Dashboard({ user, onLogout }) {
             </div>
           </div>
 
+          <OutsourceAreasSettings />
+
         </div>
       )}
 
@@ -5298,7 +5507,7 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
               ) : (
                 <p className="text-[10px] text-slate-400 italic">
-                  Password can only be changed by the account owner (via "Change Password") or by an Admin.
+                  Password can only be changed by the account owner (via "Change Password") or by a System Admin.
                 </p>
               )}
               <div>
@@ -5323,16 +5532,20 @@ export default function Dashboard({ user, onLogout }) {
                     onChange={(e) => setEditUserRole(e.target.value)}
                     className="w-full p-2.5 bg-white text-slate-900 border rounded-xl text-xs"
                   >
-                    <option value="User" className="bg-white text-slate-900">User (Staff)</option>
+                    <option value="User" className="bg-white text-slate-900">Admin</option>
                     <option value="Supervisor" className="bg-white text-slate-900">Supervisor</option>
+                    <option value="Coach" className="bg-white text-slate-900">Coach</option>
                     <option value="Branch Manager" className="bg-white text-slate-900">Branch Manager</option>
+                    <option value="Branch Manager+" className="bg-white text-slate-900">Branch Manager+</option>
+                    <option value="Fitness Manager" className="bg-white text-slate-900">Fitness Manager</option>
                     <option value="Facility Manager" className="bg-white text-slate-900">Facility Manager</option>
                     <option value="Facility Member" className="bg-white text-slate-900">Facility Member</option>
                     <option value="HR" className="bg-white text-slate-900">HR</option>
                     <option value="CEO" className="bg-white text-slate-900">CEO</option>
-                    <option value="QA" className="bg-white text-slate-900">QA</option>
+                    <option value="QA" className="bg-white text-slate-900">QA Member</option>
+                    <option value="QA Manager" className="bg-white text-slate-900">QA Manager</option>
                     <option value="Finance and Administration" className="bg-white text-slate-900">Finance and Administration</option>
-                    <option value="Admin" className="bg-white text-slate-900">Admin</option>
+                    <option value="Admin" className="bg-white text-slate-900">System Admin</option>
                   </select>
                 </div>
               )}
@@ -5346,7 +5559,7 @@ export default function Dashboard({ user, onLogout }) {
                   <div className="flex items-center gap-3 text-[11px] font-bold">
                     <button
                       type="button"
-                      onClick={() => setEditUserBranches(((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
+                      onClick={() => setEditUserBranches(((isBranchManager || isSupervisor || isFitnessManager) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => b.name))}
                       className="text-indigo-600 hover:underline cursor-pointer"
                     >
                       Select all
@@ -5356,7 +5569,7 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
                 <p className="text-[10px] text-slate-500">If you assign branches here, this account will only see data related to these branches across the app (Attendance, Requests, etc.).</p>
                 <div className="space-y-1 max-h-36 overflow-y-auto">
-                  {((isBranchManager || isSupervisor) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
+                  {((isBranchManager || isSupervisor || isFitnessManager) ? branches.filter(b => assignedBranches.includes(b.name)) : branches).map(b => (
                     <label key={b.id} className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                       <input 
                         type="checkbox" 

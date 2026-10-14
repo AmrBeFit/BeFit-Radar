@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { db, functions } from './firebase';
 import { httpsCallable } from 'firebase/functions';
+import { roleLabel } from './permissions';
 import {
   collection,
   collectionGroup,
@@ -358,7 +359,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
   };
 
   const handleDelete = async (report) => {
-    const confirmed = window.confirm(`Delete this report ("${report.title}")? An Admin can restore it later from the Audit Log.`);
+    const confirmed = window.confirm(`Delete this report ("${report.title}")? An System Admin can restore it later from the Audit Log.`);
     if (!confirmed) return;
     setDeletingId(report.id);
     try {
@@ -387,18 +388,17 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
           <p className="text-xs text-slate-500 max-w-xl">
             <span className="font-bold text-slate-700">Your voice matters.</span> If something doesn't feel
             right — unsafe conditions, dishonesty, anything — this is the place to say so.
-            <span className="font-bold text-slate-700"> System Admin only and HR  </span> Both can  read the report itself,
-            Just be <span className="font-bold text-slate-700">Fair , Clear and Honest </span>    - your account will be  anonymous for all  — 
-             .
+            <span className="font-bold text-slate-700"> System Admin and HR</span> can both read the report itself,
+            but <span className="font-bold text-slate-700"> noone can see who submitted it </span> —
           </p>
-          {/* Arabic version - same honest meaning as the English text above: the report is not tied to the
-              reporter's account (truly anonymous), System Admin  can read the content, but only Admin
-              can see the reporter's identity - just be Honest , clear and fair . */}
+          {/* Arabic version - same honest meaning as the English text above: the report is tied to the
+              reporter's account (not truly anonymous), System Admin and HR both read the content, but only System Admin
+              can see the reporter's identity - it's hidden from HR. */}
           <p dir="rtl" lang="ar" className="text-xs text-slate-500 max-w-xl mt-1.5">
-            <span className="font-bold text-slate-700">في حال وجود أي شئ خاطئ او مخل بالأمانة او أي مشكلة أخري فهذا هو المكان للابلاغ و هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
-            بحسابك فقط كن امين و واضح و عادل، يستطيع <span className="font-bold text-slate-700">مدير النظام و ال HR   (فقط)</span> الاطلاع
-            على محتوى البلاغ،  <span className="font-bold text-slate-700"> -</span>    سيظل حسابك مجهولا
-               —    .  يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
+            <span className="font-bold text-slate-700"> في حال وجود أي شئ مخل بالأمانة او خاطئ أو مريب فهذا هو المكان للابلاغ مع العلم هذا البلاغ يقدم مجهولاً.</span> لا يتم تسجيله مرتبطًا
+            بحسابك، فقط <span className="font-bold text-slate-700">مدير النظام وقسم الموارد البشرية (HR)</span> يطّلعوا
+            على محتوى البلاغ، لكن <span className="font-bold text-slate-700">  هويتك مخفية تماما فقط كن واضح وامين و عادل </span>
+               —  . يمكنك متابعة بلاغك وحالته الحالية من قسم "بلاغاتي".
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
@@ -489,7 +489,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
                       <label key={o.value} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-xs">
                         <input type="checkbox" checked={reportedAgainst.includes(o.value)} onChange={() => togglePerson(o.value)} />
                         <span className="font-semibold text-slate-800 truncate">{o.label}</span>
-                        {o.role && <span className="ml-auto text-[10px] text-slate-400 shrink-0">{o.role}</span>}
+                        {o.role && <span className="ml-auto text-[10px] text-slate-400 shrink-0">{roleLabel(o.role)}</span>}
                       </label>
                     ))}
                   </div>
@@ -622,7 +622,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
                             )
                           ) : (
                             // HR reviews the report content but never learns who filed it - only Admin can see that.
-                            <span className="italic">reporter hidden (Admin only)</span>
+                            <span className="italic">reporter hidden (System Admin only)</span>
                           )}
                         </p>
                         {Array.isArray(r.reportedAgainst) && r.reportedAgainst.length > 0 && (
@@ -653,7 +653,7 @@ export default function IntegrityReports({ currentUser, branchesList = [], users
                       ) : (
                         // HR can read reports but only Admin can change status (matches the security rule) -
                         // an editable dropdown here would just fail silently, so HR sees a plain status instead.
-                        <span className="text-[10px] text-slate-400">Only Admin can change the status.</span>
+                        <span className="text-[10px] text-slate-400">Only System Admin can change the status.</span>
                       )}
                       {r.statusUpdatedBy && (
                         <span className="text-[10px] text-slate-400">last changed by {r.statusUpdatedBy}</span>

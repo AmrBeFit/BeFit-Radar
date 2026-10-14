@@ -65,19 +65,26 @@ const INTERVAL_MINUTES = 60;
 
 const DEFAULT_CONFIG = { items: DEFAULT_ITEMS, startTime: '06:00', endTime: '23:00' };
 
-export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, canSeeSummary = false, onReportIssue, plans = [], plansAvailable = false }) {
+export default function BranchChecklist({ currentUser, branchesList = [], openBranch, canSignOff = false, isAdmin = false, canSeeSummary = false, readOnly = false, onReportIssue, plans = [], plansAvailable = false }) {
   const myUsername = currentUser?.username || currentUser?.displayName || '';
   const myRole = currentUser?.role || '';
 
-  const branchNames = useMemo(
+  const allBranchNames = useMemo(
     () => [...branchesList].map((b) => (typeof b === 'string' ? b : b.name)).filter(Boolean).sort((a, b) => a.localeCompare(b)),
     [branchesList]
   );
 
   const today = toLocalYmd();
-  const [selectedBranch, setSelectedBranch] = useState(openBranch || branchNames[0] || '');
+  const [selectedBranch, setSelectedBranch] = useState(openBranch || '');
   const [selectedDate, setSelectedDate] = useState(today);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
+  // Branches the System Admin marked as having NO checklist (seasonal / administrative branches).
+  const noChecklistList = Array.isArray(config.noChecklistBranches) ? config.noChecklistBranches : [];
+  const branchNames = useMemo(
+    () => allBranchNames.filter((n) => !noChecklistList.includes(n)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allBranchNames, noChecklistList.join('|')]
+  );
   const [dayDoc, setDayDoc] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -147,7 +154,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   // Once the day has been signed off, the sheet is frozen for everyone except Admin.
   const signedOff = !!dayDoc?.signedOffBy;
   const lockedBySignOff = signedOff && !isAdmin;
-  const canTick = (isCheckedInHere || isAdmin) && !lockedBySignOff;
+  const canTick = (isCheckedInHere || isAdmin) && !lockedBySignOff && !readOnly;
 
   // An hour is "missed" once the next hour has begun (always true for any past day). An empty cell in a
   // missed hour is shaded and labelled "Not Checked!".
@@ -394,11 +401,13 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
   const [newItemLabel, setNewItemLabel] = useState('');
   const [startDraft, setStartDraft] = useState(config.startTime);
   const [endDraft, setEndDraft] = useState(config.endTime);
+  const [noChecklistDraft, setNoChecklistDraft] = useState([]);
   useEffect(() => {
     setItemsDraft(config.items.map((i) => ({ id: i.id, label: i.label })));
     setNewItemLabel('');
     setStartDraft(config.startTime);
     setEndDraft(config.endTime);
+    setNoChecklistDraft(Array.isArray(config.noChecklistBranches) ? config.noChecklistBranches : []);
   }, [showSettings]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addDraftItem = () => {
@@ -426,6 +435,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         items,
         startTime: startDraft,
         endTime: endDraft,
+        noChecklistBranches: noChecklistDraft,
         intervalMinutes: INTERVAL_MINUTES
       });
       setShowSettings(false);
@@ -486,7 +496,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
           <h2 className="text-lg font-black text-slate-900 tracking-tight">✅ Branch Checklist</h2>
           <p className="text-xs text-slate-500 max-w-xl">
             Tick each item off every hour as you go through the branch. Anyone checked in here right now can
-            tick the current time slot; only Admin, Branch Manager or Supervisor can sign off the whole day.
+            tick the current time slot; only System Admin, Branch Manager or Supervisor can sign off the whole day.
           </p>
           {branchHasHours && (
             <p className="text-[11px] font-semibold text-indigo-700 mt-1">
@@ -554,6 +564,22 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
             </div>
           </div>
           <div className="space-y-2">
+            <label className={label}>Branches WITHOUT a checklist (seasonal / administrative)</label>
+            <p className="text-[10px] text-slate-400">Tick a branch to remove it from the checklist (it will not be listed, and it is left out of the summary).</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+              {allBranchNames.map((b) => (
+                <label key={b} className="flex items-center gap-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg px-2 py-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={noChecklistDraft.includes(b)}
+                    onChange={(e) => setNoChecklistDraft((prev) => (e.target.checked ? [...prev, b] : prev.filter((x) => x !== b)))}
+                  />
+                  {b}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
             <label className={label}>Checklist items ({itemsDraft.length})</label>
             <div className="space-y-1.5">
               {itemsDraft.map((it) => (
@@ -612,6 +638,7 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         <div>
           <label className={label}>Branch</label>
           <select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)} className={field}>
+            <option value="">— Choose a branch —</option>
             {branchNames.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </div>
@@ -635,15 +662,35 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
         </div>
       </div>
 
-      {lockedBySignOff && (
-        <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
-          This checklist has been signed off and is locked. Only an Admin can edit it now.
+      {!selectedBranch && (
+        <p className="text-sm text-slate-600 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-6 text-center font-semibold">
+          👆 Choose a branch above to see its checklist. You can only tick items for the branch you are checked in at.
         </p>
       )}
 
-      {!canTick && !lockedBySignOff && isToday && (
+      {selectedBranch && noChecklistList.includes(selectedBranch) && (
+        <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-4 py-6 text-center font-semibold">
+          {selectedBranch} does not use the daily checklist.
+        </p>
+      )}
+
+      {selectedBranch && !noChecklistList.includes(selectedBranch) && (
+        <>
+      {lockedBySignOff && (
+        <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+          This checklist has been signed off and is locked. Only a System Admin can edit it now.
+        </p>
+      )}
+
+      {readOnly && (
+        <p className="text-[11px] text-sky-800 bg-sky-50 border border-sky-200 rounded-xl px-3 py-2">
+          You can view the checklist of your branches, but you cannot edit it.
+        </p>
+      )}
+
+      {!readOnly && !canTick && !lockedBySignOff && isToday && (
         <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-          You can view this branch's checklist, but you need to be checked in at <span className="font-bold">{selectedBranch}</span> to tick items.
+          You can view this branch's checklist, but you need to be checked in at <span className="font-bold">{selectedBranch}</span> to tick items.{openBranch && openBranch !== selectedBranch ? <> You are currently checked in at <span className="font-bold">{openBranch}</span> - choose it above to tick.</> : null}
         </p>
       )}
 
@@ -896,6 +943,8 @@ export default function BranchChecklist({ currentUser, branchesList = [], openBr
             Clear
           </button>
         </div>
+      )}
+        </>
       )}
     </div>
   );

@@ -988,7 +988,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
               {isSavingPricing ? 'Saving...' : '💾 Save Pricing For Everyone'}
             </button>
           ) : (
-            <p className="text-[11px] text-slate-400 italic">Only Admin or Facility Manager can edit these rates.</p>
+            <p className="text-[11px] text-slate-400 italic">Only System Admin or Facility Manager can edit these rates.</p>
           )}
 
           {/* TOWEL-ENABLED BRANCHES: not every branch has a towel service - Admin / Facility Manager
@@ -1043,7 +1043,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
                 )}
               </>
             ) : (
-              <p className="text-[11px] text-slate-400 italic">Only Admin or Facility Manager can choose which branches have a towel service.</p>
+              <p className="text-[11px] text-slate-400 italic">Only System Admin or Facility Manager can choose which branches have a towel service.</p>
             )}
           </div>
         </div>

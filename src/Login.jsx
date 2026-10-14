@@ -112,7 +112,7 @@ export default function Login({ onLoginSuccess }) {
       const profileSnap = await getDoc(doc(db, 'users', credential.user.uid));
 
       if (!profileSnap.exists()) {
-        setError('Your account was authenticated but no profile was found. Please contact an Admin.');
+        setError('Your account was authenticated but no profile was found. Please contact a System Admin.');
         setLoading(false);
         return;
       }

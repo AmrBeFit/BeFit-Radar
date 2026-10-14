@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import MultiSelectFilter from './MultiSelectFilter';
+import { roleLabel } from './permissions';
 
 /* =====================================================================
    Maintenance report: who did what.
@@ -314,7 +315,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
                   <tr key={s.name} className="hover:bg-slate-50">
                     <td className="p-3">
                       <span className="font-bold text-slate-900">{s.name === UNASSIGNED ? 'Unassigned' : s.name}</span>
-                      {s.role && <span className="ml-1.5 text-[10px] text-slate-400">{s.role}</span>}
+                      {s.role && <span className="ml-1.5 text-[10px] text-slate-400">{roleLabel(s.role)}</span>}
                     </td>
                     <td className="p-3 text-slate-700">{s.total}</td>
                     <td className="p-3 font-bold" style={{ color: '#065f46' }}>{s.completed}</td>
