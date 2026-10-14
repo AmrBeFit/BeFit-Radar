@@ -386,6 +386,10 @@ export default function Dashboard({ user, onLogout }) {
   const [editUserRole, setEditUserRole] = useState('User');
   const [editUserBranches, setEditUserBranches] = useState([]);
 
+  // Filters of the "System Users" table: name search, branch, account type, online / offline, last seen.
+  const [uf, setUf] = useState({ search: '', branch: '', role: '', status: 'all', seen: 'all' });
+  const setUfField = (k, v) => setUf((f) => ({ ...f, [k]: v }));
+
   // Multi-select in the "System Users" table, for deleting several accounts at once.
   const [selectedUserIds, setSelectedUserIds] = useState(new Set());
   const toggleUserSelection = (id) => {
@@ -2056,6 +2060,30 @@ export default function Dashboard({ user, onLogout }) {
     const d = u.lastActive.toDate ? u.lastActive.toDate() : new Date(u.lastActive);
     return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
+
+  // The System Users table after the filters above.
+  const lastActiveMs = (u) => (u?.lastActive ? (u.lastActive.toDate ? u.lastActive.toDate().getTime() : new Date(u.lastActive).getTime()) : 0);
+  const usersFiltersOn = !!(uf.search.trim() || uf.branch || uf.role || uf.status !== 'all' || uf.seen !== 'all');
+  const filteredUsersList = manageableUsersList.filter((u) => {
+    const q = uf.search.trim().toLowerCase();
+    if (q && !(String(u.username || '').toLowerCase().includes(q) || String(u.name || '').toLowerCase().includes(q) || String(u.phone || '').includes(q))) return false;
+    if (uf.branch && !(Array.isArray(u.assignedBranches) && u.assignedBranches.includes(uf.branch))) return false;
+    if (uf.role && u.role !== uf.role) return false;
+    const online = isUserOnline(u);
+    if (uf.status === 'online' && !online) return false;
+    if (uf.status === 'offline' && online) return false;
+    if (uf.seen !== 'all') {
+      const ms = lastActiveMs(u);
+      const age = nowTick - ms;
+      const DAY = 86400000;
+      if (uf.seen === 'never' && ms !== 0) return false;
+      if (uf.seen === 'today' && (ms === 0 || age > DAY)) return false;
+      if (uf.seen === '7d' && (ms === 0 || age > 7 * DAY)) return false;
+      if (uf.seen === '30d' && (ms === 0 || age > 30 * DAY)) return false;
+      if (uf.seen === 'over30' && ms !== 0 && age <= 30 * DAY) return false;
+    }
+    return true;
+  });
 
   const handleForceLogout = async (targetUser) => {
     if (!window.confirm(`Are you sure you want to force log out "${targetUser.username}"?`)) return;
@@ -5080,7 +5108,7 @@ export default function Dashboard({ user, onLogout }) {
           <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <h2 className="text-lg font-bold text-slate-900">
-                {isFacilityManager ? 'Facility Team Members' : `System Users (${manageableUsersList.length})`}
+                {isFacilityManager ? 'Facility Team Members' : `System Users (${usersFiltersOn ? `${filteredUsersList.length} of ${manageableUsersList.length}` : manageableUsersList.length})`}
               </h2>
               {selectedUserIds.size > 0 && (
                 <button
@@ -5092,6 +5120,42 @@ export default function Dashboard({ user, onLogout }) {
                 </button>
               )}
             </div>
+            <div className="grid grid-cols-2 lg:grid-cols-6 gap-2">
+              <input
+                type="text" value={uf.search} onChange={(e) => setUfField('search', e.target.value)}
+                placeholder="🔍 Search a name..." className="col-span-2 p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-semibold"
+              />
+              <select value={uf.branch} onChange={(e) => setUfField('branch', e.target.value)} className="p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-semibold">
+                <option value="">All branches</option>
+                {[...branchesNamesList].sort((a, b) => a.localeCompare(b)).map((b) => <option key={b} value={b}>{b}</option>)}
+              </select>
+              <select value={uf.role} onChange={(e) => setUfField('role', e.target.value)} className="p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-semibold">
+                <option value="">All account types</option>
+                {[...new Set(manageableUsersList.map((u) => u.role).filter(Boolean))].sort((a, b) => roleLabel(a).localeCompare(roleLabel(b))).map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+              </select>
+              <select value={uf.status} onChange={(e) => setUfField('status', e.target.value)} className="p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-semibold">
+                <option value="all">Online &amp; offline</option>
+                <option value="online">Online only</option>
+                <option value="offline">Offline only</option>
+              </select>
+              <select value={uf.seen} onChange={(e) => setUfField('seen', e.target.value)} className="p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-semibold">
+                <option value="all">Any last seen</option>
+                <option value="today">Seen in the last 24 hours</option>
+                <option value="7d">Seen in the last 7 days</option>
+                <option value="30d">Seen in the last 30 days</option>
+                <option value="over30">Not seen for 30+ days</option>
+                <option value="never">Never logged in</option>
+              </select>
+            </div>
+            {usersFiltersOn && (
+              <button
+                type="button"
+                onClick={() => setUf({ search: '', branch: '', role: '', status: 'all', seen: 'all' })}
+                className="text-[11px] font-black text-indigo-600 hover:text-indigo-800 bg-transparent border-0 cursor-pointer p-0"
+              >
+                ✕ Clear filters
+              </button>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
@@ -5101,13 +5165,13 @@ export default function Dashboard({ user, onLogout }) {
                         type="checkbox"
                         title="Select all"
                         checked={
-                          manageableUsersList.filter((u) => u.id !== user?.id && canDeleteUser(u)).length > 0 &&
-                          manageableUsersList
+                          filteredUsersList.filter((u) => u.id !== user?.id && canDeleteUser(u)).length > 0 &&
+                          filteredUsersList
                             .filter((u) => u.id !== user?.id && canDeleteUser(u))
                             .every((u) => selectedUserIds.has(u.id))
                         }
                         onChange={(e) => {
-                          const deletableIds = manageableUsersList
+                          const deletableIds = filteredUsersList
                             .filter((u) => u.id !== user?.id && canDeleteUser(u))
                             .map((u) => u.id);
                           setSelectedUserIds(e.target.checked ? new Set(deletableIds) : new Set());
@@ -5145,7 +5209,7 @@ export default function Dashboard({ user, onLogout }) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-xs font-medium">
-                  {[...manageableUsersList]
+                  {[...filteredUsersList]
                     .sort((a, b) => {
                       if (!userSortField) return 0;
                       if (userSortField === 'status') {
