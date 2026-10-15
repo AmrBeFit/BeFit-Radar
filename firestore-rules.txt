@@ -1,0 +1,798 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------
+    // IMPORTANT: there is deliberately NO catch-all "match /{document=**}" here.
+    // In Firestore, if several rules match the same document, ANY one of them being
+    // true allows the request - so a catch-all would cancel every restriction below.
+    // A collection that is not listed in this file is denied to everyone
+    // (that is what protects the leftover legacy "Users" collection).
+    // ------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // A person who registered a Firebase Auth account on their own (sign-up through the public
+    // API key) is "signed in" but has NO role claim - only the Cloud Functions and the migration
+    // script can set one. Every data rule below therefore requires a role claim, not just a login.
+    function isStaff() {
+      return isSignedIn() && request.auth.token.get('role', '') != '';
+    }
+
+    // The role comes from the Firebase Auth custom claim set by the Cloud Functions
+    // (and by the migration script), not from anything a user can edit themselves.
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.get('role', '').lower() == 'admin';
+    }
+
+    function isOwner(userId) {
+      return isStaff() && request.auth.uid == userId;
+    }
+
+    // Update: Facility Manager / Branch Manager / Supervisor teams are now SHARED - any manager of
+    // that type may edit ANY account of the matching role(s), not just the ones they personally
+    // created (mirrors the app's own manageableUsersList / canDeleteUser logic in Dashboard.jsx).
+    function canManageTargetAccount() {
+      return (myRole() == 'facility manager' && resource.data.get('role', '') == 'Facility Member')
+          || (myRole() == 'branch manager' && resource.data.get('role', '') in ['Supervisor', 'User'])
+          // Coaches / Fitness Managers / QA Members: the System Admin can switch each ability off per account
+          || (realRole() == 'branch manager+' && resource.data.get('role', '') == 'Coach' && notRemoved('manageCoaches'))
+          || (realRole() == 'branch manager+' && resource.data.get('role', '') == 'Fitness Manager' && notRemoved('manageFitnessManagers'))
+          || (realRole() == 'fitness manager' && resource.data.get('role', '') == 'Coach' && notRemoved('manageCoaches'))
+          || (realRole() == 'qa manager' && resource.data.get('role', '') == 'QA' && notRemoved('createQAMembers'))
+          || (myRole() == 'supervisor' && resource.data.get('role', '') == 'User');
+    }
+
+    // Maintenance requests from a plain User / Staff / Supervisor (not Finance and Administration) are only accepted
+    // for the branch where that person is checked in right now. "Right now" = their presence marker
+    // (presence/{uid}, written together with the check-in and deleted at check-out) names the same branch
+    // and the check-in is less than 16 hours old, so a forgotten check-out cannot keep the door open.
+    function mustBeCheckedIn() {
+      return myRole() in ['user', 'staff', 'supervisor'];
+    }
+    function checkedInAt(branch) {
+      return exists(/databases/$(database)/documents/presence/$(request.auth.uid))
+        && get(/databases/$(database)/documents/presence/$(request.auth.uid)).data.branch == branch
+        && request.time < get(/databases/$(database)/documents/presence/$(request.auth.uid)).data.attendanceCheckIn + duration.value(16, 'h');
+    }
+
+    // True when a write changes ONLY the listed fields (and nothing else).
+    function changesOnly(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    // The caller's own profile document: needed to know THEIR username and assigned branches
+    // (an attendance record is matched to its owner by username).
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // Per-account permissions: the role gives the default, and Admin can override it for one account
+    // (users/{id}.permissions = { key: true|false }, writable only by Admin - see the users rule).
+    // Only keys that are safe to GRANT to any role are checked through this (see permissions.js).
+    // The whole account TYPE can be changed too (rolePermissions/{role}.permissions): account setting > type setting > built-in default.
+    function rolePerms() {
+      let p = /databases/$(database)/documents/rolePermissions/$(request.auth.token.get('role', ''));
+      return exists(p) ? get(p).data.get('permissions', {}) : {};
+    }
+    function hasPerm(key, roleDefault) {
+      return isAdmin() || myProfile().get('permissions', {}).get(key, rolePerms().get(key, roleDefault)) == true;
+    }
+    // For abilities that can only be switched OFF (account management): true unless the account or its type has it removed.
+    function notRemoved(key) {
+      return myProfile().get('permissions', {}).get(key, rolePerms().get(key, true)) == true;
+    }
+
+    // The caller's own role and branches, read once per request (not once per document).
+    // New account types behave like an existing role in every rule below, EXCEPT where realRole() is used
+    // (managing accounts): Branch Manager+ acts as Branch Manager, QA Manager as QA, Coach and Fitness Manager as User.
+    function realRole() {
+      return request.auth.token.get('role', '').lower();
+    }
+    function myRole() {
+      return realRole() == 'branch manager+' ? 'branch manager'
+           : realRole() == 'qa manager' ? 'qa'
+           : realRole() == 'coach' ? 'user'
+           : realRole() == 'fitness manager' ? 'user'
+           : realRole();
+    }
+    function myBranches() {
+      return myProfile().get('assignedBranches', []);
+    }
+    function isUserRole() {
+      return myRole() == 'user' || myRole() == 'staff';
+    }
+
+    // Mirrors the app: only Admin and Facility Manager may check in at any branch; everyone
+    // else only at the branches assigned to them (no assigned branches = not restricted).
+    function branchAllowed(branch) {
+      return isAdmin()
+        || request.auth.token.get('role', '').lower() == 'facility manager'
+        || myProfile().get('assignedBranches', []).size() == 0
+        || branch in myProfile().get('assignedBranches', []);
+    }
+
+    // --------------------------------------------------------------
+    // usernameIndex: lets the login screen turn a typed username into the
+    // email Firebase Auth needs, BEFORE the person is signed in. It contains
+    // only { email }. Single lookups are public, listing is not, and only the
+    // Cloud Functions (Admin SDK) can write to it.
+    // --------------------------------------------------------------
+    match /usernameIndex/{username} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // --------------------------------------------------------------
+    // users
+    //  - any signed-in account can read the directory (the app needs it everywhere)
+    //  - accounts are created/deleted ONLY through Cloud Functions
+    //  - passwords never live here anymore
+    //  - updates are limited by who is writing:
+    //      Admin ............ any field
+    //      the account owner  presence/device info, force-logout reset,
+    //                         "must change password" flag, push tokens
+    //      a shared-team manager (Facility Manager / Branch Manager / Supervisor)
+    //                         phone, assigned branches, force-logout - for ANY account
+    //                         of the role(s) they manage, not just ones they created
+    // --------------------------------------------------------------
+    match /users/{userId} {
+      allow read: if isStaff();
+
+      allow update: if isStaff()
+        && !('password' in request.resource.data)
+        && (
+          isAdmin()
+          || (isOwner(userId) && changesOnly([
+               'isOnline', 'lastActive', 'lastDeviceId', 'lastDeviceType',
+               'lastBrowser', 'lastOS', 'lastUserAgent',
+               'forceLogout', 'mustChangePassword', 'fcmTokens'
+             ]))
+          || (canManageTargetAccount() && changesOnly(['assignedBranches', 'forceLogout']))
+        );
+
+      allow create: if false;
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------------
+    // userPrivate/{uid}: the account's phone number, kept OUT of the users directory so ordinary
+    // staff cannot read each other's numbers.
+    //  - read:  Admin, the account itself, Facility/Branch Manager, Supervisor, and anyone granted
+    //           the "manage requests" permission (they need the number to assign work)
+    //  - write: Admin, or a shared-team manager for an account of a role they manage
+    //           (accounts are created/deleted by Cloud Functions, which write this document too)
+    // --------------------------------------------------------------
+    match /userPrivate/{uid} {
+      function managesAccount() {
+        let targetRole = get(/databases/$(database)/documents/users/$(uid)).data.get('role', '');
+        return (myRole() == 'facility manager' && targetRole == 'Facility Member')
+            || (myRole() == 'branch manager' && targetRole in ['Supervisor', 'User'])
+            || (realRole() == 'branch manager+' && targetRole == 'Coach' && notRemoved('manageCoaches'))
+            || (realRole() == 'branch manager+' && targetRole == 'Fitness Manager' && notRemoved('manageFitnessManagers'))
+            || (realRole() == 'fitness manager' && targetRole == 'Coach' && notRemoved('manageCoaches'))
+            || (realRole() == 'qa manager' && targetRole == 'QA' && notRemoved('createQAMembers'))
+            || (myRole() == 'supervisor' && targetRole == 'User');
+      }
+
+      allow read: if isStaff() && (
+        isOwner(uid)
+        || isAdmin()
+        || myRole() in ['facility manager', 'branch manager', 'supervisor']
+        || realRole() == 'qa manager'
+        || realRole() == 'fitness manager'
+        || hasPerm('manageRequestStatus', false)
+      );
+
+      allow create, update: if isStaff()
+        && request.resource.data.keys().hasOnly(['phone'])
+        && request.resource.data.phone is string
+        && request.resource.data.phone.size() <= 11
+        && (isAdmin() || managesAccount());
+
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------------
+    // deviceLogs: every login writes one entry about itself; only Admin can read or clear them.
+    // --------------------------------------------------------------
+    match /deviceLogs/{logId} {
+      allow create: if isStaff() && request.resource.data.userId == request.auth.uid;
+      allow read, delete: if isAdmin();
+    }
+
+    // --------------------------------------------------------------
+    // Towel management
+    // --------------------------------------------------------------
+    match /towelSettings/{docId} {
+      allow read: if isStaff();
+      // Update: Admin or Facility Manager can set both the towel pricing/rates (docId "pricing")
+      // and which branches have a towel service (docId "branches").
+      allow write: if isAdmin()
+        || (isStaff() && myRole() == 'facility manager');
+    }
+
+    match /towelTransactions/{txId} {
+      allow read: if isStaff();
+      // Create: the exact fields the Towels screen writes, whole-number counts only.
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly([
+             'branch', 'type', 'smallCount', 'largeCount', 'smallLost', 'largeLost',
+             'smallDamaged', 'largeDamaged', 'notes', 'documentImage', 'addedBy', 'createdAt'
+           ])
+        && request.resource.data.type in ['SUPPLIER', 'LAUNDRY_OUT', 'LAUNDRY_IN']
+        && request.resource.data.branch is string && request.resource.data.branch.size() > 0
+        && request.resource.data.addedBy is string && request.resource.data.addedBy.size() > 0
+        && request.resource.data.smallCount is int && request.resource.data.largeCount is int
+        && request.resource.data.smallCount >= 0 && request.resource.data.largeCount >= 0
+        && request.resource.data.smallLost is int && request.resource.data.largeLost is int
+        && request.resource.data.smallDamaged is int && request.resource.data.largeDamaged is int;
+      allow update, delete: if isAdmin();
+    }
+
+    // --------------------------------------------------------------
+    // Branches and categories: everyone reads, only Admin changes.
+    // Exception: a Branch Manager or Supervisor may set the working hours (openTime / closeTime) of the
+    // branches assigned to them - and nothing else on the branch document.
+    // --------------------------------------------------------------
+    match /branches/{branchId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+      allow update: if isStaff()
+        && myRole() in ['branch manager', 'supervisor']
+        && resource.data.name in myBranches()
+        && changesOnly(['openTime', 'closeTime'])
+        && request.resource.data.openTime is string
+        && request.resource.data.closeTime is string
+        && request.resource.data.openTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && request.resource.data.closeTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
+    }
+
+    match /categories/{categoryId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    // --------------------------------------------------------------
+    // Operational data. Signed-in accounts can read/create/update (the app filters
+    // what each role sees on screen); only Admin can delete.
+    // --------------------------------------------------------------
+    // Update: only Admin and Facility Manager may ever CHANGE a request (status, who is assigned, archiving) -
+    // this is the same rule the app's own buttons already enforce, now applied on the server too, so it can no
+    // longer be bypassed by writing to Firestore directly (e.g. from the browser console).
+    // Update: "read" is now scoped exactly like the app's own query (see buildRequestsQuery in Dashboard.jsx):
+    //   User/Staff        -> only requests they created themselves
+    //   Admin / CEO       -> every request
+    //   everyone else     -> only their own branches, or everything if they have no branches assigned
+    //                        (Supervisor, Branch Manager, Facility Manager, HR - matches the app's existing rule)
+    // This closes the console-read hole: an account can no longer list requests outside this scope by
+    // querying Firestore directly, because the query itself must match one of these shapes or Firestore
+    // rejects the whole request.
+    match /requests/{requestId} {
+      allow read: if isStaff() && (
+        myRole() == 'admin' || myRole() == 'ceo' || hasPerm('viewAllRequests', false) ||
+        (isUserRole() && resource.data.createdBy == myProfile().username) ||
+        (!isUserRole() && (myBranches().size() == 0 || resource.data.branch in myBranches()))
+      );
+      // Create: exactly the fields the app's form sets, always starting as "New", in the creator's own name and
+      // with the server's clock - so a request cannot be born "Completed", back-dated, or filed under someone
+      // else's name. People who must be checked in (see mustBeCheckedIn) need a presence marker at that branch.
+      // The second shape is the urgent "Summon" call, which only Admin and the CEO can send.
+      allow create: if isStaff() && (
+        (
+          request.resource.data.keys().hasOnly(['title', 'description', 'branch', 'category', 'imageUrl', 'status', 'isArchived', 'createdBy', 'createdAt'])
+          && request.resource.data.keys().hasAll(['title', 'branch', 'status', 'createdBy', 'createdAt'])
+          && request.resource.data.title is string && request.resource.data.title.size() > 0 && request.resource.data.title.size() <= 300
+          && request.resource.data.branch is string && request.resource.data.branch.size() > 0
+          && request.resource.data.status == 'New'
+          && request.resource.data.get('isArchived', false) == false
+          && request.resource.data.createdBy == myProfile().username
+          && request.resource.data.createdAt == request.time
+          && (!mustBeCheckedIn() || checkedInAt(request.resource.data.branch))
+        )
+        || (
+          (isAdmin() || myRole() == 'ceo')
+          && request.resource.data.keys().hasOnly(['title', 'details', 'targetBranch', 'createdByRole', 'senderName', 'type', 'status', 'createdAt'])
+          && request.resource.data.type == 'SUMMON'
+          && request.resource.data.targetBranch is string && request.resource.data.targetBranch.size() > 0
+        )
+      );
+      // Update: only Admin and Facility Manager may change status/assignment/archiving; the Action
+      // Taken / Notes boxes are separate, narrower writes (see below).
+      allow update: if isStaff() && (
+        isAdmin()
+        || hasPerm('manageRequestStatus', myRole() == 'facility manager')
+        // "Action Taken" - only the Facility Member this request is assigned to may write it.
+        || (changesOnly(['actionTaken', 'actionTakenBy', 'actionTakenAt'])
+            && resource.data.get('assignedTo', '') == myProfile().username)
+        // "Notes" - Facility Manager only (Admin already covered above).
+        || (changesOnly(['notes', 'notesBy', 'notesAt']) && hasPerm('editNotes', myRole() == 'facility manager'))
+        // "Category" - Admin and Facility Manager (or anyone granted it) may fix a wrongly chosen category.
+        || (changesOnly(['category'])
+            && request.resource.data.category is string && request.resource.data.category.size() > 0
+            && hasPerm('editRequestCategory', myRole() == 'facility manager'))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --------------------------------------------------------------
+    // attendance: the record's owner is the person whose username is on it.
+    //  - check-in:  you can only create a record for YOURSELF, at a branch you are allowed to
+    //               use, still open (no check-out), with the time set by the server
+    //  - check-out: only the owner, only while the record is still open, only the check-out
+    //               fields, with the time set by the server - so nobody can rewrite their own
+    //               (or anyone else's) times afterwards
+    //  - archive / any other edit / delete: Admin only
+    // Everyone signed in can still READ (the app filters what each role sees on screen).
+    // --------------------------------------------------------------
+    match /attendance/{recordId} {
+      // Update: "read" is now scoped exactly like the app's own query (see buildAttendanceQuery in Dashboard.jsx):
+      //   Admin / CEO / HR             -> every record
+      //   Branch Manager / Supervisor  -> their own branches, or just their own record if they have none
+      //   everyone else                -> only their own record (User/Staff, Facility Manager, Facility Member)
+      allow read: if isStaff() && (
+        myRole() == 'admin' || myRole() == 'ceo' || myRole() == 'hr' ||
+        (
+          (myRole() == 'branch manager' || myRole() == 'supervisor') &&
+          (
+            (myBranches().size() > 0 && resource.data.branch in myBranches()) ||
+            (myBranches().size() == 0 && resource.data.username == myProfile().username)
+          )
+        ) ||
+        (
+          myRole() != 'admin' && myRole() != 'ceo' && myRole() != 'hr' &&
+          myRole() != 'branch manager' && myRole() != 'supervisor' &&
+          resource.data.username == myProfile().username
+        )
+      );
+
+      allow create: if isStaff()
+        && myRole() != 'ceo'
+        && request.resource.data.keys().hasOnly([
+             'username', 'branch', 'dateStr', 'checkInTime',
+             'checkInLat', 'checkInLng', 'checkInAccuracy',
+             'checkOutTime', 'photosPrivate', 'isArchived', 'status'
+           ])
+        // The selfie is never stored on this (widely readable) record - see attendancePhotos below.
+        && request.resource.data.get('photosPrivate', false) == true
+        && request.resource.data.username == myProfile().username
+        && request.resource.data.checkInTime == request.time
+        && request.resource.data.get('checkOutTime', null) == null
+        && request.resource.data.get('isArchived', false) == false
+        && request.resource.data.status == 'Checked In'
+        && branchAllowed(request.resource.data.branch);
+
+      allow update: if isAdmin()
+        || (isStaff()
+            && resource.data.username == myProfile().username
+            && resource.data.get('checkOutTime', null) == null
+            && changesOnly(['checkOutTime', 'checkOutLat', 'checkOutLng', 'checkOutAccuracy', 'status'])
+            && request.resource.data.checkOutTime == request.time
+            && request.resource.data.status == 'Completed');
+
+      allow delete: if isAdmin();
+
+      // ------------------------------------------------------------
+      // The check-in / check-out SELFIES. They live in this separate document, not on the attendance
+      // record above, because the record is readable by every signed-in account while a photo of
+      // someone's face must only be seen by HR, Admin and the Branch Managers of that branch - and only
+      // when really necessary. There is deliberately NO list permission: a photo can only be opened by
+      // asking for that one record's photo, never browsed in bulk.
+      //  - get    : Admin, HR, or a Branch Manager whose assigned branches include the record's branch
+      //  - create : only the record's owner, once, together with their own check-in (batch)
+      //  - update : only the owner, only to add the check-out photo, only while it is still empty
+      //  - delete : Admin (the automatic 30-day cleanup runs with the Admin SDK and bypasses rules)
+      // ------------------------------------------------------------
+      match /attendancePhotos/{photoId} {
+        allow get: if isStaff() && photoId == 'photos' && (
+          myRole() == 'admin' || myRole() == 'hr' ||
+          (myRole() == 'branch manager' && resource.data.branch in myBranches())
+        );
+        allow list: if false;
+
+        allow create: if isStaff() && photoId == 'photos'
+          && request.resource.data.keys().hasOnly(['attendanceId', 'username', 'branch', 'checkInPhoto', 'checkOutPhoto', 'createdAt'])
+          && request.resource.data.attendanceId == recordId
+          && request.resource.data.username == myProfile().username
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.get('checkInPhoto', '') is string
+          && getAfter(/databases/$(database)/documents/attendance/$(recordId)).data.username == myProfile().username
+          && getAfter(/databases/$(database)/documents/attendance/$(recordId)).data.branch == request.resource.data.branch;
+
+        allow update: if isStaff() && photoId == 'photos'
+          && resource.data.username == myProfile().username
+          && resource.data.get('checkOutPhoto', null) == null
+          && changesOnly(['checkOutPhoto']);
+
+        allow delete: if isAdmin();
+      }
+    }
+
+    // --------------------------------------------------------------
+    // presence/{uid}: "this person is checked in at this branch". One small document per account, written in
+    // the SAME batch as the check-in (it must mirror that attendance record exactly: same person, same
+    // branch, same check-in time, still open) and deleted in the same batch as the check-out. The
+    // maintenance-request rule above reads it. Nobody can invent a presence for a branch they are not
+    // checked in at, because the rule checks the attendance record it points to.
+    // --------------------------------------------------------------
+    match /presence/{uid} {
+      allow read: if isStaff() && (request.auth.uid == uid || isAdmin());
+
+      allow create, update: if isStaff() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['username', 'branch', 'attendanceId', 'attendanceCheckIn'])
+        && request.resource.data.username == myProfile().username
+        && getAfter(/databases/$(database)/documents/attendance/$(request.resource.data.attendanceId)).data.username == myProfile().username
+        && getAfter(/databases/$(database)/documents/attendance/$(request.resource.data.attendanceId)).data.branch == request.resource.data.branch
+        && getAfter(/databases/$(database)/documents/attendance/$(request.resource.data.attendanceId)).data.checkInTime == request.resource.data.attendanceCheckIn
+        && getAfter(/databases/$(database)/documents/attendance/$(request.resource.data.attendanceId)).data.get('checkOutTime', null) == null;
+
+      allow delete: if isStaff() && (request.auth.uid == uid || isAdmin());
+    }
+
+    // --------------------------------------------------------------
+    // locationViolations: a log of blocked Check-In/Check-Out attempts - either the employee denied
+    // location access, or they were physically outside the branch's allowed GPS radius. Written by the
+    // app itself right when it blocks the attempt (client-side, best-effort), read by the same people
+    // who can see attendance reports for that person/branch.
+    //  - read   : same scoping as /attendance/{recordId} above
+    //  - create : only for yourself, and only the exact fields the app writes
+    //  - update : nobody - these are an immutable log
+    //  - delete : Admin only (housekeeping)
+    // --------------------------------------------------------------
+    match /locationViolations/{violationId} {
+      allow read: if isStaff() && (
+        myRole() == 'admin' || myRole() == 'ceo' || myRole() == 'hr' ||
+        (
+          (myRole() == 'branch manager' || myRole() == 'supervisor') &&
+          (
+            (myBranches().size() > 0 && resource.data.branch in myBranches()) ||
+            (myBranches().size() == 0 && resource.data.username == myProfile().username)
+          )
+        ) ||
+        (
+          myRole() != 'admin' && myRole() != 'ceo' && myRole() != 'hr' &&
+          myRole() != 'branch manager' && myRole() != 'supervisor' &&
+          resource.data.username == myProfile().username
+        )
+      );
+
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly([
+             'username', 'mode', 'branch', 'reason',
+             'distance', 'allowedRadius', 'lat', 'lng', 'accuracy', 'createdAt'
+           ])
+        && request.resource.data.username == myProfile().username
+        && request.resource.data.mode in ['checkin', 'checkout']
+        && request.resource.data.reason in ['denied', 'unavailable', 'out_of_range']
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // --------------------------------------------------------------
+    // attendancePlans: the roster - who is planned to be where, and when.
+    //  - read   : Admin, CEO, HR, Branch Manager and Supervisor read the roster (the app narrows it to what
+    //             each of them should see); every other account can only read its own shifts
+    //  - create : nobody directly. Shifts are created by the createAttendancePlans Cloud Function, which
+    //             checks the hierarchy (Admin > Branch Manager > Supervisor > User), the planner's branches
+    //             and the one-month limit
+    //  - update : the planner who created the shift (or Admin) may change only its branch and hours,
+    //             and only to a branch the planner is assigned to
+    //  - delete : the planner who created the shift, or Admin
+    // --------------------------------------------------------------
+    match /attendancePlans/{planId} {
+      allow read: if isStaff() && (
+        isAdmin()
+        || myRole() in ['ceo', 'hr', 'branch manager', 'supervisor']
+        || resource.data.userId == request.auth.uid
+      );
+
+      allow create: if false;
+
+      allow update: if isStaff()
+        && (isAdmin() || resource.data.createdBy == request.auth.uid)
+        && changesOnly(['branch', 'startTime', 'endTime'])
+        && request.resource.data.startTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && request.resource.data.endTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && request.resource.data.endTime > request.resource.data.startTime
+        && (isAdmin() || request.resource.data.branch in myProfile().get('assignedBranches', []));
+
+      allow delete: if isStaff() && (isAdmin() || resource.data.createdBy == request.auth.uid);
+    }
+
+    // --------------------------------------------------------------
+    // integrityReports: reports of wrongdoing/theft/corruption etc.
+    // The reporter's identity is NOT anonymous to Admin, but it IS hidden from HR - by the user's
+    // explicit choice. That can only be a real guarantee (not just something the app's UI chooses
+    // not to show) if the identity never lives on a document HR's role is allowed to read at all -
+    // so it is split into two documents:
+    //   - integrityReports/{reportId}            - the report's CONTENT (title, description, branch,
+    //     reportedAgainst, photoUrl, status). No reporter identity field exists here at all, so
+    //     there is nothing for HR's broad "read every report" rule below to ever expose.
+    //   - integrityReports/{reportId}/private/reporter - the reporter's uid/username/role, in a
+    //     SEPARATE document whose own read rule allows only Admin or that exact reporter - HR is
+    //     never in that list, full stop.
+    // The main doc's own read rule lets the reporter read their OWN report's content back (for "My
+    // reports") via get() on the private subdocument - get()/exists() run with the rules engine's
+    // own access, not the caller's, so this does not require giving the reporter (or anyone else)
+    // direct read access to the private subdocument through this path.
+    //  - read   : Admin and HR can read every report's content; the reporter can read their own
+    //             report's content too (checked against the private subdocument, never a field on
+    //             this doc itself)
+    //  - create : any signed-in staff account may create the content doc, always starting as "New",
+    //             with a mandatory branch and no field the app doesn't set (no reporter identity
+    //             field belongs here - it goes in the private subdocument instead)
+    //  - update : status changes only, and only by Admin (per the user's explicit choice) -
+    //             HR can read reports but cannot change their status
+    //  - delete : Admin only
+    // --------------------------------------------------------------
+    match /integrityReports/{reportId} {
+      allow read: if isStaff() && (
+        myRole() == 'admin' || hasPerm('reviewIntegrity', myRole() == 'hr') ||
+        (
+          exists(/databases/$(database)/documents/integrityReports/$(reportId)/private/reporter) &&
+          get(/databases/$(database)/documents/integrityReports/$(reportId)/private/reporter).data.reporterUid == request.auth.uid
+        )
+      );
+
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly([
+             'title', 'description', 'branch', 'reportedAgainst', 'photoUrl', 'status', 'createdAt'
+           ])
+        && request.resource.data.title is string && request.resource.data.title.size() > 0
+        && request.resource.data.description is string && request.resource.data.description.size() > 0
+        && request.resource.data.branch is string && request.resource.data.branch.size() > 0
+        && request.resource.data.get('reportedAgainst', []) is list
+        && request.resource.data.status == 'New'
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if isAdmin()
+        && changesOnly(['status', 'statusUpdatedAt', 'statusUpdatedBy'])
+        && request.resource.data.status in ['New', 'Under Review', 'Resolved', 'Dismissed']
+        && request.resource.data.statusUpdatedAt == request.time;
+
+      allow delete: if isAdmin();
+
+      // The reporter's identity, split out from the content doc above specifically so HR's "read
+      // every report" rule up there can never see it - HR is deliberately not in this allow list.
+      // Only Admin, or the exact account that filed it, may read this subdocument directly; the
+      // reporter also needs direct read here for the "My reports" collection-group query to work
+      // (the get()-based check above only covers reading the CONTENT doc, not this one).
+      match /private/reporter {
+        allow read: if isStaff() && (myRole() == 'admin' || resource.data.reporterUid == request.auth.uid);
+
+        allow create: if isStaff()
+          && request.resource.data.keys().hasOnly(['reporterUid', 'reporterUsername', 'reporterRole', 'createdAt'])
+          && request.resource.data.reporterUid == request.auth.uid
+          && request.resource.data.reporterUsername == myProfile().username
+          && request.resource.data.createdAt == request.time;
+
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+    }
+
+    // "My reports" asks Firestore for every `private` document whose reporterUid is the signed-in account
+    // (a collection-group query). Those queries are NOT covered by the nested rule above, they need this
+    // one: the reporter sees only their own marker, Admin sees all, nobody else can read any.
+    match /{path=**}/private/{docId} {
+      allow read: if isStaff() && (myRole() == 'admin' || resource.data.reporterUid == request.auth.uid);
+    }
+
+    // --------------------------------------------------------------
+    // Audit log: every create/update/delete across the app's main collections, written only by
+    // Cloud Functions (the Admin SDK bypasses these rules entirely) - a client, including an Admin
+    // one, can never write or alter an entry directly, only read it. That's what keeps it honest as
+    // a record: nobody in the app itself has a path to edit or erase what it says happened.
+    // Only Admin can read it; everyone else - including HR - has no visibility into it at all.
+    match /auditLog/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // --------------------------------------------------------------
+    // Branch checklist (the paper "Daily Checklist" clipboard, digitized).
+    //  - branchChecklistConfig/config: the one shared item list + operating hours - Admin only writes it,
+    //    everyone reads it (needed to render the grid).
+    //  - branchChecklists/{branch}_{date}: one document per branch per day. Ticking an item only ever
+    //    touches the `checks` field (never any other field on the doc); signing the day off only ever
+    //    touches the sign-off fields, and only Admin, Branch Manager or Supervisor can do that - matches
+    //    the app's own gating (canSignOff), enforced here too so it cannot be bypassed from the console.
+    //    Note: this collection is intentionally less strictly scoped than requests/attendance - a
+    //    checklist tick carries no personal or financial data, so any signed-in staff member reading or
+    //    ticking any branch's sheet is an acceptable trade-off for keeping this simple.
+    // --------------------------------------------------------------
+    match /branchChecklistConfig/{docId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    match /branchChecklists/{docId} {
+      allow read: if isStaff();
+
+      // Create (the first tick or sign-off of a day makes the sheet): only the fields the app writes, in the
+      // caller's own name and with the server clock, only for a branch the caller works at, and a sign-off
+      // only by someone allowed to sign off - so nobody can pre-create a day's sheet already "signed".
+      allow create: if isStaff()
+        && hasPerm('tickChecklist', realRole() != 'fitness manager')
+        && request.resource.data.keys().hasOnly(['branch', 'dateStr', 'checks', 'lastUpdatedBy', 'lastUpdatedAt', 'signedOffBy', 'signedOffRole', 'signedOffAt'])
+        && request.resource.data.keys().hasAll(['branch', 'dateStr'])
+        && request.resource.data.branch is string && request.resource.data.dateStr is string
+        && branchAllowed(request.resource.data.branch)
+        && request.resource.data.get('lastUpdatedBy', myProfile().username) == myProfile().username
+        && request.resource.data.get('lastUpdatedAt', request.time) == request.time
+        && (
+          !request.resource.data.keys().hasAny(['signedOffBy', 'signedOffRole', 'signedOffAt'])
+          || (
+            hasPerm('signOffChecklist', myRole() in ['branch manager', 'supervisor'])
+            && request.resource.data.get('signedOffBy', myProfile().username) == myProfile().username
+            && request.resource.data.get('signedOffAt', request.time) == request.time
+          )
+        );
+
+      allow update: if isStaff() && (
+        // Ticking cells: frozen once the day is signed off (only Admin may still edit it). Only at a branch the
+        // caller works at; stamped with the caller's own name and the server clock; and no existing cell can be
+        // removed (a tick can change a cell, never wipe the sheet).
+        (changesOnly(['checks', 'lastUpdatedBy', 'lastUpdatedAt'])
+          && hasPerm('tickChecklist', realRole() != 'fitness manager') // a Fitness Manager only looks at the checklist
+          && branchAllowed(resource.data.branch)
+          && request.resource.data.lastUpdatedBy == myProfile().username
+          && request.resource.data.lastUpdatedAt == request.time
+          && request.resource.data.checks.keys().hasAll(resource.data.get('checks', {}).keys())
+          && (isAdmin() || !('signedOffBy' in resource.data) || resource.data.signedOffBy == null))
+        || (
+          hasPerm('signOffChecklist', myRole() in ['branch manager', 'supervisor'])
+          && changesOnly(['signedOffBy', 'signedOffRole', 'signedOffAt'])
+          && request.resource.data.signedOffBy == myProfile().username
+          && request.resource.data.signedOffAt == request.time
+          && (isAdmin() || !('signedOffBy' in resource.data) || resource.data.signedOffBy == null)
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /ceo_requests/{requestId} {
+      allow read: if isStaff();
+      // Create: only the CEO or Admin, only the fields the CEO Services form writes, starting as "Pending".
+      allow create: if isStaff() && (isAdmin() || myRole() == 'ceo')
+        && request.resource.data.keys().hasOnly(['serviceType', 'itemDetails', 'targetBranch', 'status', 'isArchived', 'createdBy', 'createdAt'])
+        && request.resource.data.status == 'Pending'
+        && request.resource.data.get('isArchived', false) == false
+        && request.resource.data.createdBy == myProfile().username
+        && request.resource.data.createdAt == request.time;
+      // Update: (1) whoever is at the branch marks it Completed (status + who + when, nothing else);
+      //         (2) Admin archives / unarchives it.
+      allow update: if isStaff() && (
+        (changesOnly(['status', 'handledBy', 'updatedAt'])
+          && request.resource.data.status == 'Completed'
+          && request.resource.data.handledBy == myProfile().username
+          && request.resource.data.updatedAt == request.time)
+        || (isAdmin() && changesOnly(['isArchived']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --------------------------------------------------------------
+    // leaveRequests: an account requests time off; a manager approves/rejects it.
+    //  - read   : any signed-in staff account (the app itself narrows what each role sees:
+    //             everyone sees their own requests, and Admin/CEO/HR/Branch Manager/Supervisor
+    //             additionally see the ones awaiting their review)
+    //  - create : only for yourself, always starting as "Pending", server-set createdAt
+    //  - update : Admin, HR or the requester's Branch Manager approving/rejecting it,
+    //             and only the decision fields - never the dates or reason;
+    //             OR Admin archiving/unarchiving it (a separate, narrower set of fields)
+    //  - delete : Admin, or the requester themselves cancelling their own still-Pending request
+    // --------------------------------------------------------------
+    match /leaveRequests/{requestId} {
+      // Read: your own requests, or - for Admin and whoever may review/see the queue - everyone's.
+      allow read: if isStaff() && (
+        resource.data.username == myProfile().username
+        || isAdmin()
+        || hasPerm('viewLeaveQueue', myRole() in ['hr', 'branch manager', 'supervisor'])
+        || hasPerm('approveLeave', myRole() in ['hr', 'branch manager'])
+        || hasPerm('preApproveLeave', realRole() == 'fitness manager')
+      );
+
+      // Today's date as YYYY-MM-DD in UTC (the rules clock). Egypt is ahead of UTC, so this is never later than
+      // the real local date: it blocks old dates without ever rejecting a valid one (the app itself checks the
+      // exact local date).
+      function utcToday() {
+        return string(request.time.year()) + '-'
+          + (request.time.month() < 10 ? '0' : '') + string(request.time.month()) + '-'
+          + (request.time.day() < 10 ? '0' : '') + string(request.time.day());
+      }
+
+      // The leave is for ONE branch: it must be one of the requester's assigned branches (or any branch when the
+      // account has none), and that branch alone is stored in assignedBranches so only its manager reviews it.
+      // Leave requests are now created ONLY by the createLeaveRequest Cloud Function (it enforces the yearly leave
+      // balance, which the browser must never see or be able to skip).
+      allow create: if false;
+
+      allow update: if isStaff()
+        && (
+          // Only Admin, HR, or the Branch Manager of the requester's branch may decide a leave.
+          ((isAdmin()
+              || (hasPerm('approveLeave', myRole() in ['hr', 'branch manager'])
+                  && (myRole() == 'hr'
+                      || resource.data.assignedBranches.hasAny(myProfile().get('assignedBranches', [])))))
+            && changesOnly(['status', 'reviewedBy', 'reviewedAt'])
+            && request.resource.data.status in ['Approved', 'Rejected'])
+          || (isAdmin() && changesOnly(['isArchived', 'archivedBy', 'archivedAt']))
+          // A Fitness Manager approves or rejects a COACH's leave at their own branch - a FINAL decision, no Branch Manager needed
+          // (the Branch Manager / Branch Manager+ may still decide it too). Old 'Pre-approved' / 'Pre-rejected' leaves can be decided as well.
+          || (hasPerm('preApproveLeave', realRole() == 'fitness manager')
+              && resource.data.status in ['Pending', 'Pre-approved', 'Pre-rejected']
+              && resource.data.assignedBranches.hasAny(myProfile().get('assignedBranches', []))
+              && get(/databases/$(database)/documents/users/$(resource.data.createdById)).data.get('role', '') == 'Coach'
+              && changesOnly(['status', 'reviewedBy', 'reviewedAt'])
+              && request.resource.data.status in ['Approved', 'Rejected']
+              && request.resource.data.reviewedAt == request.time)
+        );
+
+      allow delete: if isAdmin()
+        || (isStaff() && resource.data.username == myProfile().username && resource.data.status == 'Pending');
+    }
+
+    // --------------------------------------------------------------
+    // Outsource maintenance: an outside technician who must be escorted at a branch.
+    //  outsourceAreas   : the places inside a branch (Settings). Everyone reads; only Admin changes.
+    //  outsourceVisits  : read  - Admin, CEO, QA, Facility Manager / Members read everything; the person who made a
+    //                             request reads their own; Users / Supervisors / Branch Managers read the requests of
+    //                             the branches assigned to them (the page asks for exactly these shapes).
+    //                     write - nobody from the browser: requests are created and decided ONLY by the
+    //                             createOutsourceRequest / respondOutsourceRequest Cloud Functions, which check the
+    //                             roles, the check-in at the branch and the two-approval rule.
+    //  outsourcePrivate : the technician's national ID number + photo. Readable only by the requester, the escort,
+    //                     the Branch Manager / Supervisor of that branch, the Facility Manager and Admin.
+    //                     Never written from the browser.
+    // --------------------------------------------------------------
+    // Settings of a whole account type - everyone signed in reads their own type, only Admin writes.
+    match /rolePermissions/{roleId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    match /outsourceAreas/{areaId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    match /outsourceVisits/{requestId} {
+      allow read: if isStaff() && (
+        isAdmin()
+        || myRole() in ['ceo', 'qa', 'facility manager', 'facility member']
+        || resource.data.createdByUid == request.auth.uid
+        || (myRole() in ['user', 'staff', 'supervisor', 'branch manager'] && resource.data.branch in myBranches())
+      );
+      allow write: if false;
+    }
+
+    match /outsourcePrivate/{requestId} {
+      allow read: if isStaff() && (
+        isAdmin()
+        || myRole() == 'facility manager'
+        || resource.data.createdByUid == request.auth.uid
+        || resource.data.escortUid == request.auth.uid
+        || (myRole() in ['supervisor', 'branch manager'] && resource.data.branch in myBranches())
+      );
+      allow write: if false;
+    }
+
+    match /logs/{logId} {
+      allow read: if isStaff();
+      // The activity log is written once, in the actor's own name with the server clock, and never edited.
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly(['type', 'title', 'fromStatus', 'toStatus', 'assignedTo', 'performedBy', 'timestamp'])
+        && request.resource.data.type == 'STATUS_CHANGE'
+        && request.resource.data.performedBy == myProfile().username
+        && request.resource.data.timestamp == request.time;
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+  }
+}

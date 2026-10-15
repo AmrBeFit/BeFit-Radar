@@ -15,6 +15,11 @@ firebase.initializeApp({
   appId: "1:518274931931:web:f8c701d4ef744c2fee80fe"
 });
 
+// Take over immediately when a new version of this file is deployed, so devices never keep running an old
+// copy of the notification code.
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+
 const messaging = firebase.messaging();
 
 // Fires when a push arrives while the browser/tab is closed or in the background.
@@ -35,22 +40,30 @@ messaging.onBackgroundMessage((payload) => {
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     requireInteraction: true,
-    vibrate: [500, 200, 500, 200, 500],
+    silent: false,
+    vibrate: payload.data?.urgent === '1' ? [800, 200, 800, 200, 800, 200, 800] : [500, 200, 500, 200, 500],
+    timestamp: Date.now(),
     tag,
     renotify: true,
     data: payload.data || {}
   });
 });
 
-// Clicking the notification focuses/opens the app instead of doing nothing.
+// Clicking the notification opens the app on the screen the push is about (data.tab / data.url),
+// reusing the window that is already open when there is one.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const data = event.notification.data || {};
+  const url = data.url || '/';
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if ('focus' in client) return client.focus();
+        if ('focus' in client) {
+          client.postMessage({ type: 'PUSH_NAVIGATE', tab: data.tab || 'requests', requestId: data.requestId || null });
+          return client.focus();
+        }
       }
-      if (clients.openWindow) return clients.openWindow('/');
+      if (clients.openWindow) return clients.openWindow(url);
     })
   );
 });

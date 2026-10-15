@@ -590,6 +590,8 @@ const pushTabForType = (type) => {
   if (type.startsWith('LEAVE_REQUEST')) return 'attendance';
   if (type === 'EXPECTED_ABSENCE') return 'schedule';
   if (type.startsWith('OUTSOURCE')) return 'outsource';
+  if (type === 'DEDUCTION') return 'attendance';
+  if (type === 'PAYSLIP') return 'payslip';
   return 'requests';
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -2359,4 +2361,605 @@ exports.createLeaveRequest = onCall(async (request) => {
     createdById: request.auth.uid
   });
   return { id: ref.id };
+});
+
+
+/* =====================================================================
+   Salary deductions
+   - collection `deductions` has NO Firestore rule: the browser never reads or writes it, everything goes through these three functions.
+   - giveDeduction permission (Permissions tab, default: System Admin only) lets an account record a deduction from the salary of someone who
+     shares a branch with them (System Admin / HR: anyone). Managers can only deduct from staff-level roles, never from themselves,
+     the CEO, the System Admin, HR or another manager.
+   - viewDeductions permission (default: HR) sees every deduction. Someone who may give deductions sees those of their branches.
+     Everybody sees their OWN deductions.
+   - a deduction is either an AMOUNT in EGP or a number of DAYS of salary (chosen by whoever records it).
+   - a deduction is never deleted: within 24 HOURS of recording it can be cancelled (by the creator, HR or the System Admin); after that only
+     the System Admin can still cancel it. A cancelled deduction stays in the record (status 'Cancelled').
+   ===================================================================== */
+const DEDUCTION_CATEGORIES = ['Late', 'Absence', 'Violation', 'Damage / loss', 'Other'];
+const DEDUCTION_MANAGER_TARGETS = new Set(['Supervisor', 'User', 'Staff', 'Coach', 'Fitness Manager', 'Facility Member', 'QA']);
+
+const loadDeductionCaller = async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const snap = await db.collection('users').doc(request.auth.uid).get();
+  if (!snap.exists) throw new HttpsError('permission-denied', 'Your account could not be found.');
+  const profile = await withRole({ ...snap.data(), role: snap.data().role || request.auth.token.role });
+  const role = normRoleUpper(profile.role);
+  const isFull = role === 'ADMIN' || role === 'HR';
+  return {
+    uid: request.auth.uid, profile, role, isFull,
+    canGive: permAllowed(profile, 'giveDeduction', false),
+    canView: permAllowed(profile, 'viewDeductions', role === 'HR'),
+    branches: Array.isArray(profile.assignedBranches) ? profile.assignedBranches : []
+  };
+};
+
+exports.createDeduction = onCall(async (request) => {
+  const c = await loadDeductionCaller(request);
+  if (!c.canGive) throw new HttpsError('permission-denied', 'You are not allowed to record salary deductions.');
+  const d = request.data || {};
+  const targetUserId = String(d.targetUserId || '');
+  const kind = d.kind === 'days' ? 'days' : 'amount';
+  const value = Math.round(Number(d.value) * 100) / 100;
+  const reason = String(d.reason || '').trim().slice(0, 500);
+  const category = DEDUCTION_CATEGORIES.includes(d.category) ? d.category : 'Other';
+  const date = String(d.date || '').trim();
+  if (!targetUserId) throw new HttpsError('invalid-argument', 'Please choose the employee.');
+  if (kind === 'amount' && (!Number.isFinite(value) || value <= 0 || value > 100000)) throw new HttpsError('invalid-argument', 'Enter a valid amount (more than 0, up to 100000 EGP).');
+  if (kind === 'days' && (!Number.isFinite(value) || value <= 0 || value > 31 || Math.round(value * 4) !== value * 4)) throw new HttpsError('invalid-argument', 'Enter a number of days between 0.25 and 31 (steps of a quarter day).');
+  if (reason.length < 3) throw new HttpsError('invalid-argument', 'Please write the reason of the deduction.');
+  if (!isRealYmd(date) || date > cairoYmd()) throw new HttpsError('invalid-argument', 'Choose the date of the deduction (not in the future).');
+  if (targetUserId === c.uid) throw new HttpsError('permission-denied', 'You cannot record a deduction on yourself.');
+
+  const tSnap = await db.collection('users').doc(targetUserId).get();
+  if (!tSnap.exists) throw new HttpsError('not-found', 'That employee does not exist.');
+  const t = tSnap.data();
+  const tRole = normRoleUpper(t.role);
+  if (tRole === 'ADMIN' || tRole === 'CEO') throw new HttpsError('permission-denied', 'A deduction cannot be recorded on this account.');
+  const tBranches = Array.isArray(t.assignedBranches) ? t.assignedBranches : [];
+  if (!c.isFull) {
+    if (!DEDUCTION_MANAGER_TARGETS.has(t.role)) throw new HttpsError('permission-denied', 'You cannot record a deduction on this type of account.');
+    if (!tBranches.some((b) => c.branches.includes(b))) throw new HttpsError('permission-denied', 'You can only record deductions on staff of your own branches.');
+  }
+
+  const ref = await db.collection('deductions').add({
+    targetUserId, username: t.username || '', role: t.role || 'User', branches: tBranches,
+    kind, value, amount: kind === 'amount' ? value : null, days: kind === 'days' ? value : null, reason, category, date,
+    status: 'Active',
+    createdById: c.uid, createdBy: c.profile.username || '', createdAt: FieldValue.serverTimestamp()
+  });
+
+  try {
+    const usersSnap = await db.collection('users').get();
+    const tokens = Array.isArray(t.fcmTokens) ? t.fcmTokens : [];
+    await sendPushAndCleanup(usersSnap, tokens, '💸 Salary deduction recorded',
+      `${kind === 'days' ? `${value} day(s) of salary` : `${value} EGP`} - ${category}: ${reason.slice(0, 100)} (${date})`, { requestId: ref.id, type: 'DEDUCTION' });
+  } catch (err) { console.error('deduction push failed', err); }
+  return { id: ref.id };
+});
+
+exports.getDeductions = onCall(async (request) => {
+  const c = await loadDeductionCaller(request);
+  const month = String(request.data?.month || '').trim(); // 'YYYY-MM' or '' for everything
+  if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpsError('invalid-argument', 'Choose a valid month.');
+  const snap = await db.collection('deductions').orderBy('date', 'desc').limit(1500).get();
+  const rows = [];
+  snap.forEach((doc) => {
+    const x = doc.data();
+    if (month && !String(x.date || '').startsWith(month)) return;
+    const isMine = x.targetUserId === c.uid;
+    const branchMatch = (x.branches || []).some((b) => c.branches.includes(b)) || x.createdById === c.uid;
+    const visible = isMine || ((c.canGive || c.canView || c.isFull) && (c.isFull || branchMatch));
+    if (!visible) return;
+    rows.push({
+      id: doc.id, targetUserId: x.targetUserId, username: x.username, role: x.role, branches: x.branches || [],
+      kind: x.kind || 'amount', value: x.value != null ? x.value : x.amount, reason: x.reason, category: x.category, date: x.date, status: x.status || 'Active',
+      createdBy: x.createdBy, mine: isMine,
+      createdAtMs: x.createdAt && x.createdAt.toMillis ? x.createdAt.toMillis() : 0,
+      cancelledBy: x.cancelledBy || '',
+      canCancel: (x.status || 'Active') === 'Active' && (c.isFull || x.createdById === c.uid) && (c.canGive || c.isFull)
+        && (c.role === 'ADMIN' || (!!x.createdAt && x.createdAt.toMillis && Date.now() - x.createdAt.toMillis() <= 24 * 3600 * 1000))
+    });
+  });
+
+  // people this account may record a deduction on (for the form)
+  let employees = [];
+  if (c.canGive) {
+    const usersSnap = await db.collection('users').get();
+    usersSnap.forEach((u) => {
+      const v = u.data();
+      const r = normRoleUpper(v.role);
+      if (!v.username || u.id === c.uid || r === 'ADMIN' || r === 'CEO') return;
+      const vb = Array.isArray(v.assignedBranches) ? v.assignedBranches : [];
+      if (!c.isFull && (!DEDUCTION_MANAGER_TARGETS.has(v.role) || !vb.some((b) => c.branches.includes(b)))) return;
+      employees.push({ id: u.id, username: v.username, role: v.role || 'User', branches: vb });
+    });
+    employees.sort((a, b) => a.username.localeCompare(b.username));
+  }
+  return { rows, employees, canGive: c.canGive, canViewAll: c.canView, categories: DEDUCTION_CATEGORIES, isAdmin: c.role === 'ADMIN' };
+});
+
+exports.cancelDeduction = onCall(async (request) => {
+  const c = await loadDeductionCaller(request);
+  const id = String(request.data?.id || '');
+  if (!id) throw new HttpsError('invalid-argument', 'A deduction is required.');
+  const ref = db.collection('deductions').doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError('not-found', 'That deduction does not exist.');
+  const x = snap.data();
+  if ((x.status || 'Active') !== 'Active') throw new HttpsError('failed-precondition', 'This deduction is already cancelled.');
+  if (!(c.isFull || (x.createdById === c.uid && c.canGive))) throw new HttpsError('permission-denied', 'You cannot cancel this deduction.');
+  const created = x.createdAt && x.createdAt.toMillis ? x.createdAt.toMillis() : 0;
+  if (c.role !== 'ADMIN' && (!created || Date.now() - created > 24 * 3600 * 1000)) throw new HttpsError('failed-precondition', 'A deduction cannot be cancelled after 24 hours.');
+  await ref.update({ status: 'Cancelled', cancelledBy: c.profile.username || '', cancelledAt: FieldValue.serverTimestamp() });
+  return { ok: true };
+});
+
+
+// System Admin only: wipe deduction history (one record, or every cancelled record of a month / of all time).
+exports.deleteDeductions = onCall(async (request) => {
+  const c = await loadDeductionCaller(request);
+  if (c.role !== 'ADMIN') throw new HttpsError('permission-denied', 'Only the System Admin can delete the deduction history.');
+  const id = String(request.data?.id || '');
+  if (id) {
+    const ref = db.collection('deductions').doc(id);
+    if (!(await ref.get()).exists) throw new HttpsError('not-found', 'That deduction does not exist.');
+    await ref.delete();
+    return { deleted: 1 };
+  }
+  if (request.data?.cancelledOnly !== true) throw new HttpsError('invalid-argument', 'Choose what to delete.');
+  const month = String(request.data?.month || '').trim();
+  if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpsError('invalid-argument', 'Choose a valid month.');
+  const snap = await db.collection('deductions').where('status', '==', 'Cancelled').get();
+  const docs = snap.docs.filter((d) => !month || String(d.data().date || '').startsWith(month));
+  for (let i = 0; i < docs.length; i += 400) {
+    const b = db.batch();
+    docs.slice(i, i + 400).forEach((d) => b.delete(d.ref));
+    await b.commit();
+  }
+  return { deleted: docs.length };
+});
+
+
+/* =====================================================================
+   HR REPORT / PAYROLL
+   Everything private lives in collections with NO Firestore rule (the browser can never read them); the screens get their data through
+   the callables below, which check the permissions first:
+     tab_hrReport   - open the HR Report tab and read the report (default: HR)
+     managePayroll  - edit salaries, bank accounts, the deduction rules, bonuses, and release payslips (default: HR)
+   System Admin has both always.
+   Collections:
+     payrollConfig/rules        the deduction rules (grace minutes, tiers, absence, pay-period start day, insurance, tax ...)
+     payrollEmployees/{uid}     base salary, allowances, bank details
+     payrollAdjustments/{month}_{uid}   bonus / other deduction for one month
+     payslips/{month}_{uid}     the payslip as it was when HR released it to the employee (a frozen copy)
+   ===================================================================== */
+const PAYROLL_EVENTS = ['late', 'leftEarly', 'absent', 'noCheckout', 'wrongBranch'];
+const PAYROLL_KINDS = ['days', 'amount', 'perMinute', 'percentDay', 'none'];
+const DEFAULT_PAYROLL_CONFIG = {
+  periodStartDay: 1,        // 1 = calendar month; 21 = from the 21st of the previous month to the 20th
+  daysPerMonth: 30,         // what one "day" of salary is: salary / this number
+  dailyRateBasis: 'gross',  // 'gross' = base + allowances, 'base' = base salary only
+  lateGraceMinutes: 0,      // arrival up to this many minutes after the planned start is NOT late
+  leftEarlyGraceMinutes: 0,
+  maxAttendanceDeductionPercent: 100, // the attendance deductions (late / absence ...) never exceed this % of the base salary
+  insurancePercent: 0,      // % of the base salary
+  taxPercent: 0,            // % of the gross
+  rules: [],
+  roleRules: {}             // { [account type]: { lateGraceMinutes, leftEarlyGraceMinutes, rules } } - a type with its own set uses it INSTEAD of the default one
+};
+
+const payrollPad = (n) => String(n).padStart(2, '0');
+const payrollRound = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+const payrollPeriod = (month, startDay) => {
+  const [y, m] = month.split('-').map(Number);
+  if (!startDay || startDay <= 1) {
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return { start: `${y}-${payrollPad(m)}-01`, end: `${y}-${payrollPad(m)}-${payrollPad(last)}` };
+  }
+  const py = m === 1 ? y - 1 : y;
+  const pm = m === 1 ? 12 : m - 1;
+  return { start: `${py}-${payrollPad(pm)}-${payrollPad(startDay)}`, end: `${y}-${payrollPad(m)}-${payrollPad(startDay - 1)}` };
+};
+
+const loadPayrollCaller = async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const snap = await db.collection('users').doc(request.auth.uid).get();
+  if (!snap.exists) throw new HttpsError('permission-denied', 'Your account could not be found.');
+  const profile = await withRole({ ...snap.data(), role: snap.data().role || request.auth.token.role });
+  const role = normRoleUpper(profile.role);
+  return {
+    uid: request.auth.uid, profile, role,
+    canView: permAllowed(profile, 'tab_hrReport', role === 'HR'),
+    canManage: permAllowed(profile, 'managePayroll', role === 'HR')
+  };
+};
+const requirePayrollView = async (request) => {
+  const c = await loadPayrollCaller(request);
+  if (!c.canView) throw new HttpsError('permission-denied', 'You are not allowed to see the HR report.');
+  return c;
+};
+const requirePayrollManage = async (request) => {
+  const c = await loadPayrollCaller(request);
+  if (!c.canManage) throw new HttpsError('permission-denied', 'You are not allowed to change payroll data.');
+  return c;
+};
+
+const readPayrollConfig = async () => {
+  const snap = await db.collection('payrollConfig').doc('rules').get();
+  return { ...DEFAULT_PAYROLL_CONFIG, ...(snap.exists ? snap.data() : {}) };
+};
+
+const cleanPayrollRule = (r, i) => {
+  const event = String(r?.event || '');
+  const kind = String(r?.kind || '');
+  if (!PAYROLL_EVENTS.includes(event)) throw new HttpsError('invalid-argument', `Rule ${i + 1}: unknown situation.`);
+  if (!PAYROLL_KINDS.includes(kind)) throw new HttpsError('invalid-argument', `Rule ${i + 1}: unknown deduction type.`);
+  const num = (v, label, { min = 0, max = 100000, nullable = false } = {}) => {
+    if ((v === null || v === undefined || v === '') && nullable) return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < min || n > max) throw new HttpsError('invalid-argument', `Rule ${i + 1}: ${label} is not valid.`);
+    return n;
+  };
+  return {
+    id: String(r?.id || `r${i + 1}`).slice(0, 24),
+    note: String(r?.note || '').slice(0, 80),
+    event,
+    minFrom: num(r.minFrom ?? 0, 'minutes from', { max: 1440 }),
+    minTo: num(r.minTo, 'minutes to', { max: 1440, nullable: true }),
+    occFrom: num(r.occFrom ?? 1, 'occurrence from', { min: 1, max: 100 }),
+    occTo: num(r.occTo, 'occurrence to', { min: 1, max: 100, nullable: true }),
+    kind,
+    value: kind === 'none' ? 0 : num(r.value, 'value', { max: 100000 })
+  };
+};
+
+exports.getPayrollConfig = onCall(async (request) => {
+  const c = await requirePayrollView(request);
+  return { config: await readPayrollConfig(), canManage: c.canManage };
+});
+
+exports.setPayrollConfig = onCall(async (request) => {
+  const c = await requirePayrollManage(request);
+  const d = request.data?.config || {};
+  const int = (v, label, min, max) => { const n = Number(v); if (!Number.isInteger(n) || n < min || n > max) throw new HttpsError('invalid-argument', `${label} must be a whole number from ${min} to ${max}.`); return n; };
+  const pct = (v, label) => { const n = Number(v); if (!Number.isFinite(n) || n < 0 || n > 100) throw new HttpsError('invalid-argument', `${label} must be between 0 and 100.`); return n; };
+  const rulesIn = Array.isArray(d.rules) ? d.rules : [];
+  if (rulesIn.length > 60) throw new HttpsError('invalid-argument', 'Too many rules (60 at most).');
+  const config = {
+    periodStartDay: int(d.periodStartDay, 'The period start day', 1, 28),
+    daysPerMonth: int(d.daysPerMonth, 'Days per month', 20, 31),
+    dailyRateBasis: d.dailyRateBasis === 'base' ? 'base' : 'gross',
+    lateGraceMinutes: int(d.lateGraceMinutes, 'Late grace minutes', 0, 600),
+    leftEarlyGraceMinutes: int(d.leftEarlyGraceMinutes, 'Left-early grace minutes', 0, 600),
+    maxAttendanceDeductionPercent: pct(d.maxAttendanceDeductionPercent, 'The deduction cap'),
+    insurancePercent: pct(d.insurancePercent, 'Insurance %'),
+    taxPercent: pct(d.taxPercent, 'Tax %'),
+    rules: rulesIn.map(cleanPayrollRule),
+    roleRules: {},
+    updatedAt: FieldValue.serverTimestamp(), updatedBy: c.profile.username || ''
+  };
+  const rrIn = d.roleRules && typeof d.roleRules === 'object' ? d.roleRules : {};
+  const roleKeys = Object.keys(rrIn);
+  if (roleKeys.length > 30) throw new HttpsError('invalid-argument', 'Too many account types.');
+  roleKeys.forEach((role) => {
+    const set = rrIn[role] || {};
+    if (!role || role.length > 40 || /[\/]/.test(role)) throw new HttpsError('invalid-argument', 'Unknown account type.');
+    const list = Array.isArray(set.rules) ? set.rules : [];
+    if (list.length > 60) throw new HttpsError('invalid-argument', `Too many rules for ${role} (60 at most).`);
+    config.roleRules[role] = {
+      lateGraceMinutes: int(set.lateGraceMinutes, `${role}: late grace minutes`, 0, 600),
+      leftEarlyGraceMinutes: int(set.leftEarlyGraceMinutes, `${role}: left-early grace minutes`, 0, 600),
+      rules: list.map(cleanPayrollRule)
+    };
+  });
+  await db.collection('payrollConfig').doc('rules').set(config);
+  return { ok: true };
+});
+
+exports.getPayrollEmployees = onCall(async (request) => {
+  const c = await requirePayrollView(request);
+  const [usersSnap, profSnap] = await Promise.all([db.collection('users').get(), db.collection('payrollEmployees').get()]);
+  const profs = new Map();
+  profSnap.forEach((p) => profs.set(p.id, p.data()));
+  const rows = [];
+  usersSnap.forEach((u) => {
+    const v = u.data();
+    if (!v.username || normRoleUpper(v.role) === 'ADMIN') return;
+    const p = profs.get(u.id) || {};
+    rows.push({
+      userId: u.id, username: v.username, role: v.role || 'User', branches: Array.isArray(v.assignedBranches) ? v.assignedBranches : [],
+      baseSalary: Number(p.baseSalary) || 0, allowances: Array.isArray(p.allowances) ? p.allowances : [],
+      bankName: p.bankName || '', accountHolder: p.accountHolder || '', accountNumber: p.accountNumber || '', iban: p.iban || '',
+      active: p.active !== false, hasProfile: profs.has(u.id)
+    });
+  });
+  rows.sort((a, b) => a.username.localeCompare(b.username));
+  return { rows, canManage: c.canManage };
+});
+
+exports.setPayrollProfile = onCall(async (request) => {
+  const c = await requirePayrollManage(request);
+  const d = request.data || {};
+  const userId = String(d.userId || '');
+  if (!userId) throw new HttpsError('invalid-argument', 'Choose the employee.');
+  const uSnap = await db.collection('users').doc(userId).get();
+  if (!uSnap.exists || normRoleUpper(uSnap.data().role) === 'ADMIN') throw new HttpsError('not-found', 'That employee does not exist.');
+  const base = Number(d.baseSalary);
+  if (!Number.isFinite(base) || base < 0 || base > 10000000) throw new HttpsError('invalid-argument', 'The base salary is not valid.');
+  const allowancesIn = Array.isArray(d.allowances) ? d.allowances : [];
+  if (allowancesIn.length > 15) throw new HttpsError('invalid-argument', 'Too many allowances (15 at most).');
+  const allowances = allowancesIn.map((a, i) => {
+    const amount = Number(a?.amount);
+    const name = String(a?.name || '').trim().slice(0, 40);
+    if (!name || !Number.isFinite(amount) || amount < 0 || amount > 10000000) throw new HttpsError('invalid-argument', `Allowance ${i + 1} is not valid.`);
+    return { name, amount: payrollRound(amount) };
+  });
+  const text = (v, n) => String(v || '').trim().slice(0, n);
+  await db.collection('payrollEmployees').doc(userId).set({
+    baseSalary: payrollRound(base), allowances,
+    bankName: text(d.bankName, 60), accountHolder: text(d.accountHolder, 80), accountNumber: text(d.accountNumber, 40), iban: text(d.iban, 40).replace(/\s+/g, ''),
+    active: d.active !== false, updatedAt: FieldValue.serverTimestamp(), updatedBy: c.profile.username || ''
+  }, { merge: true });
+  return { ok: true };
+});
+
+exports.setPayrollAdjustment = onCall(async (request) => {
+  const c = await requirePayrollManage(request);
+  const d = request.data || {};
+  const month = String(d.month || '');
+  const userId = String(d.userId || '');
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || !userId) throw new HttpsError('invalid-argument', 'Choose the month and the employee.');
+  const amt = (v, label) => { const n = Number(v || 0); if (!Number.isFinite(n) || n < 0 || n > 10000000) throw new HttpsError('invalid-argument', `${label} is not valid.`); return payrollRound(n); };
+  await db.collection('payrollAdjustments').doc(`${month}_${userId}`).set({
+    month, userId, bonus: amt(d.bonus, 'The bonus'), bonusNote: String(d.bonusNote || '').trim().slice(0, 100),
+    otherDeduction: amt(d.otherDeduction, 'The other deduction'), otherNote: String(d.otherNote || '').trim().slice(0, 100),
+    updatedAt: FieldValue.serverTimestamp(), updatedBy: c.profile.username || ''
+  });
+  return { ok: true };
+});
+
+// ---- the calculation -------------------------------------------------------------------------------------------
+const cairoWall = (ms) => {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms));
+  const g = (t) => parts.find((p) => p.type === t).value;
+  return { ymd: `${g('year')}-${g('month')}-${g('day')}`, h: Number(g('hour')), m: Number(g('minute')) };
+};
+const minsSincePlanDay = (planYmd, ms) => {
+  const w = cairoWall(ms);
+  return Math.round((ymdToUtcMs(w.ymd) - ymdToUtcMs(planYmd)) / DAY_MS) * 1440 + w.h * 60 + w.m;
+};
+const hhmmMinutes = (s) => { const [h, m] = String(s || '0:0').split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+const hhmmOf = (mins) => `${payrollPad(Math.floor(((mins % 1440) + 1440) % 1440 / 60))}:${payrollPad(((mins % 60) + 60) % 60)}`;
+const overlapDays = (aS, aE, bS, bE) => {
+  const s = Math.max(ymdToUtcMs(aS), ymdToUtcMs(bS));
+  const e = Math.min(ymdToUtcMs(aE), ymdToUtcMs(bE));
+  return e < s ? 0 : Math.round((e - s) / DAY_MS) + 1;
+};
+
+const ruleDeduction = (rules, event, minutes, occurrence, daily) => {
+  const rule = rules.find((r) => r.event === event
+    && (event === 'late' || event === 'leftEarly' ? (minutes >= (r.minFrom ?? 0) && (r.minTo == null || minutes <= r.minTo)) : true)
+    && occurrence >= (r.occFrom ?? 1) && (r.occTo == null || occurrence <= r.occTo));
+  if (!rule) return { amount: 0, rule: null };
+  let amount = 0;
+  if (rule.kind === 'days') amount = rule.value * daily;
+  else if (rule.kind === 'amount') amount = rule.value;
+  else if (rule.kind === 'perMinute') amount = rule.value * minutes;
+  else if (rule.kind === 'percentDay') amount = (rule.value / 100) * daily;
+  return { amount: payrollRound(amount), rule };
+};
+
+const computePayrollRows = async (month, onlyUserIds) => {
+  const config = await readPayrollConfig();
+  const { start, end } = payrollPeriod(month, config.periodStartDay);
+  const today = cairoYmd();
+  const nowW = cairoWall(Date.now());
+  const nowMin = nowW.h * 60 + nowW.m;
+
+  const [usersSnap, profSnap, plansSnap, attSnap, leaveSnap, dedSnap, adjSnap] = await Promise.all([
+    db.collection('users').get(),
+    db.collection('payrollEmployees').get(),
+    db.collection('attendancePlans').where('date', '>=', start).where('date', '<=', end).get(),
+    db.collection('attendance').where('dateStr', '>=', start).where('dateStr', '<=', end).get(),
+    db.collection('leaveRequests').where('endDate', '>=', start).get(),
+    db.collection('deductions').where('date', '>=', start).where('date', '<=', end).get(),
+    db.collection('payrollAdjustments').where('month', '==', month).get()
+  ]);
+  const profs = new Map(); profSnap.forEach((p) => profs.set(p.id, p.data()));
+  const adjs = new Map(); adjSnap.forEach((a) => adjs.set(a.data().userId, a.data()));
+  const key = (s) => String(s || '').trim().toLowerCase();
+
+  const plansBy = new Map();
+  plansSnap.forEach((p) => { const x = p.data(); const k = key(x.username); if (!plansBy.has(k)) plansBy.set(k, []); plansBy.get(k).push(x); });
+  const sessBy = new Map(); // user|date -> sessions
+  attSnap.forEach((a) => {
+    const x = a.data(); if (!x.username || !x.checkInTime || !x.checkInTime.toMillis) return;
+    const k = `${key(x.username)}|${x.dateStr}`;
+    if (!sessBy.has(k)) sessBy.set(k, []);
+    sessBy.get(k).push({ branch: x.branch || '', inMs: x.checkInTime.toMillis(), outMs: x.checkOutTime && x.checkOutTime.toMillis ? x.checkOutTime.toMillis() : null });
+  });
+  sessBy.forEach((list) => list.sort((a, b) => a.inMs - b.inMs));
+  const leavesBy = new Map();
+  leaveSnap.forEach((l) => {
+    const x = l.data();
+    if (!x.username || !x.startDate || x.startDate > end || x.status === 'Rejected') return;
+    const k = key(x.username); if (!leavesBy.has(k)) leavesBy.set(k, []);
+    leavesBy.get(k).push({ startDate: x.startDate, endDate: x.endDate, status: x.status || 'Pending' });
+  });
+  const dedBy = new Map();
+  dedSnap.forEach((dd) => { const x = dd.data(); if ((x.status || 'Active') !== 'Active') return; if (!dedBy.has(x.targetUserId)) dedBy.set(x.targetUserId, []); dedBy.get(x.targetUserId).push({ id: dd.id, ...x }); });
+
+  const rows = [];
+  usersSnap.forEach((u) => {
+    const v = u.data();
+    if (!v.username || normRoleUpper(v.role) === 'ADMIN') return;
+    if (onlyUserIds && !onlyUserIds.includes(u.id)) return;
+    const p = profs.get(u.id) || {};
+    if (p.active === false) return;
+    const uk = key(v.username);
+    // the rule set of this account type, if it has its own; otherwise the default one
+    const ownSet = config.roleRules && config.roleRules[v.role];
+    const rulesOf = ownSet ? ownSet.rules : config.rules;
+    const lateGrace = ownSet ? ownSet.lateGraceMinutes : config.lateGraceMinutes;
+    const earlyGrace = ownSet ? ownSet.leftEarlyGraceMinutes : config.leftEarlyGraceMinutes;
+    const base = Number(p.baseSalary) || 0;
+    const allowances = Array.isArray(p.allowances) ? p.allowances : [];
+    const allowancesTotal = payrollRound(allowances.reduce((s, a) => s + (Number(a.amount) || 0), 0));
+    const daily = payrollRound(((config.dailyRateBasis === 'base' ? base : base + allowancesTotal)) / config.daysPerMonth);
+
+    const myLeaves = (leavesBy.get(uk) || []);
+    const approved = myLeaves.filter((l) => l.status === 'Approved');
+    const onLeave = (ymd) => approved.some((l) => ymd >= l.startDate && ymd <= l.endDate);
+
+    const plans = (plansBy.get(uk) || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.startTime).localeCompare(String(b.startTime)));
+    const counters = { late: 0, leftEarly: 0, absent: 0, noCheckout: 0, wrongBranch: 0 };
+    const days = [];
+    const sum = { planned: 0, onTime: 0, lateCount: 0, lateMinutes: 0, leftEarlyCount: 0, leftEarlyMinutes: 0, absentCount: 0, noCheckoutCount: 0, wrongBranchCount: 0, leaveShifts: 0 };
+    let attDeduction = 0;
+
+    const incident = (event, minutes) => {
+      counters[event] += 1;
+      return ruleDeduction(rulesOf, event, minutes, counters[event], daily);
+    };
+
+    plans.forEach((pl) => {
+      const startMin = hhmmMinutes(pl.startTime);
+      const endMin = hhmmMinutes(pl.endTime);
+      const sessions = sessBy.get(`${uk}|${pl.date}`) || [];
+      const line = { date: pl.date, branch: pl.branch || '', planned: `${pl.startTime || ''}-${pl.endTime || ''}`, arrival: '', departure: '', status: 'On time', lateMin: 0, earlyMin: 0, deduction: 0, note: '' };
+      if (pl.date > today || (pl.date === today && sessions.length === 0 && nowMin <= startMin)) { line.status = 'Upcoming'; days.push(line); return; }
+      sum.planned += 1;
+      if (onLeave(pl.date)) { sum.leaveShifts += 1; line.status = 'Approved leave'; days.push(line); return; }
+      if (sessions.length === 0) {
+        if (pl.date === today && nowMin <= endMin) { sum.planned -= 1; line.status = 'Not checked in yet'; days.push(line); return; }
+        sum.absentCount += 1; line.status = 'Absent';
+        const r = incident('absent', 0); line.deduction = r.amount; if (r.rule) line.note = r.rule.note || ''; attDeduction += r.amount; days.push(line); return;
+      }
+      const here = sessions.filter((s) => s.branch === pl.branch);
+      line.arrival = hhmmOf(minsSincePlanDay(pl.date, sessions[0].inMs));
+      const lastS = sessions[sessions.length - 1];
+      line.departure = lastS.outMs ? hhmmOf(minsSincePlanDay(pl.date, lastS.outMs)) : '';
+      if (here.length === 0) {
+        sum.wrongBranchCount += 1; line.status = `Wrong branch (${[...new Set(sessions.map((s) => s.branch))].join(', ')})`;
+        const r = incident('wrongBranch', 0); line.deduction = r.amount; attDeduction += r.amount; days.push(line); return;
+      }
+      line.arrival = hhmmOf(minsSincePlanDay(pl.date, here[0].inMs));
+      const late = minsSincePlanDay(pl.date, here[0].inMs) - startMin;
+      let status = 'On time';
+      if (late > lateGrace) {
+        sum.lateCount += 1; sum.lateMinutes += late; line.lateMin = late; status = `Late ${late} min`;
+        const r = incident('late', late); line.deduction += r.amount; attDeduction += r.amount;
+      } else { sum.onTime += 1; }
+      if (!lastS.outMs) {
+        if (pl.date < today) {
+          sum.noCheckoutCount += 1; status += ' · No check-out';
+          const r = incident('noCheckout', 0); line.deduction += r.amount; attDeduction += r.amount;
+        }
+      } else {
+        const early = endMin - minsSincePlanDay(pl.date, lastS.outMs);
+        if (early > earlyGrace) {
+          sum.leftEarlyCount += 1; sum.leftEarlyMinutes += early; line.earlyMin = early; status += ` · Left early ${early} min`;
+          const r = incident('leftEarly', early); line.deduction += r.amount; attDeduction += r.amount;
+        }
+      }
+      line.status = status; line.deduction = payrollRound(line.deduction);
+      days.push(line);
+    });
+
+    const cap = payrollRound(base * (config.maxAttendanceDeductionPercent / 100));
+    attDeduction = payrollRound(attDeduction);
+    const attDeductionCapped = Math.min(attDeduction, cap);
+
+    const manual = (dedBy.get(u.id) || []).map((x) => ({
+      id: x.id, date: x.date, category: x.category, reason: x.reason, kind: x.kind || 'amount', value: x.value != null ? x.value : x.amount,
+      amount: payrollRound((x.kind === 'days') ? Number(x.value) * daily : Number(x.value != null ? x.value : x.amount))
+    }));
+    const manualTotal = payrollRound(manual.reduce((s, x) => s + x.amount, 0));
+    const adj = adjs.get(u.id) || {};
+    const bonus = payrollRound(adj.bonus || 0);
+    const otherDeduction = payrollRound(adj.otherDeduction || 0);
+    const gross = payrollRound(base + allowancesTotal + bonus);
+    const insurance = payrollRound(base * (config.insurancePercent / 100));
+    const tax = payrollRound(gross * (config.taxPercent / 100));
+    const totalDeductions = payrollRound(attDeductionCapped + manualTotal + otherDeduction + insurance + tax);
+    const net = Math.max(0, payrollRound(gross - totalDeductions));
+
+    const leaveDays = approved.reduce((s, l) => s + overlapDays(l.startDate, l.endDate, start, end), 0);
+    const pendingLeaveDays = myLeaves.filter((l) => l.status !== 'Approved').reduce((s, l) => s + overlapDays(l.startDate, l.endDate, start, end), 0);
+
+    rows.push({
+      userId: u.id, username: v.username, role: v.role || 'User', branches: Array.isArray(v.assignedBranches) ? v.assignedBranches : [],
+      hasSalary: base > 0, base, allowances, allowancesTotal, bonus, bonusNote: adj.bonusNote || '', otherDeduction, otherNote: adj.otherNote || '',
+      daily, ...sum, leaveDays, pendingLeaveDays,
+      leaves: myLeaves.filter((l) => overlapDays(l.startDate, l.endDate, start, end) > 0),
+      attendanceDeduction: attDeduction, attendanceDeductionApplied: attDeductionCapped, capped: attDeduction > attDeductionCapped,
+      manualDeductions: manual, manualTotal, insurance, tax, gross, totalDeductions, net,
+      bank: { bankName: p.bankName || '', accountHolder: p.accountHolder || '', accountNumber: p.accountNumber || '', iban: p.iban || '' },
+      days
+    });
+  });
+  rows.sort((a, b) => a.username.localeCompare(b.username));
+  return { month, period: { start, end }, config, rows };
+};
+
+exports.computePayroll = onCall({ timeoutSeconds: 120, memory: '512MiB' }, async (request) => {
+  await requirePayrollView(request);
+  const month = String(request.data?.month || '');
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpsError('invalid-argument', 'Choose a valid month.');
+  const result = await computePayrollRows(month, null);
+  const rel = await db.collection('payslips').where('month', '==', month).get();
+  result.released = rel.docs.map((d) => d.data().userId);
+  return result;
+});
+
+// Release the payslips of a month to the employees (a frozen copy), or take them back.
+exports.releasePayslips = onCall({ timeoutSeconds: 120, memory: '512MiB' }, async (request) => {
+  const c = await requirePayrollManage(request);
+  const month = String(request.data?.month || '');
+  const unrelease = request.data?.unrelease === true;
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpsError('invalid-argument', 'Choose a valid month.');
+  const ids = Array.isArray(request.data?.userIds) ? request.data.userIds.map(String).slice(0, 500) : null;
+  if (unrelease) {
+    const snap = await db.collection('payslips').where('month', '==', month).get();
+    const docs = snap.docs.filter((d) => !ids || ids.includes(d.data().userId));
+    for (let i = 0; i < docs.length; i += 400) { const b = db.batch(); docs.slice(i, i + 400).forEach((d) => b.delete(d.ref)); await b.commit(); }
+    return { changed: docs.length };
+  }
+  const result = await computePayrollRows(month, ids);
+  const rows = result.rows.filter((r) => r.hasSalary);
+  for (let i = 0; i < rows.length; i += 200) {
+    const b = db.batch();
+    rows.slice(i, i + 200).forEach((r) => {
+      const { bank, ...rest } = r;
+      const masked = bank.accountNumber ? `****${String(bank.accountNumber).slice(-4)}` : (bank.iban ? `****${String(bank.iban).slice(-4)}` : '');
+      b.set(db.collection('payslips').doc(`${month}_${r.userId}`), {
+        month, userId: r.userId, period: result.period, releasedAt: FieldValue.serverTimestamp(), releasedBy: c.profile.username || '',
+        payslip: { ...rest, bank: { bankName: bank.bankName, accountHolder: bank.accountHolder, accountMasked: masked } }
+      });
+    });
+    await b.commit();
+  }
+  try {
+    const usersSnap = await db.collection('users').get();
+    const tokens = [];
+    rows.forEach((r) => { const u = usersSnap.docs.find((x) => x.id === r.userId); if (u && Array.isArray(u.data().fcmTokens)) tokens.push(...u.data().fcmTokens); });
+    await sendPushAndCleanup(usersSnap, tokens, '💵 Your payslip is ready', `The payslip of ${month} is available in the My Payslip tab.`, { type: 'PAYSLIP', requestId: month });
+  } catch (err) { console.error('payslip push failed', err); }
+  return { changed: rows.length };
+});
+
+// An employee reads ONLY their own released payslips.
+exports.getMyPayslips = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const meSnap = await db.collection('users').doc(request.auth.uid).get();
+  if (!meSnap.exists) throw new HttpsError('permission-denied', 'Your account could not be found.');
+  if (!permAllowed(await withRole({ ...meSnap.data(), role: meSnap.data().role || request.auth.token.role }), 'tab_payslip', true)) {
+    throw new HttpsError('permission-denied', 'The payslip is switched off for your account.');
+  }
+  const snap = await db.collection('payslips').where('userId', '==', request.auth.uid).get();
+  const rows = snap.docs.map((d) => d.data()).sort((a, b) => String(b.month).localeCompare(String(a.month)))
+    .map((x) => ({ month: x.month, period: x.period, releasedBy: x.releasedBy || '', payslip: x.payslip }));
+  return { rows };
 });
