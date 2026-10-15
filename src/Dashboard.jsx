@@ -3767,7 +3767,7 @@ export default function Dashboard({ user, onLogout }) {
                               <span>📞 <strong>{(req.assignedToPhone && req.assignedToPhone !== 'N/A') ? req.assignedToPhone : (phonesMap[req.assignedToId] || 'N/A')}</strong></span>
                             </div>
                           )}
-                          {canManageStatus && (isFacilityManager || isAdmin) && (
+                          {canManageStatus && (isFacilityManager || isAdmin) && req.status === 'In Progress' && (
                             <div className="mt-2">
                               <select
                                 value=""
