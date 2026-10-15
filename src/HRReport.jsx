@@ -154,8 +154,50 @@ export default function HRReport({ hideUser = () => false }) {
 }
 
 /* ----------------------------------------------------------------- report table */
+async function exportReportExcel(rows, month) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('HR Report');
+  ws.columns = [
+    { header: '#', key: 'n', width: 5 }, { header: 'Employee', key: 'u', width: 24 }, { header: 'Role', key: 'role', width: 18 }, { header: 'Branches', key: 'br', width: 28 },
+    { header: 'Planned days', key: 'pl', width: 12 }, { header: 'On time', key: 'ot', width: 10 }, { header: 'Late (count)', key: 'lc', width: 12 }, { header: 'Late (minutes)', key: 'lm', width: 14 },
+    { header: 'Left early', key: 'le', width: 11 }, { header: 'Absent', key: 'ab', width: 9 }, { header: 'Leave days', key: 'lv', width: 11 }, { header: 'Leave waiting', key: 'lw', width: 12 },
+    { header: 'Penalties (count)', key: 'pc', width: 15 }, { header: 'Penalties (EGP)', key: 'pe', width: 15 }, { header: 'Attendance deduction', key: 'ad', width: 19 },
+    { header: 'Gross', key: 'gr', width: 14 }, { header: 'Total deductions', key: 'td', width: 16 }, { header: 'Net', key: 'net', width: 14 }
+  ];
+  ws.getRow(1).font = { bold: true };
+  ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E7FF' } };
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  rows.forEach((r, i) => ws.addRow({
+    n: i + 1, u: r.username, role: roleLabel(r.role), br: (r.branches || []).join(' / '), pl: r.planned, ot: r.onTime, lc: r.lateCount, lm: r.lateMinutes, le: r.leftEarlyCount, ab: r.absentCount,
+    lv: r.leaveDays, lw: r.pendingLeaveDays || 0, pc: r.manualDeductions.length, pe: r.manualTotal, ad: r.attendanceDeductionApplied,
+    gr: r.hasSalary ? r.gross : '', td: r.hasSalary ? r.totalDeductions : '', net: r.hasSalary ? r.net : ''
+  }));
+  const sum = (k) => rows.reduce((x, r) => x + (Number(r[k]) || 0), 0);
+  const t = ws.addRow({ u: 'TOTAL', pl: sum('planned'), ot: sum('onTime'), lc: sum('lateCount'), lm: sum('lateMinutes'), le: sum('leftEarlyCount'), ab: sum('absentCount'), lv: sum('leaveDays'), pe: sum('manualTotal'), ad: sum('attendanceDeductionApplied'),
+    gr: rows.filter((r) => r.hasSalary).reduce((x, r) => x + r.gross, 0), td: rows.filter((r) => r.hasSalary).reduce((x, r) => x + r.totalDeductions, 0), net: rows.filter((r) => r.hasSalary).reduce((x, r) => x + r.net, 0) });
+  t.font = { bold: true };
+  ['N', 'O', 'P', 'Q', 'R'].forEach((c) => { ws.getColumn(c).numFmt = '#,##0.00'; });
+
+  const wd = wb.addWorksheet('Attendance details');
+  wd.columns = [{ header: 'Employee', key: 'u', width: 24 }, { header: 'Date', key: 'd', width: 12 }, { header: 'Branch', key: 'b', width: 22 }, { header: 'Planned', key: 'p', width: 14 }, { header: 'In', key: 'i', width: 8 }, { header: 'Out', key: 'o', width: 8 }, { header: 'Status', key: 's', width: 36 }, { header: 'Deduction', key: 'x', width: 12 }];
+  wd.getRow(1).font = { bold: true };
+  rows.forEach((r) => r.days.filter((d) => d.status !== 'Upcoming').forEach((d) => wd.addRow({ u: r.username, d: d.date, b: d.branch, p: d.planned, i: d.arrival, o: d.departure, s: d.status, x: d.deduction })));
+
+  const wp = wb.addWorksheet('Penalties');
+  wp.columns = [{ header: 'Employee', key: 'u', width: 24 }, { header: 'Date', key: 'd', width: 12 }, { header: 'Category', key: 'c', width: 16 }, { header: 'Type', key: 't', width: 10 }, { header: 'Value', key: 'v', width: 10 }, { header: 'Amount (EGP)', key: 'a', width: 14 }, { header: 'Reason', key: 'r', width: 50 }];
+  wp.getRow(1).font = { bold: true };
+  rows.forEach((r) => r.manualDeductions.forEach((m) => wp.addRow({ u: r.username, d: m.date, c: m.category, t: m.kind === 'days' ? 'Days' : 'Amount', v: m.value, a: m.amount, r: m.reason })));
+
+  const buf = await wb.xlsx.writeBuffer();
+  saveAs(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `HR_Report_${month}.xlsx`);
+}
+
 function ReportTable({ rows, month, canManage, openId, setOpenId, onChanged }) {
   return (
+    <div className="space-y-2">
+    <div className="flex justify-end">
+      <button type="button" onClick={() => exportReportExcel(rows, month).catch((e) => alert(e.message || 'Could not export.'))} disabled={rows.length === 0} className="px-4 py-2 rounded-xl text-xs font-extrabold text-white border-0 cursor-pointer disabled:opacity-50 shadow-sm" style={{ backgroundColor: '#059669' }}>⬇️ Download Excel</button>
+    </div>
     <div className="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-x-auto">
       <table className="w-full text-left border-collapse text-xs">
         <thead>
@@ -186,6 +228,7 @@ function ReportTable({ rows, month, canManage, openId, setOpenId, onChanged }) {
           ))}
         </tbody>
       </table>
+    </div>
     </div>
   );
 }
@@ -466,20 +509,42 @@ function SalariesPanel({ hideUser, canManage, onChanged }) {
 }
 
 /* ----------------------------------------------------------------- the deduction rules */
+const RULE_TYPES = [
+  'User', 'Supervisor', 'Branch Manager', 'Branch Manager+', 'Fitness Manager', 'Coach', 'HR', 'CEO',
+  'Facility Manager', 'Facility Member', 'QA Manager', 'QA', 'Finance and Administration', 'Staff'
+];
+
 function RulesPanel({ canManage, onChanged }) {
   const [cfg, setCfg] = useState(null);
+  const [scope, setScope] = useState(''); // '' = the default rules, otherwise an account type
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [sim, setSim] = useState({ salary: '6000', event: 'late', minutes: '20', occurrence: '1' });
 
-  useEffect(() => { call('getPayrollConfig').then((r) => setCfg(r.config)).catch((e) => setError(e.message || 'Could not load.')); }, []);
+  useEffect(() => { call('getPayrollConfig').then((r) => setCfg({ ...r.config, roleRules: r.config.roleRules || {} })).catch((e) => setError(e.message || 'Could not load.')); }, []);
   if (error) return <p className="text-xs font-bold text-rose-700">{error}</p>;
   if (!cfg) return <p className="text-xs text-slate-400">Loading...</p>;
 
-  const set = (k, v) => setCfg((c) => ({ ...c, [k]: v }));
-  const setRule = (i, patch) => setCfg((c) => ({ ...c, rules: c.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)) }));
-  const move = (i, dir) => setCfg((c) => { const a = c.rules.slice(); const j = i + dir; if (j < 0 || j >= a.length) return c; [a[i], a[j]] = [a[j], a[i]]; return { ...c, rules: a }; });
-  const addRule = () => setCfg((c) => ({ ...c, rules: [...c.rules, { id: `r${Date.now() % 100000}`, event: 'late', minFrom: 1, minTo: null, occFrom: 1, occTo: null, kind: 'days', value: 0.5, note: '' }] }));
+  const own = scope ? cfg.roleRules[scope] : null;       // the type's own set (null = follows the default)
+  const cur = scope ? (own || cfg) : cfg;                // the set shown / used for the scenario
+  const editable = canManage && (!scope || !!own);
+
+  const setGeneral = (k, v) => setCfg((c) => ({ ...c, [k]: v }));
+  const patchSet = (patch) => setCfg((c) => (scope
+    ? { ...c, roleRules: { ...c.roleRules, [scope]: { ...c.roleRules[scope], ...patch } } }
+    : { ...c, ...patch }));
+  const setRule = (i, patch) => patchSet({ rules: cur.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)) });
+  const move = (i, dir) => { const a = cur.rules.slice(); const j = i + dir; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; patchSet({ rules: a }); };
+  const addRule = () => patchSet({ rules: [...cur.rules, { id: `r${Date.now() % 100000}`, event: 'late', minFrom: 1, minTo: null, occFrom: 1, occTo: null, kind: 'days', value: 0.5, note: '' }] });
+
+  const enableOwn = (on) => {
+    if (on) {
+      setCfg((c) => ({ ...c, roleRules: { ...c.roleRules, [scope]: { lateGraceMinutes: c.lateGraceMinutes, leftEarlyGraceMinutes: c.leftEarlyGraceMinutes, rules: c.rules.map((r) => ({ ...r })) } } }));
+    } else {
+      if (!window.confirm(`Remove the separate rules of ${roleLabel(scope)}? This type will follow the default rules again.`)) return;
+      setCfg((c) => { const rr = { ...c.roleRules }; delete rr[scope]; return { ...c, roleRules: rr }; });
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -490,10 +555,11 @@ function RulesPanel({ canManage, onChanged }) {
 
   const num = (v) => (v === null || v === undefined ? '' : v);
   const daily = (Number(sim.salary) || 0) / (cfg.daysPerMonth || 30);
-  const r = matchRule(cfg.rules, sim.event, Number(sim.minutes) || 0, Number(sim.occurrence) || 1);
+  const r = matchRule(cur.rules, sim.event, Number(sim.minutes) || 0, Number(sim.occurrence) || 1);
   let simAmount = 0;
   if (r) { const v = Number(r.value) || 0; simAmount = r.kind === 'days' ? v * daily : r.kind === 'amount' ? v : r.kind === 'perMinute' ? v * (Number(sim.minutes) || 0) : r.kind === 'percentDay' ? (v / 100) * daily : 0; }
-  const graceFree = sim.event === 'late' && (Number(sim.minutes) || 0) <= (Number(cfg.lateGraceMinutes) || 0);
+  const graceFree = sim.event === 'late' && (Number(sim.minutes) || 0) <= (Number(cur.lateGraceMinutes) || 0);
+  const ownTypes = Object.keys(cfg.roleRules);
 
   return (
     <div className="bg-white border border-slate-200 p-5 rounded-3xl shadow-sm space-y-5">
@@ -501,52 +567,85 @@ function RulesPanel({ canManage, onChanged }) {
         <h3 className="text-base font-black text-slate-900">⚖️ Deduction rules</h3>
         <p className="text-[11px] text-slate-500 max-w-3xl">
           Set once; the report and the payslips use them automatically. For every late arrival, early leave, absence... the FIRST rule (from the top) that matches is applied.
-          A situation with no matching rule costs nothing. "Occurrence" counts how many times it happened to the same employee in the pay period (1st, 2nd, 3rd ...).
+          A situation with no matching rule costs nothing. "Time #" counts how many times it happened to the same employee in the pay period (1st, 2nd, 3rd ...).
+          The default rules apply to everyone; an account type can have its own separate rules.
         </p>
       </div>
 
+      <div className="flex flex-wrap items-end gap-3 border border-indigo-200 bg-indigo-50/40 rounded-2xl p-3">
+        <div className="min-w-[240px]">
+          <label className={label}>Rules for</label>
+          <select value={scope} onChange={(e) => setScope(e.target.value)} className={field}>
+            <option value="">⚖️ Default rules (everyone without their own set)</option>
+            {RULE_TYPES.map((t) => <option key={t} value={t}>{roleLabel(t)}{cfg.roleRules[t] ? '  ✓ own rules' : ''}</option>)}
+          </select>
+        </div>
+        {scope && canManage && (
+          <label className="flex items-center gap-2 text-xs font-black text-indigo-900 pb-2 cursor-pointer">
+            <input type="checkbox" checked={!!own} onChange={(e) => enableOwn(e.target.checked)} />
+            Separate rules for {roleLabel(scope)} (starts as a copy of the default)
+          </label>
+        )}
+        <p className="text-[11px] text-slate-500 pb-2">
+          {ownTypes.length ? `Types with their own rules: ${ownTypes.map((t) => roleLabel(t)).join(', ')}.` : 'No type has its own rules yet.'}
+        </p>
+      </div>
+
+      {scope && !own && (
+        <p className="text-xs font-bold rounded-xl px-3 py-2" style={chip('#e0f2fe', '#075985')}>
+          {roleLabel(scope)} follows the default rules{canManage ? ' - tick "Separate rules" above to give this type its own.' : '.'}
+          {' '}The default rules are shown below (read only).
+        </p>
+      )}
+
+      {!scope && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div><label className={label}>Pay period starts on day</label><input type="number" min="1" max="28" disabled={!canManage} value={cfg.periodStartDay} onChange={(e) => setGeneral('periodStartDay', e.target.value)} className={field} /><p className="text-[10px] text-slate-400 mt-0.5">1 = calendar month. 21 = from the 21st of last month to the 20th.</p></div>
+          <div><label className={label}>Days in a salary month</label><input type="number" min="20" max="31" disabled={!canManage} value={cfg.daysPerMonth} onChange={(e) => setGeneral('daysPerMonth', e.target.value)} className={field} /><p className="text-[10px] text-slate-400 mt-0.5">One day of salary = salary ÷ this.</p></div>
+          <div><label className={label}>A day of salary is based on</label>
+            <select disabled={!canManage} value={cfg.dailyRateBasis} onChange={(e) => setGeneral('dailyRateBasis', e.target.value)} className={field}><option value="gross">Base + allowances</option><option value="base">Base salary only</option></select></div>
+          <div><label className={label}>Cap on attendance deductions (% of base)</label><input type="number" min="0" max="100" disabled={!canManage} value={cfg.maxAttendanceDeductionPercent} onChange={(e) => setGeneral('maxAttendanceDeductionPercent', e.target.value)} className={field} /></div>
+          <div><label className={label}>Insurance (% of base)</label><input type="number" min="0" max="100" step="0.01" disabled={!canManage} value={cfg.insurancePercent} onChange={(e) => setGeneral('insurancePercent', e.target.value)} className={field} /></div>
+          <div><label className={label}>Tax (% of gross)</label><input type="number" min="0" max="100" step="0.01" disabled={!canManage} value={cfg.taxPercent} onChange={(e) => setGeneral('taxPercent', e.target.value)} className={field} /></div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div><label className={label}>Pay period starts on day</label><input type="number" min="1" max="28" disabled={!canManage} value={cfg.periodStartDay} onChange={(e) => set('periodStartDay', e.target.value)} className={field} /><p className="text-[10px] text-slate-400 mt-0.5">1 = calendar month. 21 = from the 21st of last month to the 20th.</p></div>
-        <div><label className={label}>Days in a salary month</label><input type="number" min="20" max="31" disabled={!canManage} value={cfg.daysPerMonth} onChange={(e) => set('daysPerMonth', e.target.value)} className={field} /><p className="text-[10px] text-slate-400 mt-0.5">One day of salary = salary ÷ this.</p></div>
-        <div><label className={label}>A day of salary is based on</label>
-          <select disabled={!canManage} value={cfg.dailyRateBasis} onChange={(e) => set('dailyRateBasis', e.target.value)} className={field}><option value="gross">Base + allowances</option><option value="base">Base salary only</option></select></div>
-        <div><label className={label}>Cap on attendance deductions (% of base)</label><input type="number" min="0" max="100" disabled={!canManage} value={cfg.maxAttendanceDeductionPercent} onChange={(e) => set('maxAttendanceDeductionPercent', e.target.value)} className={field} /></div>
-        <div><label className={label}>Late grace (minutes)</label><input type="number" min="0" max="600" disabled={!canManage} value={cfg.lateGraceMinutes} onChange={(e) => set('lateGraceMinutes', e.target.value)} className={field} /><p className="text-[10px] text-slate-400 mt-0.5">Arriving within this many minutes is NOT late at all.</p></div>
-        <div><label className={label}>Left-early grace (minutes)</label><input type="number" min="0" max="600" disabled={!canManage} value={cfg.leftEarlyGraceMinutes} onChange={(e) => set('leftEarlyGraceMinutes', e.target.value)} className={field} /></div>
-        <div><label className={label}>Insurance (% of base)</label><input type="number" min="0" max="100" step="0.01" disabled={!canManage} value={cfg.insurancePercent} onChange={(e) => set('insurancePercent', e.target.value)} className={field} /></div>
-        <div><label className={label}>Tax (% of gross)</label><input type="number" min="0" max="100" step="0.01" disabled={!canManage} value={cfg.taxPercent} onChange={(e) => set('taxPercent', e.target.value)} className={field} /></div>
+        <div><label className={label}>Late grace (minutes)</label><input type="number" min="0" max="600" disabled={!editable} value={cur.lateGraceMinutes} onChange={(e) => patchSet({ lateGraceMinutes: e.target.value })} className={field} /><p className="text-[10px] text-slate-400 mt-0.5">Arriving within this many minutes is NOT late at all.</p></div>
+        <div><label className={label}>Left-early grace (minutes)</label><input type="number" min="0" max="600" disabled={!editable} value={cur.leftEarlyGraceMinutes} onChange={(e) => patchSet({ leftEarlyGraceMinutes: e.target.value })} className={field} /></div>
       </div>
 
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="font-black text-slate-900 text-xs uppercase">Rules (top to bottom)</p>
-          {canManage && (
+          <p className="font-black text-slate-900 text-xs uppercase">Rules{scope ? ` of ${roleLabel(scope)}` : ' (default)'} - top to bottom</p>
+          {editable && (
             <div className="flex gap-2">
-              <button type="button" onClick={() => { if (cfg.rules.length === 0 || window.confirm('Replace the current rules with the example rules?')) set('rules', EXAMPLE_RULES); }} className="px-3 py-1.5 rounded-lg text-[11px] font-black border-0 cursor-pointer" style={chip('#fef3c7', '#92400e')}>Load example rules</button>
+              <button type="button" onClick={() => { if (cur.rules.length === 0 || window.confirm('Replace the current rules with the example rules?')) patchSet({ rules: EXAMPLE_RULES.map((x) => ({ ...x })) }); }} className="px-3 py-1.5 rounded-lg text-[11px] font-black border-0 cursor-pointer" style={chip('#fef3c7', '#92400e')}>Load example rules</button>
+              {scope && <button type="button" onClick={() => { if (window.confirm('Replace this type\'s rules with a copy of the default rules?')) patchSet({ rules: cfg.rules.map((x) => ({ ...x })), lateGraceMinutes: cfg.lateGraceMinutes, leftEarlyGraceMinutes: cfg.leftEarlyGraceMinutes }); }} className="px-3 py-1.5 rounded-lg text-[11px] font-black border-0 cursor-pointer" style={chip('#e2e8f0', '#334155')}>Copy from default</button>}
               <button type="button" onClick={addRule} className="px-3 py-1.5 rounded-lg text-[11px] font-black border-0 cursor-pointer" style={chip('#e0e7ff', '#3730a3')}>➕ Add rule</button>
             </div>
           )}
         </div>
-        {cfg.rules.length === 0 && <p className="text-xs text-slate-400 italic">No rules yet: nothing is deducted automatically. Press "Load example rules" to start from a typical set, then change it.</p>}
-        {cfg.rules.map((rule, i) => {
+        {cur.rules.length === 0 && <p className="text-xs text-slate-400 italic">No rules: nothing is deducted automatically for this. {editable ? 'Press "Load example rules" to start from a typical set, then change it.' : ''}</p>}
+        {cur.rules.map((rule, i) => {
           const timed = rule.event === 'late' || rule.event === 'leftEarly';
           return (
             <div key={rule.id || i} className="border border-slate-200 rounded-2xl p-3 grid grid-cols-2 md:grid-cols-12 gap-2 items-end">
               <div className="col-span-2 md:col-span-3"><label className={label}>Situation</label>
-                <select disabled={!canManage} value={rule.event} onChange={(e) => setRule(i, { event: e.target.value })} className={field}>{EVENTS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}</select></div>
-              <div className="md:col-span-1"><label className={label}>From min</label><input type="number" min="0" disabled={!canManage || !timed} value={timed ? num(rule.minFrom) : ''} onChange={(e) => setRule(i, { minFrom: e.target.value })} className={field} /></div>
-              <div className="md:col-span-1"><label className={label}>To min</label><input type="number" min="0" disabled={!canManage || !timed} placeholder={timed ? '∞' : ''} value={timed ? num(rule.minTo) : ''} onChange={(e) => setRule(i, { minTo: e.target.value === '' ? null : e.target.value })} className={field} /></div>
-              <div className="md:col-span-1"><label className={label}>Time # from</label><input type="number" min="1" disabled={!canManage} value={num(rule.occFrom)} onChange={(e) => setRule(i, { occFrom: e.target.value })} className={field} /></div>
-              <div className="md:col-span-1"><label className={label}>Time # to</label><input type="number" min="1" disabled={!canManage} placeholder="∞" value={num(rule.occTo)} onChange={(e) => setRule(i, { occTo: e.target.value === '' ? null : e.target.value })} className={field} /></div>
+                <select disabled={!editable} value={rule.event} onChange={(e) => setRule(i, { event: e.target.value })} className={field}>{EVENTS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}</select></div>
+              <div className="md:col-span-1"><label className={label}>From min</label><input type="number" min="0" disabled={!editable || !timed} value={timed ? num(rule.minFrom) : ''} onChange={(e) => setRule(i, { minFrom: e.target.value })} className={field} /></div>
+              <div className="md:col-span-1"><label className={label}>To min</label><input type="number" min="0" disabled={!editable || !timed} placeholder={timed ? '∞' : ''} value={timed ? num(rule.minTo) : ''} onChange={(e) => setRule(i, { minTo: e.target.value === '' ? null : e.target.value })} className={field} /></div>
+              <div className="md:col-span-1"><label className={label}>Time # from</label><input type="number" min="1" disabled={!editable} value={num(rule.occFrom)} onChange={(e) => setRule(i, { occFrom: e.target.value })} className={field} /></div>
+              <div className="md:col-span-1"><label className={label}>Time # to</label><input type="number" min="1" disabled={!editable} placeholder="∞" value={num(rule.occTo)} onChange={(e) => setRule(i, { occTo: e.target.value === '' ? null : e.target.value })} className={field} /></div>
               <div className="col-span-2 md:col-span-2"><label className={label}>Deduct</label>
-                <select disabled={!canManage} value={rule.kind} onChange={(e) => setRule(i, { kind: e.target.value })} className={field}>{KINDS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}</select></div>
-              <div className="md:col-span-1"><label className={label}>Value</label><input type="number" min="0" step="0.01" disabled={!canManage || rule.kind === 'none'} value={rule.kind === 'none' ? '' : num(rule.value)} onChange={(e) => setRule(i, { value: e.target.value })} className={field} /></div>
+                <select disabled={!editable} value={rule.kind} onChange={(e) => setRule(i, { kind: e.target.value })} className={field}>{KINDS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}</select></div>
+              <div className="md:col-span-1"><label className={label}>Value</label><input type="number" min="0" step="0.01" disabled={!editable || rule.kind === 'none'} value={rule.kind === 'none' ? '' : num(rule.value)} onChange={(e) => setRule(i, { value: e.target.value })} className={field} /></div>
               <div className="col-span-2 md:col-span-12 flex flex-wrap items-center gap-2">
-                <input type="text" disabled={!canManage} value={rule.note || ''} onChange={(e) => setRule(i, { note: e.target.value })} placeholder="Note (optional)" className={`${field} flex-1 min-w-[200px]`} />
-                {canManage && (<>
+                <input type="text" disabled={!editable} value={rule.note || ''} onChange={(e) => setRule(i, { note: e.target.value })} placeholder="Note (optional)" className={`${field} flex-1 min-w-[200px]`} />
+                {editable && (<>
                   <button type="button" onClick={() => move(i, -1)} className="px-2 py-1 rounded-lg text-xs font-black border-0 cursor-pointer" style={chip('#e2e8f0', '#334155')}>↑</button>
                   <button type="button" onClick={() => move(i, 1)} className="px-2 py-1 rounded-lg text-xs font-black border-0 cursor-pointer" style={chip('#e2e8f0', '#334155')}>↓</button>
-                  <button type="button" onClick={() => set('rules', cfg.rules.filter((_, j) => j !== i))} className="px-2 py-1 rounded-lg text-xs font-black border-0 cursor-pointer" style={chip('#fee2e2', '#991b1b')}>Delete</button>
+                  <button type="button" onClick={() => patchSet({ rules: cur.rules.filter((_, j) => j !== i) })} className="px-2 py-1 rounded-lg text-xs font-black border-0 cursor-pointer" style={chip('#fee2e2', '#991b1b')}>Delete</button>
                 </>)}
               </div>
             </div>
@@ -555,7 +654,7 @@ function RulesPanel({ canManage, onChanged }) {
       </div>
 
       <div className="border border-indigo-200 bg-indigo-50/40 rounded-2xl p-4 space-y-2">
-        <p className="font-black text-indigo-900 text-xs uppercase">Try a scenario</p>
+        <p className="font-black text-indigo-900 text-xs uppercase">Try a scenario {scope ? `(${roleLabel(scope)}${own ? '' : ' - default rules'})` : '(default rules)'}</p>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-2 items-end">
           <div><label className={label}>Salary</label><input type="number" value={sim.salary} onChange={(e) => setSim({ ...sim, salary: e.target.value })} className={field} /></div>
           <div><label className={label}>Situation</label><select value={sim.event} onChange={(e) => setSim({ ...sim, event: e.target.value })} className={field}>{EVENTS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}</select></div>
