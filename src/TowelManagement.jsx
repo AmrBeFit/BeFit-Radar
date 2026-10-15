@@ -153,9 +153,9 @@ export default function TowelManagement({ currentUser, branchesList }) {
     return towelBranches;
   }, [currentUser, branchesList, towelEnabledBranches, isTowelBranchesConfigured]);
 
-  // First time the list of permitted branches is known: start with all of them selected (the person can clear / change it).
+  // Nothing is selected at first - the person picks the branch(es). Only when there is exactly ONE towel branch is it chosen for them.
   useEffect(() => {
-    if (!branchesSeededRef.current && userAllowedBranches.length > 0) {
+    if (!branchesSeededRef.current && userAllowedBranches.length === 1) {
       branchesSeededRef.current = true;
       setSelectedBranches(userAllowedBranches);
     }
@@ -756,9 +756,9 @@ export default function TowelManagement({ currentUser, branchesList }) {
             onClick={() => setBranchPanelOpen((o) => !o)}
             className="flex items-center gap-2 bg-white border border-slate-300 font-extrabold text-xs text-indigo-700 px-4 py-2 rounded-xl shadow-sm cursor-pointer hover:border-indigo-500 transition-all"
           >
-            🏢 Branches:
+            🏢
             <span>
-              {selectedBranches.length === 0 ? 'none selected'
+              {selectedBranches.length === 0 ? 'Select branch...'
                 : selectedBranches.length === userAllowedBranches.length ? `All (${selectedBranches.length})`
                 : selectedBranches.length === 1 ? selectedBranches[0]
                 : `${selectedBranches.length} selected`}
