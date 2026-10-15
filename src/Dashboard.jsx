@@ -1458,6 +1458,33 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  // Change ONLY the person in charge - the status is not touched.
+  const handleReassign = async (req, newId) => {
+    if (!newId || newId === req.assignedToId) return;
+    const m = taskAssignees.find((x) => x.id === newId);
+    if (!m) return alert('Invalid selection.');
+    try {
+      await updateDoc(doc(db, 'requests', req.id), {
+        assignedTo: m.username,
+        assignedToId: m.id,
+        assignedToPhone: phonesMap[m.id] || m.phone || 'N/A',
+        assignedAt: serverTimestamp(),
+        ...(!req.firstResponseAt && (req.status || 'New') !== 'New' ? { firstResponseAt: serverTimestamp() } : {})
+      });
+      await addDoc(collection(db, 'logs'), {
+        type: 'STATUS_CHANGE',
+        title: req.title || 'Maintenance Request',
+        fromStatus: req.status || 'New',
+        toStatus: req.status || 'New',
+        assignedTo: m.username,
+        performedBy: currentUserIdentifier,
+        timestamp: serverTimestamp()
+      });
+    } catch (err) {
+      alert('Error changing the person in charge: ' + err.message);
+    }
+  };
+
   const handleDeleteRequest = async (reqId) => {
     if (!isAdmin) return alert("Sorry, this action is exclusive to System Admin only.");
     if (window.confirm('Are you sure you want to delete this maintenance request?')) {
@@ -3738,6 +3765,21 @@ export default function Dashboard({ user, onLogout }) {
                             <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-900">
                               <span>👤 In Charge: <strong>{req.assignedTo}</strong></span>
                               <span>📞 <strong>{(req.assignedToPhone && req.assignedToPhone !== 'N/A') ? req.assignedToPhone : (phonesMap[req.assignedToId] || 'N/A')}</strong></span>
+                            </div>
+                          )}
+                          {canManageStatus && (isFacilityManager || isAdmin) && (
+                            <div className="mt-2">
+                              <select
+                                value=""
+                                onChange={(e) => handleReassign(req, e.target.value)}
+                                title="Change the person in charge without changing the status"
+                                className="text-xs font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 rounded-xl px-2 py-1.5 cursor-pointer max-w-full"
+                              >
+                                <option value="">{req.assignedTo ? '🔄 Change person in charge...' : '👤 Assign a person...'}</option>
+                                {taskAssignees.filter((m) => m.id !== req.assignedToId).map((m) => (
+                                  <option key={m.id} value={m.id}>{m.username} - {roleLabel(m.role)}</option>
+                                ))}
+                              </select>
                             </div>
                           )}
                         </div>
