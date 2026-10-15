@@ -29,6 +29,48 @@ const DEFAULT_PRICING = {
   largeWashPrice: 6
 };
 
+// ---- numbers used by the header, the report and the per-branch table ----
+const computeMetrics = (txs) => txs.reduce(
+  (acc, tx) => {
+    if (tx.type === 'SUPPLIER') {
+      acc.purchasedSmall += Number(tx.smallCount) || 0;
+      acc.purchasedLarge += Number(tx.largeCount) || 0;
+    } else if (tx.type === 'LAUNDRY_OUT') {
+      acc.sentToLaundrySmall += Number(tx.smallCount) || 0;
+      acc.sentToLaundryLarge += Number(tx.largeCount) || 0;
+    } else if (tx.type === 'LAUNDRY_IN') {
+      acc.returnedFromLaundrySmall += Number(tx.smallCount) || 0;
+      acc.returnedFromLaundryLarge += Number(tx.largeCount) || 0;
+      acc.lostSmall += Number(tx.smallLost) || 0;
+      acc.lostLarge += Number(tx.largeLost) || 0;
+      acc.damagedSmall += Number(tx.smallDamaged) || 0;
+      acc.damagedLarge += Number(tx.largeDamaged) || 0;
+    }
+    return acc;
+  },
+  {
+    purchasedSmall: 0, purchasedLarge: 0,
+    sentToLaundrySmall: 0, sentToLaundryLarge: 0,
+    returnedFromLaundrySmall: 0, returnedFromLaundryLarge: 0,
+    lostSmall: 0, lostLarge: 0,
+    damagedSmall: 0, damagedLarge: 0
+  }
+);
+
+const deriveStock = (m) => {
+  const inLaundry = {
+    small: Math.max(0, m.sentToLaundrySmall - (m.returnedFromLaundrySmall + m.lostSmall + m.damagedSmall)),
+    large: Math.max(0, m.sentToLaundryLarge - (m.returnedFromLaundryLarge + m.lostLarge + m.damagedLarge))
+  };
+  const clean = {
+    small: Math.max(0, m.purchasedSmall - inLaundry.small - m.lostSmall - m.damagedSmall),
+    large: Math.max(0, m.purchasedLarge - inLaundry.large - m.lostLarge - m.damagedLarge)
+  };
+  return { inLaundry, clean };
+};
+
+const toYmd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
 export default function TowelManagement({ currentUser, branchesList }) {
   const allowedRoles = ['ADMIN', 'BRANCH MANAGER', 'FACILITY MANAGER', 'FACILITY MEMBER', 'USER'];
   const userRole = (typeof currentUser === 'object' ? currentUser?.role : '')?.toUpperCase() || '';
@@ -111,6 +153,14 @@ export default function TowelManagement({ currentUser, branchesList }) {
     return towelBranches;
   }, [currentUser, branchesList, towelEnabledBranches, isTowelBranchesConfigured]);
 
+  // First time the list of permitted branches is known: start with all of them selected (the person can clear / change it).
+  useEffect(() => {
+    if (!branchesSeededRef.current && userAllowedBranches.length > 0) {
+      branchesSeededRef.current = true;
+      setSelectedBranches(userAllowedBranches);
+    }
+  }, [userAllowedBranches]);
+
   // Update: pricing is now the live, shared value synced from Firestore (read by everyone, edited only by Admin via the Save button)
   const [pricing, setPricing] = useState(DEFAULT_PRICING);
   const [pricingForm, setPricingForm] = useState(DEFAULT_PRICING);
@@ -122,7 +172,12 @@ export default function TowelManagement({ currentUser, branchesList }) {
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(true);
 
   const [activeTab, setActiveTab] = useState('report');
-  const [selectedBranchFilter, setSelectedBranchFilter] = useState('');
+  // Branches shown in the report: any number of them at once (checkboxes). Empty = nothing chosen yet.
+  const [selectedBranches, setSelectedBranches] = useState([]);
+  const [branchSearch, setBranchSearch] = useState('');
+  const [branchPanelOpen, setBranchPanelOpen] = useState(false);
+  const [branchSort, setBranchSort] = useState({ key: 'branch', dir: 'asc' });
+  const branchesSeededRef = useRef(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
@@ -328,10 +383,10 @@ export default function TowelManagement({ currentUser, branchesList }) {
 
   // Filtered Transactions
   const filteredTransactions = useMemo(() => {
-    if (!selectedBranchFilter) return [];
+    if (selectedBranches.length === 0) return [];
 
     return transactions.filter((tx) => {
-      if (selectedBranchFilter !== 'ALL_BRANCHES' && tx.branch !== selectedBranchFilter) {
+      if (!selectedBranches.includes(tx.branch)) {
         return false;
       }
       
@@ -346,46 +401,32 @@ export default function TowelManagement({ currentUser, branchesList }) {
       }
       return true;
     });
-  }, [transactions, selectedBranchFilter, startDate, endDate]);
+  }, [transactions, selectedBranches, startDate, endDate]);
 
-  const metrics = useMemo(() => {
-    return filteredTransactions.reduce(
-      (acc, tx) => {
-        if (tx.type === 'SUPPLIER') {
-          acc.purchasedSmall += Number(tx.smallCount) || 0;
-          acc.purchasedLarge += Number(tx.largeCount) || 0;
-        } else if (tx.type === 'LAUNDRY_OUT') {
-          acc.sentToLaundrySmall += Number(tx.smallCount) || 0;
-          acc.sentToLaundryLarge += Number(tx.largeCount) || 0;
-        } else if (tx.type === 'LAUNDRY_IN') {
-          acc.returnedFromLaundrySmall += Number(tx.smallCount) || 0;
-          acc.returnedFromLaundryLarge += Number(tx.largeCount) || 0;
-          acc.lostSmall += Number(tx.smallLost) || 0;
-          acc.lostLarge += Number(tx.largeLost) || 0;
-          acc.damagedSmall += Number(tx.smallDamaged) || 0;
-          acc.damagedLarge += Number(tx.largeDamaged) || 0;
-        }
-        return acc;
-      },
-      {
-        purchasedSmall: 0, purchasedLarge: 0,
-        sentToLaundrySmall: 0, sentToLaundryLarge: 0,
-        returnedFromLaundrySmall: 0, returnedFromLaundryLarge: 0,
-        lostSmall: 0, lostLarge: 0,
-        damagedSmall: 0, damagedLarge: 0
-      }
-    );
-  }, [filteredTransactions]);
+  const metrics = useMemo(() => computeMetrics(filteredTransactions), [filteredTransactions]);
 
-  const currentlyInLaundry = {
-    small: Math.max(0, metrics.sentToLaundrySmall - (metrics.returnedFromLaundrySmall + metrics.lostSmall + metrics.damagedSmall)),
-    large: Math.max(0, metrics.sentToLaundryLarge - (metrics.returnedFromLaundryLarge + metrics.lostLarge + metrics.damagedLarge))
-  };
+  const { inLaundry: currentlyInLaundry, clean: availableCleanStock } = deriveStock(metrics);
 
-  const availableCleanStock = {
-    small: Math.max(0, metrics.purchasedSmall - currentlyInLaundry.small - metrics.lostSmall - metrics.damagedSmall),
-    large: Math.max(0, metrics.purchasedLarge - currentlyInLaundry.large - metrics.lostLarge - metrics.damagedLarge)
-  };
+  // One row per selected branch (+ a total), for the quick comparison table.
+  const branchRows = useMemo(() => {
+    const rows = selectedBranches.map((b) => {
+      const m = computeMetrics(filteredTransactions.filter((tx) => tx.branch === b));
+      const st = deriveStock(m);
+      const net = m.returnedFromLaundrySmall * Number(pricing.smallWashPrice || 0) + m.returnedFromLaundryLarge * Number(pricing.largeWashPrice || 0)
+        - m.lostSmall * Number(pricing.smallPurchasePrice || 0) - m.lostLarge * Number(pricing.largePurchasePrice || 0);
+      return {
+        branch: b, m, st, net,
+        clean: st.clean.small + st.clean.large,
+        laundry: st.inLaundry.small + st.inLaundry.large,
+        intake: m.purchasedSmall + m.purchasedLarge,
+        damaged: m.damagedSmall + m.damagedLarge,
+        lost: m.lostSmall + m.lostLarge
+      };
+    });
+    const dir = branchSort.dir === 'asc' ? 1 : -1;
+    rows.sort((a, b) => (branchSort.key === 'branch' ? a.branch.localeCompare(b.branch) : (a[branchSort.key] - b[branchSort.key])) * dir);
+    return rows;
+  }, [selectedBranches, filteredTransactions, pricing, branchSort]);
 
   const activeBranchLaundryOut = useMemo(() => {
     if (!laundryInForm.branch) return { pendingSmall: 0, pendingLarge: 0 };
@@ -562,12 +603,12 @@ export default function TowelManagement({ currentUser, branchesList }) {
   };
 
   const exportToExcel = async () => {
-    if (!selectedBranchFilter) {
-      alert('Please select a branch first before exporting report.');
+    if (selectedBranches.length === 0) {
+      alert('Please select at least one branch first before exporting report.');
       return;
     }
 
-    const branchLabel = selectedBranchFilter === 'ALL_BRANCHES' ? 'All Permitted Branches' : selectedBranchFilter;
+    const branchLabel = selectedBranches.length === 1 ? selectedBranches[0] : `${selectedBranches.length} branches`;
     const workbook = new ExcelJS.Workbook();
     
     const summarySheet = workbook.addWorksheet('Laundry Settlement Summary');
@@ -584,6 +625,22 @@ export default function TowelManagement({ currentUser, branchesList }) {
     summarySheet.addRow({ branch: branchLabel, metric: 'Pending Balance at Laundry', small: currentlyInLaundry.small, large: currentlyInLaundry.large, total: currentlyInLaundry.small + currentlyInLaundry.large });
     summarySheet.addRow({ branch: branchLabel, metric: 'Lost Towels (Charged to Laundry)', small: metrics.lostSmall, large: metrics.lostLarge, total: metrics.lostSmall + metrics.lostLarge });
     summarySheet.addRow({ branch: branchLabel, metric: 'Damaged / Cut (Internal Wear & Tear)', small: metrics.damagedSmall, large: metrics.damagedLarge, total: metrics.damagedSmall + metrics.damagedLarge });
+
+    const perBranchSheet = workbook.addWorksheet('Per Branch');
+    perBranchSheet.columns = [
+      { header: 'Branch', key: 'branch', width: 24 },
+      { header: 'Clean in branch (S)', key: 'cs', width: 18 }, { header: 'Clean in branch (L)', key: 'cl', width: 18 },
+      { header: 'In laundry (S)', key: 'ls', width: 16 }, { header: 'In laundry (L)', key: 'll', width: 16 },
+      { header: 'Supplier intake (S)', key: 'is', width: 18 }, { header: 'Supplier intake (L)', key: 'il', width: 18 },
+      { header: 'Damaged (S)', key: 'ds', width: 14 }, { header: 'Damaged (L)', key: 'dl', width: 14 },
+      { header: 'Lost (S)', key: 'xs', width: 12 }, { header: 'Lost (L)', key: 'xl', width: 12 },
+      { header: 'Net payable (EGP)', key: 'net', width: 18 }
+    ];
+    perBranchSheet.getRow(1).font = { bold: true };
+    branchRows.forEach((r) => perBranchSheet.addRow({
+      branch: r.branch, cs: r.st.clean.small, cl: r.st.clean.large, ls: r.st.inLaundry.small, ll: r.st.inLaundry.large,
+      is: r.m.purchasedSmall, il: r.m.purchasedLarge, ds: r.m.damagedSmall, dl: r.m.damagedLarge, xs: r.m.lostSmall, xl: r.m.lostLarge, net: r.net
+    }));
 
     const logsSheet = workbook.addWorksheet('Detailed Operations Log');
     logsSheet.columns = [
@@ -615,7 +672,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
 
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    saveAs(blob, `Towel_Report_${selectedBranchFilter}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    saveAs(blob, `Towel_Report_${selectedBranches.length === 1 ? selectedBranches[0] : `${selectedBranches.length}_branches`}_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   return (
@@ -691,31 +748,83 @@ export default function TowelManagement({ currentUser, branchesList }) {
         </div>
       )}
 
-      {/* BRANCH FILTER DROPDOWN */}
-      <div className="bg-slate-100 p-4 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <span className="text-xs font-black text-slate-700 uppercase tracking-wider">🏢 Select Branch:</span>
-          <select 
-            value={selectedBranchFilter} 
-            onChange={(e) => setSelectedBranchFilter(e.target.value)} 
-            className="bg-white border border-slate-300 font-extrabold text-xs text-indigo-700 px-4 py-2 rounded-xl shadow-sm outline-none cursor-pointer hover:border-indigo-500 transition-all"
+      {/* BRANCH CHECKBOXES + DATE RANGE */}
+      <div className="bg-slate-100 p-4 rounded-2xl border border-slate-200 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={() => setBranchPanelOpen((o) => !o)}
+            className="flex items-center gap-2 bg-white border border-slate-300 font-extrabold text-xs text-indigo-700 px-4 py-2 rounded-xl shadow-sm cursor-pointer hover:border-indigo-500 transition-all"
           >
-            <option value="">-- Select Branch --</option>
-            {userAllowedBranches.map((b) => (
-              <option key={b} value={b}>{b}</option>
-            ))}
-            {canSeeAllBranches && (
-              <option value="ALL_BRANCHES">🌐 All Permitted Branches</option>
-            )}
-          </select>
+            🏢 Branches:
+            <span>
+              {selectedBranches.length === 0 ? 'none selected'
+                : selectedBranches.length === userAllowedBranches.length ? `All (${selectedBranches.length})`
+                : selectedBranches.length === 1 ? selectedBranches[0]
+                : `${selectedBranches.length} selected`}
+            </span>
+            <span className="text-slate-400 text-[10px]">{branchPanelOpen ? '▲' : '▼'}</span>
+          </button>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {[
+              { label: 'Today', days: 0 },
+              { label: '7 days', days: 6 },
+              { label: '30 days', days: 29 }
+            ].map((p) => {
+              const from = new Date(); from.setDate(from.getDate() - p.days);
+              const active = startDate === toYmd(from) && endDate === toYmd(new Date());
+              return (
+                <button key={p.label} type="button"
+                  onClick={() => { setStartDate(toYmd(from)); setEndDate(toYmd(new Date())); }}
+                  className={`px-3 py-1.5 rounded-lg font-bold border cursor-pointer transition-all ${active ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-400'}`}
+                >{p.label}</button>
+              );
+            })}
+            <button type="button"
+              onClick={() => { const n = new Date(); setStartDate(toYmd(new Date(n.getFullYear(), n.getMonth(), 1))); setEndDate(toYmd(n)); }}
+              className="px-3 py-1.5 rounded-lg font-bold border bg-white text-slate-700 border-slate-200 hover:border-indigo-400 cursor-pointer transition-all"
+            >This month</button>
+            <button type="button"
+              onClick={() => { setStartDate(''); setEndDate(''); }}
+              className={`px-3 py-1.5 rounded-lg font-bold border cursor-pointer transition-all ${!startDate && !endDate ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-400'}`}
+            >All time</button>
+            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="bg-white border p-1.5 rounded-lg font-semibold text-slate-700" />
+            <span className="font-bold text-slate-600">→</span>
+            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="bg-white border p-1.5 rounded-lg font-semibold text-slate-700" />
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs">
-          <span className="font-bold text-slate-600">Date Range:</span>
-          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="bg-white border p-1.5 rounded-lg font-semibold text-slate-700" />
-          <span className="font-bold text-slate-600">To</span>
-          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="bg-white border p-1.5 rounded-lg font-semibold text-slate-700" />
-        </div>
+        {branchPanelOpen && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {userAllowedBranches.length > 8 && (
+                <input
+                  type="text" value={branchSearch} onChange={(e) => setBranchSearch(e.target.value)}
+                  placeholder="🔍 Search a branch..." className="flex-1 min-w-[160px] p-2 border border-slate-200 rounded-lg text-xs font-semibold"
+                />
+              )}
+              <button type="button" onClick={() => setSelectedBranches(userAllowedBranches)} className="px-3 py-1.5 rounded-lg text-[11px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200 cursor-pointer hover:bg-indigo-100">Select all</button>
+              <button type="button" onClick={() => setSelectedBranches([])} className="px-3 py-1.5 rounded-lg text-[11px] font-black bg-slate-100 text-slate-700 border border-slate-200 cursor-pointer hover:bg-slate-200">Clear</button>
+            </div>
+            <div className="flex flex-wrap gap-2 max-h-44 overflow-auto">
+              {userAllowedBranches
+                .filter((b) => b.toLowerCase().includes(branchSearch.trim().toLowerCase()))
+                .map((b) => {
+                  const on = selectedBranches.includes(b);
+                  return (
+                    <label key={b} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer select-none transition-all ${on ? 'bg-indigo-600 text-white border-indigo-700 shadow-sm' : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-indigo-400'}`}>
+                      <input
+                        type="checkbox" checked={on} className="accent-indigo-300"
+                        onChange={() => setSelectedBranches((prev) => (prev.includes(b) ? prev.filter((x) => x !== b) : [...prev, b]))}
+                      />
+                      {b}
+                    </label>
+                  );
+                })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* DASHBOARD HEADER */}
@@ -729,19 +838,19 @@ export default function TowelManagement({ currentUser, branchesList }) {
           </p>
         </div>
 
-        <div className="flex gap-3 w-full md:w-auto">
-          <div style={{ backgroundColor: '#1e293b', borderColor: '#334155' }} className="p-3 rounded-2xl border text-center flex-1 md:flex-none min-w-[130px]">
-            <span className="block text-[10px] text-emerald-400 font-extrabold uppercase tracking-wide">Clean In Branch</span>
-            <span className="text-xl font-black text-white mt-0.5 block">
-              {selectedBranchFilter ? `${availableCleanStock.small} S / ${availableCleanStock.large} L` : '-'}
-            </span>
-          </div>
-          <div style={{ backgroundColor: '#1e293b', borderColor: '#334155' }} className="p-3 rounded-2xl border text-center flex-1 md:flex-none min-w-[130px]">
-            <span className="block text-[10px] text-amber-400 font-extrabold uppercase tracking-wide">In Laundry Now</span>
-            <span className="text-xl font-black text-white mt-0.5 block">
-              {selectedBranchFilter ? `${currentlyInLaundry.small} S / ${currentlyInLaundry.large} L` : '-'}
-            </span>
-          </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 w-full md:w-auto">
+          {[
+            { label: 'Clean in branch', color: '#34d399', value: `${availableCleanStock.small} S / ${availableCleanStock.large} L` },
+            { label: 'In laundry now', color: '#fbbf24', value: `${currentlyInLaundry.small} S / ${currentlyInLaundry.large} L` },
+            { label: 'Supplier intake', color: '#818cf8', value: `${metrics.purchasedSmall} S / ${metrics.purchasedLarge} L` },
+            { label: 'Damaged', color: '#cbd5e1', value: `${metrics.damagedSmall} S / ${metrics.damagedLarge} L` },
+            { label: 'Lost', color: '#fb7185', value: `${metrics.lostSmall} S / ${metrics.lostLarge} L` }
+          ].map((c) => (
+            <div key={c.label} style={{ backgroundColor: '#1e293b', borderColor: '#334155' }} className="p-3 rounded-2xl border text-center min-w-[120px] transition-all">
+              <span className="block text-[10px] font-extrabold uppercase tracking-wide" style={{ color: c.color }}>{c.label}</span>
+              <span className="text-lg font-black text-white mt-0.5 block">{selectedBranches.length > 0 ? c.value : '-'}</span>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -767,18 +876,18 @@ export default function TowelManagement({ currentUser, branchesList }) {
       {/* TAB 1: REPORT & FINANCIAL SETTLEMENT */}
       {activeTab === 'report' && (
         <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 space-y-6">
-          {!selectedBranchFilter ? (
+          {selectedBranches.length === 0 ? (
             <div className="p-12 text-center text-amber-800 bg-amber-50 rounded-2xl border border-amber-200 space-y-2">
               <span className="text-3xl block">🏢</span>
-              <h4 className="font-extrabold text-base">Please Select a Branch Above</h4>
-              <p className="text-xs text-amber-700">Select a specific branch or "All Permitted Branches" from the dropdown menu above.</p>
+              <h4 className="font-extrabold text-base">Please select at least one branch above</h4>
+              <p className="text-xs text-amber-700">Open "Branches" above and tick one or more branches (or press Select all).</p>
             </div>
           ) : (
             <>
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b pb-4">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
-                    Financial Audit: <span className="text-indigo-600">{selectedBranchFilter === 'ALL_BRANCHES' ? 'All Permitted Branches' : selectedBranchFilter}</span>
+                    Financial Audit: <span className="text-indigo-600">{selectedBranches.length === 1 ? selectedBranches[0] : `${selectedBranches.length} branches`}</span>
                   </h3>
                   <p className="text-xs text-slate-500">Includes receipt links &amp; staff responsibility log.</p>
                 </div>
@@ -788,8 +897,55 @@ export default function TowelManagement({ currentUser, branchesList }) {
                   style={{ backgroundColor: '#059669', color: '#ffffff' }} 
                   className="px-5 py-2.5 rounded-xl text-xs font-black shadow-md hover:opacity-90 border-0 cursor-pointer flex items-center gap-2"
                 >
-                  📥 Export Excel Report ({selectedBranchFilter === 'ALL_BRANCHES' ? 'All Branches' : selectedBranchFilter})
+                  📥 Export Excel Report ({selectedBranches.length === 1 ? selectedBranches[0] : `${selectedBranches.length} branches`})
                 </button>
+              </div>
+
+              {/* PER-BRANCH COMPARISON */}
+              <div className="space-y-2">
+                <h4 className="font-bold text-slate-900 text-sm">Branch by branch</h4>
+                <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 text-slate-700 text-[10px] font-black uppercase tracking-wider">
+                        {[
+                          ['branch', 'Branch'], ['clean', '🟢 Clean'], ['laundry', '🧺 In laundry'], ['intake', '📦 Supplier intake'],
+                          ['damaged', '⚠️ Damaged'], ['lost', '❌ Lost'], ['net', 'Net to laundry']
+                        ].map(([k, label]) => (
+                          <th key={k} className="p-2.5 cursor-pointer select-none hover:bg-slate-200 transition-colors whitespace-nowrap"
+                            onClick={() => setBranchSort((cur) => ({ key: k, dir: cur.key === k && cur.dir === 'desc' ? 'asc' : 'desc' }))}>
+                            {label} {branchSort.key === k ? (branchSort.dir === 'asc' ? '▲' : '▼') : ''}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-semibold text-slate-800">
+                      {branchRows.map((r) => (
+                        <tr key={r.branch} className="hover:bg-indigo-50/40 transition-colors">
+                          <td className="p-2.5 font-black text-slate-900 whitespace-nowrap">{r.branch}</td>
+                          <td className="p-2.5 text-emerald-700 whitespace-nowrap">{r.st.clean.small} S / {r.st.clean.large} L</td>
+                          <td className="p-2.5 whitespace-nowrap" style={{ color: r.laundry > 0 ? '#b45309' : undefined }}>{r.st.inLaundry.small} S / {r.st.inLaundry.large} L</td>
+                          <td className="p-2.5 text-indigo-700 whitespace-nowrap">{r.m.purchasedSmall} S / {r.m.purchasedLarge} L</td>
+                          <td className="p-2.5 whitespace-nowrap">{r.m.damagedSmall} S / {r.m.damagedLarge} L</td>
+                          <td className="p-2.5 whitespace-nowrap" style={{ color: r.lost > 0 ? '#e11d48' : undefined }}>{r.m.lostSmall} S / {r.m.lostLarge} L</td>
+                          <td className="p-2.5 font-black whitespace-nowrap" style={{ color: r.net < 0 ? '#e11d48' : '#047857' }}>{r.net} EGP</td>
+                        </tr>
+                      ))}
+                      {branchRows.length > 1 && (
+                        <tr className="bg-slate-50 font-black text-slate-900">
+                          <td className="p-2.5">Total ({branchRows.length})</td>
+                          <td className="p-2.5 whitespace-nowrap">{availableCleanStock.small} S / {availableCleanStock.large} L</td>
+                          <td className="p-2.5 whitespace-nowrap">{currentlyInLaundry.small} S / {currentlyInLaundry.large} L</td>
+                          <td className="p-2.5 whitespace-nowrap">{metrics.purchasedSmall} S / {metrics.purchasedLarge} L</td>
+                          <td className="p-2.5 whitespace-nowrap">{metrics.damagedSmall} S / {metrics.damagedLarge} L</td>
+                          <td className="p-2.5 whitespace-nowrap">{metrics.lostSmall} S / {metrics.lostLarge} L</td>
+                          <td className="p-2.5 whitespace-nowrap">{financialSettlement.netPayableToLaundry} EGP</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[10px] text-slate-400">Click a column title to sort. Numbers follow the date range above.</p>
               </div>
 
               {/* FINANCIAL CARDS */}

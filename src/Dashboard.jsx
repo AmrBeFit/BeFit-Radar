@@ -445,9 +445,10 @@ export default function Dashboard({ user, onLogout }) {
   const [reportBranchFilters, setReportBranchFilters] = useState([]); // empty = all branches
 
   // Filter & Sort states (Requests)
-  const [statusFilter, setStatusFilter] = useState('All');
-  const [branchFilter, setBranchFilter] = useState('All');
-  const [categoryFilter, setCategoryFilter] = useState('All');
+  const [myRequestsOnly, setMyRequestsOnly] = useState(false); // button: only the requests this account created
+  const [statusFilter, setStatusFilter] = useState([]); // empty = all
+  const [branchFilter, setBranchFilter] = useState([]); // empty = all
+  const [categoryFilter, setCategoryFilter] = useState([]); // empty = all
   const [requestSearch, setRequestSearch] = useState('');
   const [assigneeFilters, setAssigneeFilters] = useState([]); // empty = everyone
   const [sortOrder, setSortOrder] = useState('desc');
@@ -522,7 +523,17 @@ export default function Dashboard({ user, onLogout }) {
   // Per-account permissions: the role gives the DEFAULT, and Admin can switch individual permissions on/off
   // for one account in the Permissions tab (stored as users/{id}.permissions). liveProfile is used so a
   // change made by Admin applies immediately, with no need to log out and in.
-  const perm = (key) => hasPermission(liveProfile ? { ...liveProfile, role: rawRole } : { role: rawRole }, key);
+  // Settings of the whole account type (Permissions tab, "all accounts of this type"): rolePermissions/{role}
+  const [rolePerms, setRolePerms] = useState({});
+  useEffect(() => {
+    if (!rawRole || rawRole === 'Admin') { setRolePerms({}); return undefined; }
+    return onSnapshot(
+      doc(db, 'rolePermissions', rawRole),
+      (s) => setRolePerms(s.exists() ? (s.data().permissions || {}) : {}),
+      () => setRolePerms({})
+    );
+  }, [rawRole]);
+  const perm = (key) => hasPermission(liveProfile ? { ...liveProfile, role: rawRole, rolePermissions: rolePerms } : { role: rawRole, rolePermissions: rolePerms }, key);
   // The System Admin can switch off creating / editing / deleting Coaches, Fitness Managers or QA Members for one account
   const managedRoles = managedRolesBase.filter((r) => (
     r === 'Coach' ? perm('manageCoaches')
@@ -604,7 +615,7 @@ export default function Dashboard({ user, onLogout }) {
   const canSeeChecklist = perm('tab_checklist');
   const canSignOffChecklist = perm('signOffChecklist');
   const canApproveLeave = perm('approveLeave');
-  // Fitness Manager: first (pre-)approval of a Coach's leave; the Branch Manager decides afterwards
+  // Fitness Manager: approves / rejects a Coach's leave (final decision, no Branch Manager needed)
   const canPreApproveLeave = perm('preApproveLeave');
   const canViewLeaveQueue = canApproveLeave || canPreApproveLeave || perm('viewLeaveQueue');
   // Attendance selfies: only HR, Admin and Branch Managers may look at them, and only when really necessary.
@@ -1279,19 +1290,6 @@ export default function Dashboard({ user, onLogout }) {
       });
     } catch (err) {
       alert('Error updating the leave request: ' + err.message);
-    }
-  };
-
-  // Fitness Manager: first opinion on a Coach's leave (pre-approve or pre-reject). The Branch Manager has the final decision.
-  const handleLeavePreReview = async (requestId, status) => {
-    try {
-      await updateDoc(doc(db, 'leaveRequests', requestId), {
-        status, // 'Pre-approved' or 'Pre-rejected'
-        preReviewedBy: currentUserIdentifier,
-        preReviewedAt: serverTimestamp()
-      });
-    } catch (err) {
-      alert('Error saving your opinion on the leave request: ' + err.message);
     }
   };
 
@@ -2363,16 +2361,17 @@ export default function Dashboard({ user, onLogout }) {
       }
     }
 
-    if (statusFilter !== 'All') result = result.filter(r => (r.status || 'New') === statusFilter);
-    if (branchFilter !== 'All') result = result.filter(r => r.branch === branchFilter);
-    if (categoryFilter !== 'All') result = result.filter(r => r.category === categoryFilter);
+    if (myRequestsOnly) result = result.filter(r => r.createdBy === currentUserIdentifier);
+    if (statusFilter.length > 0) result = result.filter(r => statusFilter.includes(r.status || 'New'));
+    if (branchFilter.length > 0) result = result.filter(r => branchFilter.includes(r.branch));
+    if (categoryFilter.length > 0) result = result.filter(r => categoryFilter.includes(r.category));
     // Search by request number (any part of it; spaces, dashes and a leading # are ignored)
     const q = requestSearch.replace(/[\s#-]/g, '').toLowerCase();
     if (q) result = result.filter(r => String(r.requestNumber || '').toLowerCase().includes(q));
     if (assigneeFilters.length > 0) result = result.filter(r => assigneeFilters.includes(r.assignedTo || UNASSIGNED_FILTER));
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
-  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, statusFilter, branchFilter, categoryFilter, requestSearch, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
+  }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, myRequestsOnly, statusFilter, branchFilter, categoryFilter, requestSearch, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
 
   // Options of the "Assigned to" filter: everyone who can be assigned, plus anyone already on a request
   const assigneeFilterOptions = useMemo(() => {
@@ -3545,6 +3544,17 @@ export default function Dashboard({ user, onLogout }) {
                       {showArchivedOnly ? '📂 Viewing Archived' : '📁 Show Archived'}
                     </button>
                   )}
+                  {!isStaff && (
+                    <button
+                      onClick={() => setMyRequestsOnly((v) => !v)}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                        myRequestsOnly ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-slate-100 text-slate-700'
+                      }`}
+                      title="Show only the requests you created yourself"
+                    >
+                      {myRequestsOnly ? '👤 My requests only - show all' : '👤 My requests'}
+                    </button>
+                  )}
                 </div>
                 
                 <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto">
@@ -3569,42 +3579,35 @@ export default function Dashboard({ user, onLogout }) {
                     )}
                   </div>
 
-                  <select
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
-                  >
-                    <option value="All" className="bg-white text-slate-900">All Statuses</option>
-                    <option value="New" className="bg-white text-slate-900">New</option>
-                    <option value="Pending" className="bg-white text-slate-900">Pending</option>
-                    <option value="In Progress" className="bg-white text-slate-900">In Progress</option>
-                    <option value="Not Applicable" className="bg-white text-slate-900">Not Applicable</option>
-                    <option value="Delayed" className="bg-white text-slate-900">Delayed</option>
-                    <option value="Completed Under Testing" className="bg-white text-slate-900">Completed Under Testing</option>
-                    <option value="Completed" className="bg-white text-slate-900">Completed</option>
-                  </select>
+                  <div className="col-span-2 sm:col-auto" style={{ minWidth: 170 }}>
+                    <MultiSelectFilter
+                      options={['New', 'Pending', 'In Progress', 'Not Applicable', 'Delayed', 'Completed Under Testing', 'Completed'].map((v) => ({ value: v, label: v }))}
+                      selected={statusFilter}
+                      onChange={setStatusFilter}
+                      allLabel="All Statuses"
+                      noun="statuses"
+                    />
+                  </div>
 
-                  <select
-                    value={categoryFilter}
-                    onChange={(e) => setCategoryFilter(e.target.value)}
-                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
-                  >
-                    <option value="All" className="bg-white text-slate-900">All Categories</option>
-                    {[...categories].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(c => (
-                      <option key={c.id} value={c.name} className="bg-white text-slate-900">{c.name}</option>
-                    ))}
-                  </select>
+                  <div className="col-span-2 sm:col-auto" style={{ minWidth: 170 }}>
+                    <MultiSelectFilter
+                      options={[...categories].sort((a, b) => (a.name || '').localeCompare(b.name || '')).filter((c) => c.name).map((c) => ({ value: c.name, label: c.name }))}
+                      selected={categoryFilter}
+                      onChange={setCategoryFilter}
+                      allLabel="All Categories"
+                      noun="categories"
+                    />
+                  </div>
 
-                  <select
-                    value={branchFilter}
-                    onChange={(e) => setBranchFilter(e.target.value)}
-                    className="w-full sm:w-auto p-2.5 sm:p-2 bg-white text-slate-900 border rounded-xl text-xs font-semibold focus:outline-none"
-                  >
-                    <option value="All" className="bg-white text-slate-900">All Branches</option>
-                    {branches.map(b => (
-                      <option key={b.id} value={b.name} className="bg-white text-slate-900">{b.name}</option>
-                    ))}
-                  </select>
+                  <div className="col-span-2 sm:col-auto" style={{ minWidth: 170 }}>
+                    <MultiSelectFilter
+                      options={branches.filter((b) => b.name).map((b) => ({ value: b.name, label: b.name }))}
+                      selected={branchFilter}
+                      onChange={setBranchFilter}
+                      allLabel="All Branches"
+                      noun="branches"
+                    />
+                  </div>
 
                   {!isStaff && (
                     <div className="col-span-2 sm:col-auto" style={{ minWidth: 190 }}>
@@ -4127,7 +4130,7 @@ export default function Dashboard({ user, onLogout }) {
               <div className="max-w-xl mx-auto bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-3">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
-                    📋 {isAdmin ? 'Leave Requests' : canApproveLeave ? 'Leave Requests Awaiting Approval' : canPreApproveLeave ? 'Coach Leave Requests (your opinion first)' : 'Branch Leave Requests (view only)'}
+                    📋 {isAdmin ? 'Leave Requests' : canApproveLeave ? 'Leave Requests Awaiting Approval' : canPreApproveLeave ? 'Coach Leave Requests (you decide)' : 'Branch Leave Requests (view only)'}
                     {pendingCount > 0 && (
                       <span className="bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
                         {pendingCount}
@@ -4200,21 +4203,21 @@ export default function Dashboard({ user, onLogout }) {
                               {badge.label}
                             </span>
                             <div className="flex gap-2 justify-end">
-                              {r.status === 'Pending' && canPreApproveLeave && !canApproveLeave && isCoachLeave(r) && (
+                              {isOpenLeave(r) && canPreApproveLeave && !canApproveLeave && isCoachLeave(r) && (
                                 <>
                                   <button
-                                    onClick={() => handleLeavePreReview(r.id, 'Pre-rejected')}
+                                    onClick={() => handleLeaveDecision(r.id, 'Rejected')}
                                     className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-300 hover:bg-rose-200 transition"
-                                    title="Your opinion only - the Branch Manager makes the final decision"
+                                    title="Final decision"
                                   >
                                     Reject
                                   </button>
                                   <button
-                                    onClick={() => handleLeavePreReview(r.id, 'Pre-approved')}
-                                    className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-sky-100 text-sky-700 border border-sky-300 hover:bg-sky-200 transition"
-                                    title="Your opinion only - the Branch Manager makes the final decision"
+                                    onClick={() => handleLeaveDecision(r.id, 'Approved')}
+                                    className="px-3 py-1.5 rounded-xl text-[11px] font-black bg-emerald-100 text-emerald-700 border border-emerald-300 hover:bg-emerald-200 transition"
+                                    title="Final decision"
                                   >
-                                    Pre-approve
+                                    Approve
                                   </button>
                                 </>
                               )}

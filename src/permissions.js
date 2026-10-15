@@ -50,7 +50,7 @@ export const PERMISSIONS = [
 
   // ---- Leaves ----
   { key: 'approveLeave', group: 'leaves', label: 'Approve / reject leaves', desc: 'Decide leave requests (Branch Managers: own branches only; HR: all).', def: (r) => ['HR', 'Branch Manager'].includes(r), grantable: true, server: true },
-  { key: 'preApproveLeave', group: 'leaves', label: 'Pre-approve / pre-reject Coach leaves', desc: 'First opinion on a Coach\'s leave at own branches; the Branch Manager gives the final decision.', def: (r, raw) => raw === 'Fitness Manager', grantable: true, server: true },
+  { key: 'preApproveLeave', group: 'leaves', label: 'Approve / reject Coach leaves (final)', desc: 'Decide the leave of a Coach at own branches, with no Branch Manager needed (the Branch Manager / Branch Manager+ can decide it too).', def: (r, raw) => raw === 'Fitness Manager', grantable: true, server: true },
   { key: 'viewLeaveBalances', group: 'leaves', label: 'See leave balances', desc: 'The remaining balance on each leave request and the leave balances report (own branches; System Admin / HR: everyone). The employee never sees their own balance.', def: (r, raw) => ['HR', 'Branch Manager'].includes(r) || raw === 'Fitness Manager', grantable: true, server: true },
   { key: 'editLeaveBalance', group: 'leaves', label: 'Change leave balances', desc: 'Set the yearly leave balance of an account (default 3 days).', def: (r) => r === 'HR', grantable: true, server: true },
   { key: 'viewLeaveQueue', group: 'leaves', label: 'View leave requests (view only)', desc: 'See the leave requests of own branches, without deciding.', def: (r) => ['HR', 'Branch Manager', 'Supervisor'].includes(r), grantable: true, server: false },
@@ -96,13 +96,25 @@ export const roleDefault = (role, key) => {
   return p ? !!p.def(baseRole(role || 'User'), role || 'User') : false;
 };
 
+// The setting of a whole account TYPE: the System Admin can change a permission for every account of a role
+// (stored in rolePermissions/{role}.permissions = { key: true|false }). Without an entry, the built-in default above applies.
+// A permission the server cannot honour for that role (grantable: false) can only be taken away, never given.
+export const roleEffective = (role, key, rolePerms) => {
+  const base = roleDefault(role, key);
+  const p = PERMISSION_BY_KEY[key];
+  const o = rolePerms ? rolePerms[key] : undefined;
+  if (typeof o !== 'boolean') return base;
+  if (o === true && !base && p && !p.grantable) return base;
+  return o;
+};
+
 // Final answer for one account. Admin = always yes.
 export const hasPermission = (profile, key) => {
   const role = profile?.role || 'User';
   if (role === 'Admin') return true;
   const p = PERMISSION_BY_KEY[key];
   if (!p) return false;
-  const base = !!p.def(baseRole(role), role);
+  const base = roleEffective(role, key, profile?.rolePermissions);
   const override = profile?.permissions?.[key];
   if (typeof override !== 'boolean') return base;
   if (override === true && !base && !p.grantable) return false; // cannot be granted, see header

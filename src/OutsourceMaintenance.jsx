@@ -508,13 +508,13 @@ export default function OutsourceMaintenance({ currentUser, branchesList = [], u
   }, [me.id, seesAll, assignedKey]);
 
   /* ----- new request form ----- */
-  const empty = { branch: '', maintenanceType: '', description: '', workerCount: '', workerName: '', nationalId: '', phone: '', company: '', area: '', countMayIncrease: false, expectedDate: '', expectedTime: '' };
+  const empty = { branch: '', maintenanceTypes: [], description: '', workerCount: '', workerName: '', nationalId: '', phone: '', company: '', areaNames: [], countMayIncrease: false, expectedDate: '', expectedTime: '' };
   const [form, setForm] = useState(empty);
   const [idPhoto, setIdPhoto] = useState('');
   const [saving, setSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-  const chosenArea = areas.find((a) => a.name === form.area);
+  const chosenArea = areas.find((a) => form.areaNames.includes(a.name) && a.sensitive) || null;
   const sensitive = !!chosenArea?.sensitive;
   const branchValue = form.branch || (requestBranches.length === 1 ? requestBranches[0] : '');
   const typeNames = useMemo(() => [...categories].map((c) => c.name).filter(Boolean).sort((a, b) => a.localeCompare(b)), [categories]);
@@ -531,7 +531,7 @@ export default function OutsourceMaintenance({ currentUser, branchesList = [], u
     e.preventDefault();
     const name = form.workerName.trim().replace(/\s+/g, ' ');
     if (!branchValue) return alert('Please choose the branch.');
-    if (!form.maintenanceType) return alert('Please choose the type of maintenance.');
+    if (form.maintenanceTypes.length === 0) return alert('Please tick at least one type of maintenance.');
     const countNum = parseInt(form.workerCount, 10);
     if (!Number.isInteger(countNum) || countNum < 1 || countNum > 20) return alert('Please enter how many technicians will enter (1 to 20).');
     if (form.description.trim().length < 3) return alert('Please describe the maintenance work.');
@@ -542,7 +542,7 @@ export default function OutsourceMaintenance({ currentUser, branchesList = [], u
     if (form.company.trim().length < 2) return alert('Please enter the maintenance company name.');
     if (!form.expectedDate) return alert('Please choose the expected date of the maintenance.');
     if (!form.expectedTime) return alert('Please choose the expected time of the maintenance.');
-    if (!form.area) return alert('Please choose the place of the maintenance inside the branch.');
+    if (form.areaNames.length === 0) return alert('Please tick at least one place of the maintenance inside the branch.');
 
     setSaving(true);
     try {
@@ -630,12 +630,20 @@ export default function OutsourceMaintenance({ currentUser, branchesList = [], u
                 {requestBranches.map((b) => <option key={b} value={b}>{b}</option>)}
               </select>
             </div>
-            <div>
-              <label className={label}>Type of maintenance</label>
-              <select required value={form.maintenanceType} onChange={(e) => set('maintenanceType', e.target.value)} className={field}>
-                <option value="">Select type...</option>
-                {typeNames.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
+            <div className="sm:col-span-2">
+              <label className={label}>Type of maintenance <span className="text-slate-400 font-semibold">(tick one or more)</span></label>
+              <div className="flex flex-wrap gap-2">
+                {typeNames.length === 0 && <span className="text-xs text-slate-400">No types set up yet</span>}
+                {typeNames.map((t) => {
+                  const on = form.maintenanceTypes.includes(t);
+                  return (
+                    <label key={t} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer select-none transition-all ${on ? 'bg-indigo-600 text-white border-indigo-700 shadow-sm' : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-indigo-400'}`}>
+                      <input type="checkbox" checked={on} className="accent-indigo-300" onChange={() => set('maintenanceTypes', on ? form.maintenanceTypes.filter((x) => x !== t) : [...form.maintenanceTypes, t])} />
+                      {t}
+                    </label>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
@@ -723,10 +731,18 @@ export default function OutsourceMaintenance({ currentUser, branchesList = [], u
 
           <div>
             <label className={label}>Place of the maintenance inside the branch</label>
-            <select required value={form.area} onChange={(e) => set('area', e.target.value)} className={field}>
-              <option value="">{areas.length === 0 ? 'No places set up yet - ask the System Admin (Settings)' : 'Select place...'}</option>
-              {areas.map((a) => <option key={a.id} value={a.name}>{a.name}{a.sensitive ? ' (2 approvals)' : ''}</option>)}
-            </select>
+            <div className="flex flex-wrap gap-2">
+              {areas.length === 0 && <span className="text-xs text-slate-400">No places set up yet - ask the System Admin (Settings)</span>}
+              {areas.map((a) => {
+                const on = form.areaNames.includes(a.name);
+                return (
+                  <label key={a.id} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer select-none transition-all ${on ? (a.sensitive ? 'bg-rose-600 text-white border-rose-700' : 'bg-indigo-600 text-white border-indigo-700') + ' shadow-sm' : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-indigo-400'}`}>
+                    <input type="checkbox" checked={on} className="accent-indigo-300" onChange={() => set('areaNames', on ? form.areaNames.filter((x) => x !== a.name) : [...form.areaNames, a.name])} />
+                    {a.name}{a.sensitive ? ' (2 approvals)' : ''}
+                  </label>
+                );
+              })}
+            </div>
           </div>
           {sensitive && (
             <p className="text-[11px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
