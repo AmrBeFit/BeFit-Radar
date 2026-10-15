@@ -26,7 +26,8 @@ export const PERMISSION_GROUPS = [
   { id: 'checklist', label: 'Checklist' },
   { id: 'maintenance', label: 'Facility Management' },
   { id: 'integrity', label: 'Integrity Reports' },
-  { id: 'users', label: 'Users & Schedule' }
+  { id: 'users', label: 'Users & Schedule' },
+  { id: 'payroll', label: 'Payroll & Deductions' }
 ];
 
 // Role aliases: Branch Manager+ behaves as Branch Manager, QA Manager as QA (a "def" below receives the
@@ -74,6 +75,15 @@ export const PERMISSIONS = [
   { key: 'manageCoaches', group: 'users', label: 'Manage Coaches', desc: 'Create, edit and delete Coach accounts (Branch Manager+ and Fitness Manager). Switch off to take it away.', def: (r, raw) => raw === 'Branch Manager+' || raw === 'Fitness Manager', grantable: false, server: true },
   { key: 'manageFitnessManagers', group: 'users', label: 'Manage Fitness Managers', desc: 'Create, edit and delete Fitness Manager accounts (Branch Manager+). Switch off to take it away.', def: (r, raw) => raw === 'Branch Manager+', grantable: false, server: true },
   { key: 'createQAMembers', group: 'users', label: 'Create QA Members', desc: 'Create, edit and delete QA Member accounts (QA Manager). Switch off to take it away.', def: (r, raw) => raw === 'QA Manager', grantable: false, server: true },
+
+  // ---- Payroll / HR report ----
+  { key: 'tab_hrReport', group: 'payroll', label: 'HR Report tab (salaries, payroll sheet, payslips)', desc: 'Open the HR Report: attendance, lateness, leaves, penalties, salaries, bank accounts, the payroll sheet and the payslips. Sensitive: it shows everyone\'s salary and bank account.', def: (r) => r === 'HR', grantable: true, server: true },
+  { key: 'managePayroll', group: 'payroll', label: 'Edit payroll (salaries, bank, rules, release payslips)', desc: 'Set salaries and bank accounts, the deduction rules, bonuses, and release / hide payslips. Needs the HR Report tab.', def: (r) => r === 'HR', grantable: true, server: true },
+  { key: 'tab_payslip', group: 'payroll', label: 'My Payslip tab', desc: 'See my own payslip once HR released it. Nobody can see anyone else\'s.', def: () => true, grantable: true, server: true },
+
+  // ---- Salary deductions ----
+  { key: 'giveDeduction', group: 'payroll', label: 'Record salary deductions', desc: 'Record a deduction (an amount in EGP or a number of days) on staff of own branches (System Admin / HR: anyone). Can be cancelled only within 24 hours (the System Admin can cancel any time). Off for every type unless you switch it on.', def: () => false, grantable: true, server: true },
+  { key: 'viewDeductions', group: 'payroll', label: 'See all salary deductions', desc: 'The salary deductions report of every branch. Whoever may record deductions sees those of their own branches; everybody sees their own.', def: (r) => r === 'HR', grantable: true, server: true },
 
   // ---- Integrity ----
   { key: 'reviewIntegrity', group: 'integrity', label: 'Read integrity reports', desc: 'Read all reports (never who filed them - System Admin only).', def: (r) => r === 'HR', grantable: true, server: true }

@@ -36,6 +36,9 @@ import PermissionsManager from './PermissionsManager';
 import { hasPermission, roleLabel } from './permissions';
 import BranchChecklist from './BranchChecklist';
 import LeaveReport from './LeaveReport';
+import Deductions from './Deductions';
+import HRReport from './HRReport';
+import MyPayslip from './MyPayslip';
 import OutsourceMaintenance, { OutsourceAreasSettings, useOutsourceWaiting } from './OutsourceMaintenance';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
@@ -599,6 +602,8 @@ export default function Dashboard({ user, onLogout }) {
   // HR can view attendance reports for all branches (but not manage users)
   // Update: CEO now also sees the full check-in/check-out attendance reports across every branch (view-only, same as everyone else here - this tab was never editable).
   const canViewReports = perm('tab_reports');
+  const canSeeHRReport = perm('tab_hrReport');
+  const canSeePayslip = perm('tab_payslip');
   // The Schedule tab (planned shifts + plan-vs-actual report): those who plan it or need to see it
   const canSeeSchedule = perm('tab_schedule');
   // The CEO can no longer add, edit or delete users - Admin, Branch Manager and Facility Manager can create,
@@ -2880,7 +2885,8 @@ export default function Dashboard({ user, onLogout }) {
         ceo_services: canSeeCeoServices,
         attendance: canSeeAttendance,
         schedule: canSeeSchedule,
-        outsource: canSeeOutsource
+        outsource: canSeeOutsource,
+        payslip: canSeePayslip
       };
       if (tab && allowed[tab]) {
         setActiveTab(tab);
@@ -2890,7 +2896,7 @@ export default function Dashboard({ user, onLogout }) {
     };
     window.addEventListener('befit-push-navigate', onPushNavigate);
     return () => window.removeEventListener('befit-push-navigate', onPushNavigate);
-  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule, canSeeOutsource]);
+  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule, canSeeOutsource, canSeePayslip]);
 
   const handleAddRequest = async (e) => {
     e.preventDefault();
@@ -3324,6 +3330,24 @@ export default function Dashboard({ user, onLogout }) {
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'reports' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
               📊 Reports
+            </button>
+          )}
+
+          {canSeeHRReport && (
+            <button
+              onClick={() => setActiveTab('hr_report')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'hr_report' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              🧾 HR Report
+            </button>
+          )}
+
+          {canSeePayslip && (
+            <button
+              onClick={() => setActiveTab('payslip')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'payslip' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              💵 My Payslip
             </button>
           )}
 
@@ -4271,6 +4295,9 @@ export default function Dashboard({ user, onLogout }) {
               hideUser={(row) => !viewerIsHiddenAdmin && isHiddenAdminUser(row)}
             />
           )}
+
+          {/* Salary deductions: record (giveDeduction), see all (viewDeductions); everybody sees their own */}
+          <Deductions hideUser={(row) => !viewerIsHiddenAdmin && isHiddenAdminUser(row)} />
         </div>
       )}
 
@@ -4526,6 +4553,12 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {/* TAB 4: REPORTS */}
+      {activeTab === 'hr_report' && canSeeHRReport && (
+        <HRReport hideUser={(row) => !viewerIsHiddenAdmin && isHiddenAdminUser(row)} />
+      )}
+
+      {activeTab === 'payslip' && canSeePayslip && <MyPayslip />}
+
       {activeTab === 'reports' && canViewReports && (
         <>
         <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-sm space-y-5">
