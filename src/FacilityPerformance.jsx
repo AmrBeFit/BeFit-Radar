@@ -67,7 +67,8 @@ const buildRows = (requests) => requests
       respMs: firstResp ? Math.max(0, firstResp - created) : null,
       totalMs: completed ? Math.max(0, completed - created) : null,
       workMs: assigned && completed ? Math.max(0, completed - assigned) : null,
-      assignedTo: r.assignedTo || ''
+      assignees: (Array.isArray(r.assigneeNames) && r.assigneeNames.length ? r.assigneeNames : (r.assignedTo ? [r.assignedTo] : [])),
+      assignedTo: (Array.isArray(r.assigneeNames) && r.assigneeNames.length ? r.assigneeNames : (r.assignedTo ? [r.assignedTo] : [])).join(', ')
     };
   })
   .filter(Boolean);
@@ -157,7 +158,8 @@ const analyseOpen = (rows, sla, now) => {
     .sort((a, b) => b.ageMs - a.ageMs);
   const overdue = open.filter((r) => r.ageMs > finMs);
   const load = new Map();
-  open.forEach((r) => { const k = r.assignedTo || ''; load.set(k, (load.get(k) || 0) + 1); });
+  // a shared task counts once for EACH person on it
+  open.forEach((r) => { (r.assignees.length ? r.assignees : ['']).forEach((k) => load.set(k, (load.get(k) || 0) + 1)); });
   return { open, overdue, oldest: open[0] || null, unassigned: load.get('') || 0, load };
 };
 
@@ -321,12 +323,15 @@ export default function FacilityPerformance({ requests = [], branches = [], onBa
     const per = new Map();
     const get = (name) => { if (!per.has(name)) per.set(name, { name, total: 0, completed: 0, work: [], resp: [], rows: [] }); return per.get(name); };
     a.period.forEach((r) => {
-      if (!r.assignedTo) return;
-      const x = get(r.assignedTo);
-      x.total += 1; x.rows.push(r);
-      if (r.status === 'Completed') x.completed += 1;
-      if (r.workMs !== null) x.work.push(r.workMs);
-      if (r.respMs !== null) x.resp.push(r.respMs);
+      // a shared task counts for EACH person who was on it
+      r.assignees.forEach((name) => {
+        const x = get(name);
+        x.total += 1; x.rows.push(r);
+        if (r.assignees.length > 1) x.shared = (x.shared || 0) + 1;
+        if (r.status === 'Completed') x.completed += 1;
+        if (r.workMs !== null) x.work.push(r.workMs);
+        if (r.respMs !== null) x.resp.push(r.respMs);
+      });
     });
     o.load.forEach((_, name) => { if (name) get(name); });
     const openTotal = o.open.length || 1;
@@ -437,7 +442,7 @@ export default function FacilityPerformance({ requests = [], branches = [], onBa
                     <td className="p-3">{r.branch}</td>
                     <td className="p-3">{r.category}</td>
                     <td className="p-3">{r.status}</td>
-                    <td className="p-3">{r.assignedTo || 'Unassigned'}</td>
+                    <td className="p-3">{r.assignedTo || 'Unassigned'}{r.assignees.length > 1 && <span className="ml-1 text-[10px] font-black px-1.5 py-0.5 rounded-full" style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}>🤝 Shared · {r.assignees.length}</span>}</td>
                     <td className="p-3 font-bold" style={{ color: '#e11d48' }}>{fmtDuration(r.ageMs)}</td>
                   </tr>
                 ))}

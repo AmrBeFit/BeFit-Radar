@@ -50,8 +50,9 @@ const buildRow = (r) => {
     status: r.status || 'New',
     createdBy: r.createdBy || '',
     created,
-    assignedTo: r.assignedTo || '',
-    assignedPhone: r.assignedToPhone || '',
+    assignees: (Array.isArray(r.assigneeNames) && r.assigneeNames.length ? r.assigneeNames : (r.assignedTo ? [r.assignedTo] : [])),
+    assignedTo: (Array.isArray(r.assigneeNames) && r.assigneeNames.length ? r.assigneeNames : (r.assignedTo ? [r.assignedTo] : [])).join(', '),
+    assignedPhone: (Array.isArray(r.assignees) && r.assignees.length ? r.assignees.map((a) => a.phone).filter((p) => p && p !== 'N/A') : [r.assignedToPhone]).filter(Boolean).join(' / '),
     assigned,
     completed,
     completedBy: r.completedBy || '',
@@ -66,15 +67,18 @@ const buildRow = (r) => {
 const summarize = (rows, roleByName = {}) => {
   const map = new Map();
   rows.forEach((row) => {
-    const key = row.assignedTo || UNASSIGNED;
-    if (!map.has(key)) map.set(key, { name: key, role: roleByName[key] || '', total: 0, inProgress: 0, completed: 0, isNew: 0, durations: [] });
-    const s = map.get(key);
-    s.total += 1;
-    if (row.status === 'Completed') {
-      s.completed += 1;
-      if (row.timeToComplete != null) s.durations.push(row.timeToComplete);
-    } else if (row.status === 'In Progress') s.inProgress += 1;
-    else s.isNew += 1;
+    // a shared task counts for EACH person who was on it
+    (row.assignees.length ? row.assignees : [UNASSIGNED]).forEach((key) => {
+      if (!map.has(key)) map.set(key, { name: key, role: roleByName[key] || '', total: 0, shared: 0, inProgress: 0, completed: 0, isNew: 0, durations: [] });
+      const s = map.get(key);
+      s.total += 1;
+      if (row.assignees.length > 1) s.shared += 1;
+      if (row.status === 'Completed') {
+        s.completed += 1;
+        if (row.timeToComplete != null) s.durations.push(row.timeToComplete);
+      } else if (row.status === 'In Progress') s.inProgress += 1;
+      else s.isNew += 1;
+    });
   });
   return [...map.values()]
     .map((s) => ({
@@ -109,7 +113,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
     const names = new Set(
       usersList.filter((u) => u.role === 'Facility Member' || u.role === 'Facility Manager').map((u) => u.username)
     );
-    requests.forEach((r) => { if (r.assignedTo) names.add(r.assignedTo); });
+    requests.forEach((r) => { (Array.isArray(r.assigneeNames) && r.assigneeNames.length ? r.assigneeNames : (r.assignedTo ? [r.assignedTo] : [])).forEach((n) => names.add(n)); });
     return [
       { value: UNASSIGNED, label: '— Unassigned —' },
       ...[...names].filter(Boolean).sort((a, b) => a.localeCompare(b)).map((n) => ({ value: n, label: n, hint: roleByName[n] || '' }))
@@ -128,7 +132,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
       .filter((row) => {
         const day = row.created ? toYmd(row.created) : today;
         if (day < fromDate || day > toDate) return false;
-        if (assigneeFilter.length > 0 && !assigneeFilter.includes(row.assignedTo || UNASSIGNED)) return false;
+        if (assigneeFilter.length > 0 && !(row.assignees.length ? row.assignees : [UNASSIGNED]).some((n) => assigneeFilter.includes(n))) return false;
         if (branchFilter.length > 0 && !branchFilter.includes(row.branch)) return false;
         return true;
       });
@@ -142,7 +146,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
   const summary = useMemo(() => summarize(rows, roleByName), [rows, roleByName]);
 
   const count = (s) => baseRows.filter((r) => r.status === s).length;
-  const unassignedCount = baseRows.filter((r) => !r.assignedTo).length;
+  const unassignedCount = baseRows.filter((r) => !r.assignees.length).length;
 
   const exportExcel = async () => {
     const wb = new ExcelJS.Workbook();
@@ -161,7 +165,8 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
       { header: 'Branch', key: 'branch', width: 18 },
       { header: 'Requested By', key: 'by', width: 20 },
       { header: 'Requested At', key: 'created', width: 22 },
-      { header: 'Assigned To', key: 'to', width: 20 },
+      { header: 'Assigned To', key: 'to', width: 26 },
+      { header: 'Shared Task', key: 'shared', width: 16 },
       { header: 'Assignee Role', key: 'role', width: 16 },
       { header: 'Assignee Phone', key: 'phone', width: 16 },
       { header: 'Assigned At', key: 'assigned', width: 22 },
@@ -183,7 +188,8 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
         by: r.createdBy,
         created: fmtDateTime(r.created),
         to: r.assignedTo || 'Unassigned',
-        role: roleByName[r.assignedTo] || '',
+        shared: r.assignees.length > 1 ? `Yes - ${r.assignees.length} people` : '',
+        role: r.assignees.map((n) => roleByName[n] || '').filter(Boolean).join(' / '),
         phone: r.assignedPhone,
         assigned: fmtDateTime(r.assigned),
         status: r.status,
@@ -195,7 +201,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
         archived: r.archived ? 'Yes' : ''
       });
       const tone = STATUS_TONE[r.status];
-      if (tone) row.getCell(11).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + tone.bg.slice(1).toUpperCase() } };
+      if (tone) row.getCell(12).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + tone.bg.slice(1).toUpperCase() } };
     });
 
     const ws2 = wb.addWorksheet('By Person');
@@ -203,6 +209,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
       { header: 'Person', key: 'name', width: 24 },
       { header: 'Role', key: 'role', width: 18 },
       { header: 'Requests', key: 'total', width: 12 },
+      { header: 'Of them shared', key: 'shared', width: 14 },
       { header: 'Completed', key: 'completed', width: 12 },
       { header: 'In Progress', key: 'inProgress', width: 13 },
       { header: 'New', key: 'isNew', width: 8 },
@@ -213,6 +220,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
       name: s.name === UNASSIGNED ? 'Unassigned' : s.name,
       role: s.role,
       total: s.total,
+      shared: s.shared,
       completed: s.completed,
       inProgress: s.inProgress,
       isNew: s.isNew,
@@ -305,6 +313,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
                 <tr className="bg-slate-100 border-b border-slate-300 text-slate-800 text-xs font-black uppercase tracking-wider">
                   <th className="p-3">Person</th>
                   <th className="p-3">Requests</th>
+                  <th className="p-3">Of them shared</th>
                   <th className="p-3">Completed</th>
                   <th className="p-3">In progress</th>
                   <th className="p-3">Avg time to complete</th>
@@ -318,6 +327,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
                       {s.role && <span className="ml-1.5 text-[10px] text-slate-400">{roleLabel(s.role)}</span>}
                     </td>
                     <td className="p-3 text-slate-700">{s.total}</td>
+                    <td className="p-3 text-slate-700">{s.shared ? `🤝 ${s.shared}` : '-'}</td>
                     <td className="p-3 font-bold" style={{ color: '#065f46' }}>{s.completed}</td>
                     <td className="p-3 text-slate-700">{s.inProgress}</td>
                     <td className="p-3 text-slate-700">{fmtDuration(s.avgMs)}</td>
@@ -364,7 +374,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
                       </td>
                       <td className="p-3 whitespace-nowrap">
                         {r.assignedTo
-                          ? (<><span className="font-bold text-slate-900">{r.assignedTo}</span><span className="block text-[10px] text-slate-400">{r.assigned ? fmtDateTime(r.assigned) : ''}</span></>)
+                          ? (<><span className="font-bold text-slate-900">{r.assignedTo}</span>{r.assignees.length > 1 && <span className="block text-[10px] font-black" style={{ color: '#3730a3' }}>🤝 Shared task · {r.assignees.length} people</span>}<span className="block text-[10px] text-slate-400">{r.assigned ? fmtDateTime(r.assigned) : ''}</span></>)
                           : <span className="text-slate-400">Unassigned</span>}
                       </td>
                       <td className="p-3">

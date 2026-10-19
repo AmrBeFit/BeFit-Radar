@@ -142,6 +142,8 @@ const getCurrentPositionAsync = (options = {}) =>
 // filter only hides it from `usersList`, which is the single shared source every one of those
 // screens reads from.
 const HIDDEN_ADMIN_USERNAME = 'amr shata';
+// Everybody in charge of a request (new requests keep a list; older ones only have the single assignedTo)
+const assigneeNamesOf = (r) => (Array.isArray(r?.assigneeNames) && r.assigneeNames.length ? r.assigneeNames : (r?.assignedTo ? [r.assignedTo] : []));
 const isHiddenAdminUser = (u) => (u?.username || '').trim().toLowerCase() === HIDDEN_ADMIN_USERNAME;
 
 // Update: device/browser tracking helpers.
@@ -349,7 +351,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // Assignment Modal State
   const [assignModalReq, setAssignModalReq] = useState(null);
-  const [selectedAssigneeId, setSelectedAssigneeId] = useState('');
+  const [selectedAssigneeIds, setSelectedAssigneeIds] = useState([]);
   const [assignTargetStatus, setAssignTargetStatus] = useState('In Progress'); // the status the assign pop-up will set
   const [maintView, setMaintView] = useState('list'); // 'list' | 'report' (who did what) | 'performance'
 
@@ -1340,7 +1342,7 @@ export default function Dashboard({ user, onLogout }) {
     //  - when it is completed and nobody was assigned yet
     if ((isFacilityManager || isAdmin) && (newStatus === 'In Progress' || (newStatus === 'Completed' && !req.assignedTo))) {
       setAssignTargetStatus(newStatus);
-      setSelectedAssigneeId('');
+      setSelectedAssigneeIds(assigneeIdsOf(req));
       setAssignModalReq(req);
       return;
     }
@@ -1372,7 +1374,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   // "Action Taken" box: only the Facility Member this request is assigned to (or Admin) can write it.
-  const canEditActionTaken = (req) => isAdmin || (req.assignedTo && req.assignedTo === currentUserIdentifier);
+  const canEditActionTaken = (req) => isAdmin || assigneeNamesOf(req).includes(currentUserIdentifier);
   const getActionTakenValue = (req) => (actionTakenDrafts[req.id] !== undefined ? actionTakenDrafts[req.id] : (req.actionTaken || ''));
   const handleSaveActionTaken = async (req) => {
     try {
@@ -1415,28 +1417,49 @@ export default function Dashboard({ user, onLogout }) {
     }
   };
 
+  const assigneeIdsOf = (r) => (Array.isArray(r?.assignees) && r.assignees.length ? r.assignees.map((a) => a.id) : (r?.assignedToId ? [r.assignedToId] : []));
+  const toggleAssignee = (id) => setSelectedAssigneeIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const buildAssigneeFields = (ids) => {
+    const members = ids.map((id) => taskAssignees.find((m) => m.id === id)).filter(Boolean);
+    if (members.length === 0) return null;
+    const list = members.map((m) => ({ id: m.id, username: m.username, phone: phonesMap[m.id] || m.phone || 'N/A' }));
+    return {
+      assignees: list,
+      assigneeNames: list.map((a) => a.username),
+      // the first person stays in the old single fields, so reports, filters and older screens keep working
+      assignedTo: list[0].username,
+      assignedToId: list[0].id,
+      assignedToPhone: list[0].phone
+    };
+  };
+
   const handleConfirmAssignment = async () => {
     if (!assignModalReq) return;
-    if (!selectedAssigneeId) return alert("Please choose who is in charge of this task!");
-
-    const selectedMember = taskAssignees.find(m => m.id === selectedAssigneeId);
-    if (!selectedMember) return alert("Invalid selection.");
+    if (!(isAdmin || isFacilityManager)) return alert('Only the System Admin and the Facility Manager can assign people to a request.');
+    const fields = buildAssigneeFields(selectedAssigneeIds);
+    if (!fields) return alert("Please choose who is in charge of this task!");
 
     const targetStatus = assignTargetStatus;
+    const keepStatus = targetStatus === '__keep';
+    const names = fields.assigneeNames.join(', ');
 
     try {
-      const payload = {
-        status: targetStatus,
-        assignedTo: selectedMember.username,
-        assignedToId: selectedMember.id,
-        assignedToPhone: phonesMap[selectedMember.id] || selectedMember.phone || 'N/A',
-        ...(!assignModalReq.firstResponseAt ? { firstResponseAt: serverTimestamp() } : {}),
-        ...(targetStatus === 'Completed'
-          // completed straight away: we do not know when the work started, so no "assigned at" is invented
-          ? { completedAt: serverTimestamp(), completedBy: currentUserIdentifier }
-          : { assignedAt: serverTimestamp(), completedAt: null, completedBy: null }),
-        ...(((assignModalReq.status || 'New') === 'Completed' && targetStatus !== 'Completed') ? { reopenCount: increment(1) } : {})
-      };
+      const payload = keepStatus
+        ? {
+            ...fields,
+            assignedAt: serverTimestamp(),
+            ...(!assignModalReq.firstResponseAt && (assignModalReq.status || 'New') !== 'New' ? { firstResponseAt: serverTimestamp() } : {})
+          }
+        : {
+            status: targetStatus,
+            ...fields,
+            ...(!assignModalReq.firstResponseAt ? { firstResponseAt: serverTimestamp() } : {}),
+            ...(targetStatus === 'Completed'
+              // completed straight away: we do not know when the work started, so no "assigned at" is invented
+              ? { completedAt: serverTimestamp(), completedBy: currentUserIdentifier }
+              : { assignedAt: serverTimestamp(), completedAt: null, completedBy: null }),
+            ...(((assignModalReq.status || 'New') === 'Completed' && targetStatus !== 'Completed') ? { reopenCount: increment(1) } : {})
+          };
 
       await updateDoc(doc(db, 'requests', assignModalReq.id), payload);
 
@@ -1444,47 +1467,25 @@ export default function Dashboard({ user, onLogout }) {
         type: 'STATUS_CHANGE',
         title: assignModalReq.title || 'Maintenance Request',
         fromStatus: assignModalReq.status || 'New',
-        toStatus: targetStatus,
-        assignedTo: selectedMember.username,
+        toStatus: keepStatus ? (assignModalReq.status || 'New') : targetStatus,
+        assignedTo: names,
         performedBy: currentUserIdentifier,
         timestamp: serverTimestamp()
       });
 
       setAssignModalReq(null);
-      setSelectedAssigneeId('');
-      alert(targetStatus === 'Completed'
-        ? `Request completed by ${selectedMember.username}!`
-        : `Request assigned to ${selectedMember.username}!`);
+      setSelectedAssigneeIds([]);
+      alert(targetStatus === 'Completed' ? `Request completed by ${names}!` : `In charge now: ${names}`);
     } catch (err) {
       alert('Error updating the request: ' + err.message);
     }
   };
 
-  // Change ONLY the person in charge - the status is not touched.
-  const handleReassign = async (req, newId) => {
-    if (!newId || newId === req.assignedToId) return;
-    const m = taskAssignees.find((x) => x.id === newId);
-    if (!m) return alert('Invalid selection.');
-    try {
-      await updateDoc(doc(db, 'requests', req.id), {
-        assignedTo: m.username,
-        assignedToId: m.id,
-        assignedToPhone: phonesMap[m.id] || m.phone || 'N/A',
-        assignedAt: serverTimestamp(),
-        ...(!req.firstResponseAt && (req.status || 'New') !== 'New' ? { firstResponseAt: serverTimestamp() } : {})
-      });
-      await addDoc(collection(db, 'logs'), {
-        type: 'STATUS_CHANGE',
-        title: req.title || 'Maintenance Request',
-        fromStatus: req.status || 'New',
-        toStatus: req.status || 'New',
-        assignedTo: m.username,
-        performedBy: currentUserIdentifier,
-        timestamp: serverTimestamp()
-      });
-    } catch (err) {
-      alert('Error changing the person in charge: ' + err.message);
-    }
+  // Change ONLY the people in charge (the status is not touched): opens the same pop-up with the current people ticked.
+  const openReassign = (req) => {
+    setAssignTargetStatus('__keep');
+    setSelectedAssigneeIds(assigneeIdsOf(req));
+    setAssignModalReq(req);
   };
 
   const handleDeleteRequest = async (reqId) => {
@@ -2402,7 +2403,7 @@ export default function Dashboard({ user, onLogout }) {
     // Search by request number (any part of it; spaces, dashes and a leading # are ignored)
     const q = requestSearch.replace(/[\s#-]/g, '').toLowerCase();
     if (q) result = result.filter(r => String(r.requestNumber || '').toLowerCase().includes(q));
-    if (assigneeFilters.length > 0) result = result.filter(r => assigneeFilters.includes(r.assignedTo || UNASSIGNED_FILTER));
+    if (assigneeFilters.length > 0) result = result.filter(r => { const n = assigneeNamesOf(r); return n.length ? n.some(x => assigneeFilters.includes(x)) : assigneeFilters.includes(UNASSIGNED_FILTER); });
 
     return result.sort((a, b) => (sortOrder === 'desc' ? (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0) : (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
   }, [requests, isStaff, isSupervisor, isBranchManager, isCEO, assignedBranches, currentUserIdentifier, myRequestsOnly, statusFilter, branchFilter, categoryFilter, requestSearch, assigneeFilters, sortOrder, isAdmin, showArchivedOnly, canViewAllRequests]);
@@ -2410,7 +2411,7 @@ export default function Dashboard({ user, onLogout }) {
   // Options of the "Assigned to" filter: everyone who can be assigned, plus anyone already on a request
   const assigneeFilterOptions = useMemo(() => {
     const names = new Set(taskAssignees.map(u => u.username));
-    requests.forEach(r => { if (r.assignedTo) names.add(r.assignedTo); });
+    requests.forEach(r => { assigneeNamesOf(r).forEach(n => names.add(n)); });
     return [
       { value: UNASSIGNED_FILTER, label: '— Unassigned —' },
       ...[...names].filter(Boolean).sort((a, b) => a.localeCompare(b)).map(n => ({ value: n, label: n }))
@@ -3185,38 +3186,34 @@ export default function Dashboard({ user, onLogout }) {
         </div>
       )}
 
-      {/* FACILITY MANAGER ASSIGNMENT MODAL */}
+      {/* FACILITY MANAGER ASSIGNMENT MODAL - one or several people in charge */}
       {assignModalReq && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
             <div className="flex justify-between items-center border-b pb-3">
               <h3 className="font-bold text-slate-900 text-sm">
-                {assignTargetStatus === 'Completed' ? 'Who did this task? (Completed)' : 'Assign Request (In Progress)'}
+                {assignTargetStatus === 'Completed' ? 'Who did this task? (Completed)' : assignTargetStatus === '__keep' ? 'Change who is in charge' : 'Assign Request (In Progress)'}
               </h3>
               <button onClick={() => setAssignModalReq(null)} className="text-slate-400 font-bold">✕</button>
             </div>
             <p className="text-xs text-slate-600">
               {assignTargetStatus === 'Completed'
-                ? <>Nobody was assigned to this request. Select the <strong>Facility Member</strong> or <strong>Facility Manager</strong> who carried it out:</>
-                : <>Select a <strong>Facility Member</strong> or <strong>Facility Manager</strong> to handle this issue:</>}
+                ? <>Tick everyone who carried it out:</>
+                : <>Tick <strong>one or more</strong> people to handle this issue. Each new person gets a notification.</>}
             </p>
-            <div className="space-y-3">
-              <select
-                value={selectedAssigneeId}
-                onChange={(e) => setSelectedAssigneeId(e.target.value)}
-                className="w-full p-3 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold"
-              >
-                <option value="" className="bg-white text-slate-900">-- Select who is in charge --</option>
-                {taskAssignees.map(m => (
-                  <option key={m.id} value={m.id} className="bg-white text-slate-900">
-                    {m.username} - {roleLabel(m.role)} ({phonesMap[m.id] || m.phone || 'No Phone'})
-                  </option>
-                ))}
-              </select>
+            <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
+              {taskAssignees.map((m) => (
+                <label key={m.id} className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-amber-50">
+                  <input type="checkbox" checked={selectedAssigneeIds.includes(m.id)} onChange={() => toggleAssignee(m.id)} />
+                  <span className="text-xs font-bold text-slate-900 flex-1">{m.username} <span className="text-slate-400 font-semibold">- {roleLabel(m.role)}</span></span>
+                  <span className="text-[11px] text-slate-500">{phonesMap[m.id] || m.phone || 'No Phone'}</span>
+                </label>
+              ))}
             </div>
+            <p className="text-[11px] font-bold text-slate-500">{selectedAssigneeIds.length} selected</p>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setAssignModalReq(null)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold">Cancel</button>
-              <button onClick={handleConfirmAssignment} className="px-4 py-2 bg-amber-500 text-slate-900 font-extrabold rounded-xl text-xs shadow-md">{assignTargetStatus === 'Completed' ? 'Confirm' : 'Confirm & Assign'}</button>
+              <button onClick={handleConfirmAssignment} className="px-4 py-2 bg-amber-500 text-slate-900 font-extrabold rounded-xl text-xs shadow-md">{assignTargetStatus === 'Completed' ? 'Confirm' : assignTargetStatus === '__keep' ? 'Save' : 'Confirm & Assign'}</button>
             </div>
           </div>
         </div>
@@ -3773,24 +3770,25 @@ export default function Dashboard({ user, onLogout }) {
                           <p className="text-[11px] text-slate-400">By {req.createdBy} - {formatDate(req.createdAt)}</p>
                           
                           {req.assignedTo && (
-                            <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-900">
-                              <span>👤 In Charge: <strong>{req.assignedTo}</strong></span>
-                              <span>📞 <strong>{(req.assignedToPhone && req.assignedToPhone !== 'N/A') ? req.assignedToPhone : (phonesMap[req.assignedToId] || 'N/A')}</strong></span>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {(Array.isArray(req.assignees) && req.assignees.length ? req.assignees : [{ id: req.assignedToId, username: req.assignedTo, phone: req.assignedToPhone }]).map((a) => (
+                                <div key={a.id || a.username} className="inline-flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-900">
+                                  <span>👤 In Charge: <strong>{a.username}</strong></span>
+                                  <span>📞 <strong>{(a.phone && a.phone !== 'N/A') ? a.phone : (phonesMap[a.id] || 'N/A')}</strong></span>
+                                </div>
+                              ))}
                             </div>
                           )}
                           {canManageStatus && (isFacilityManager || isAdmin) && req.status === 'In Progress' && (
                             <div className="mt-2">
-                              <select
-                                value=""
-                                onChange={(e) => handleReassign(req, e.target.value)}
-                                title="Change the person in charge without changing the status"
-                                className="text-xs font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 rounded-xl px-2 py-1.5 cursor-pointer max-w-full"
+                              <button
+                                type="button"
+                                onClick={() => openReassign(req)}
+                                title="Change or add people in charge without changing the status"
+                                className="text-xs font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-1.5 cursor-pointer"
                               >
-                                <option value="">{req.assignedTo ? '🔄 Change person in charge...' : '👤 Assign a person...'}</option>
-                                {taskAssignees.filter((m) => m.id !== req.assignedToId).map((m) => (
-                                  <option key={m.id} value={m.id}>{m.username} - {roleLabel(m.role)}</option>
-                                ))}
-                              </select>
+                                {req.assignedTo ? '🔄 Change / add people in charge...' : '👤 Assign people...'}
+                              </button>
                             </div>
                           )}
                         </div>
