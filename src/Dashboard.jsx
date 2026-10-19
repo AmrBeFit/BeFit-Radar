@@ -39,6 +39,7 @@ import LeaveReport from './LeaveReport';
 import Deductions from './Deductions';
 import HRReport from './HRReport';
 import MyPayslip from './MyPayslip';
+import WhoIsIn from './WhoIsIn';
 import OutsourceMaintenance, { OutsourceAreasSettings, useOutsourceWaiting } from './OutsourceMaintenance';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
@@ -604,6 +605,7 @@ export default function Dashboard({ user, onLogout }) {
   const canViewReports = perm('tab_reports');
   const canSeeHRReport = perm('tab_hrReport');
   const canSeePayslip = perm('tab_payslip');
+  const canSeeWhoIsIn = perm('tab_whoIsIn');
   // The Schedule tab (planned shifts + plan-vs-actual report): those who plan it or need to see it
   const canSeeSchedule = perm('tab_schedule');
   // The CEO can no longer add, edit or delete users - Admin, Branch Manager and Facility Manager can create,
@@ -3397,6 +3399,15 @@ export default function Dashboard({ user, onLogout }) {
             </button>
           )}
 
+          {canSeeWhoIsIn && (
+            <button
+              onClick={() => setActiveTab('whoisin')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'whoisin' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              📍 Who's In
+            </button>
+          )}
+
           {canSeeChecklist && (
             <button
               onClick={() => setActiveTab('checklist')}
@@ -3743,7 +3754,7 @@ export default function Dashboard({ user, onLogout }) {
                           <h3 className="font-bold text-slate-900">{req.title}</h3>
                           {req.description && <p className="text-xs text-slate-600 mt-0.5 line-clamp-2">{req.description}</p>}
                           <p className="text-xs text-slate-500 font-medium mt-1 flex flex-wrap items-center gap-1">
-                            <span>{req.branch} •</span>
+                            <span className="text-sm font-black text-slate-900">{req.branch} •</span>
                             {canEditCategory ? (
                               <select
                                 value={req.category || ''}
@@ -4600,6 +4611,7 @@ export default function Dashboard({ user, onLogout }) {
       )}
 
       {activeTab === 'payslip' && canSeePayslip && <MyPayslip />}
+      {activeTab === 'whoisin' && canSeeWhoIsIn && <WhoIsIn />}
 
       {activeTab === 'reports' && canViewReports && (
         <>
