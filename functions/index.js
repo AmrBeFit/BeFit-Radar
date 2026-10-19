@@ -2963,3 +2963,41 @@ exports.getMyPayslips = onCall(async (request) => {
     .map((x) => ({ month: x.month, period: x.period, releasedBy: x.releasedBy || '', payslip: x.payslip }));
   return { rows };
 });
+
+/* ----------------------------------------------------------------------------------------------
+   whoIsIn - every account that is checked in right now (no check-out yet, today in Cairo), with the phone number.
+   Open to any signed-in staff member. Only name, role, branch, check-in time and phone leave the server - never photos.
+   ---------------------------------------------------------------------------------------------- */
+exports.whoIsIn = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const me = await db.collection('users').doc(request.auth.uid).get();
+  if (!me.exists) throw new HttpsError('permission-denied', 'Your account could not be found.');
+  const profile = await withRole({ ...me.data(), role: me.data().role || request.auth.token.role });
+  if (!permAllowed(profile, 'tab_whoIsIn', true)) throw new HttpsError('permission-denied', 'You are not allowed to see this screen.');
+
+  const hiddenName = 'amr shata';
+  const viewerIsHidden = String(profile.username || '').trim().toLowerCase() === hiddenName;
+  const [attSnap, usersSnap, privSnap] = await Promise.all([
+    db.collection('attendance').where('dateStr', '==', cairoYmd()).get(),
+    db.collection('users').get(),
+    db.collection('userPrivate').get()
+  ]);
+  const byName = {};
+  usersSnap.forEach((u) => {
+    const d = u.data();
+    const phone = (privSnap.docs.find((p) => p.id === u.id)?.data().phone) || '';
+    byName[String(d.username || '').trim().toLowerCase()] = { role: d.role || '', phone: String(phone || '') };
+  });
+  const rows = [];
+  attSnap.forEach((a) => {
+    const r = a.data();
+    if (r.checkOutTime || r.checkOut) return;
+    const k = String(r.username || '').trim().toLowerCase();
+    if (!k || (!viewerIsHidden && k === hiddenName)) return;
+    const ms = r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now();
+    const info = byName[k] || { role: '', phone: '' };
+    rows.push({ username: r.username, role: info.role, branch: r.branch || '', phone: info.phone, checkInMs: ms });
+  });
+  rows.sort((x, y) => x.branch.localeCompare(y.branch) || x.checkInMs - y.checkInMs);
+  return { rows };
+});
