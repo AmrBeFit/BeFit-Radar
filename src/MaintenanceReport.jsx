@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import ExcelJS from 'exceljs';
+// loaded only when an Excel file is actually exported (the library is big - keeping it out of the first load makes the app start faster)
+const loadExcelJS = async () => (await import('exceljs')).default;
 import { saveAs } from 'file-saver';
 import MultiSelectFilter from './MultiSelectFilter';
 import { roleLabel } from './permissions';
@@ -149,7 +150,7 @@ export default function MaintenanceReport({ requests = [], usersList = [], branc
   const unassignedCount = baseRows.filter((r) => !r.assignees.length).length;
 
   const exportExcel = async () => {
-    const wb = new ExcelJS.Workbook();
+    const wb = new (await loadExcelJS()).Workbook();
     const style = (ws) => {
       const header = ws.getRow(1);
       header.font = { bold: true };

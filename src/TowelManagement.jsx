@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import ExcelJS from 'exceljs';
+// loaded only when an Excel file is actually exported (the library is big - keeping it out of the first load makes the app start faster)
+const loadExcelJS = async () => (await import('exceljs')).default;
 import { saveAs } from 'file-saver';
 import { db } from './firebase';
 import {
@@ -609,7 +610,7 @@ export default function TowelManagement({ currentUser, branchesList }) {
     }
 
     const branchLabel = selectedBranches.length === 1 ? selectedBranches[0] : `${selectedBranches.length} branches`;
-    const workbook = new ExcelJS.Workbook();
+    const workbook = new (await loadExcelJS()).Workbook();
     
     const summarySheet = workbook.addWorksheet('Laundry Settlement Summary');
     summarySheet.columns = [

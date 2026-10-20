@@ -6,7 +6,8 @@
    through callables that check the permissions tab_hrReport (view) and managePayroll (edit / release).
    ===================================================================== */
 import React, { useEffect, useMemo, useState } from 'react';
-import ExcelJS from 'exceljs';
+// loaded only when an Excel file is actually exported (the library is big - keeping it out of the first load makes the app start faster)
+const loadExcelJS = async () => (await import('exceljs')).default;
 import { saveAs } from 'file-saver';
 import { functions } from './firebase';
 import { httpsCallable } from 'firebase/functions';
@@ -155,7 +156,7 @@ export default function HRReport({ hideUser = () => false }) {
 
 /* ----------------------------------------------------------------- report table */
 async function exportReportExcel(rows, month) {
-  const wb = new ExcelJS.Workbook();
+  const wb = new (await loadExcelJS()).Workbook();
   const ws = wb.addWorksheet('HR Report');
   ws.columns = [
     { header: '#', key: 'n', width: 5 }, { header: 'Employee', key: 'u', width: 24 }, { header: 'Role', key: 'role', width: 18 }, { header: 'Branches', key: 'br', width: 28 },
@@ -318,7 +319,7 @@ function PayrollPanel({ data, rows, month, canManage, onChanged }) {
   const toggle = (id) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
 
   const exportSheet = async () => {
-    const wb = new ExcelJS.Workbook();
+    const wb = new (await loadExcelJS()).Workbook();
     const ws = wb.addWorksheet('Payroll');
     ws.columns = [
       { header: '#', key: 'n', width: 5 }, { header: 'Employee', key: 'u', width: 24 }, { header: 'Role', key: 'role', width: 18 }, { header: 'Branches', key: 'br', width: 28 },

@@ -17,29 +17,32 @@ import {
   getDocs,
   query,
   where,
+  orderBy,
+  limit,
   Timestamp
 } from 'firebase/firestore';
 
 // Excel export libraries
-import ExcelJS from 'exceljs';
+// loaded only when an Excel file is actually exported (the library is big - keeping it out of the first load makes the app start faster)
+const loadExcelJS = async () => (await import('exceljs')).default;
 import { saveAs } from 'file-saver';
 
 // Import Towel Management Component
-import TowelManagement from './TowelManagement';
+const TowelManagement = React.lazy(() => import('./TowelManagement'));
 import MultiSelectFilter from './MultiSelectFilter';
 import SchedulePlanner, { useAttendancePlans, MyScheduleCard } from './SchedulePlanner';
-import MaintenanceReport from './MaintenanceReport';
-import IntegrityReports from './IntegrityReports';
-import AuditLog from './AuditLog';
-import FacilityPerformance from './FacilityPerformance';
-import PermissionsManager from './PermissionsManager';
+const MaintenanceReport = React.lazy(() => import('./MaintenanceReport'));
+const IntegrityReports = React.lazy(() => import('./IntegrityReports'));
+const AuditLog = React.lazy(() => import('./AuditLog'));
+const FacilityPerformance = React.lazy(() => import('./FacilityPerformance'));
+const PermissionsManager = React.lazy(() => import('./PermissionsManager'));
 import { hasPermission, roleLabel } from './permissions';
-import BranchChecklist from './BranchChecklist';
-import LeaveReport from './LeaveReport';
-import Deductions from './Deductions';
-import HRReport from './HRReport';
-import MyPayslip from './MyPayslip';
-import WhoIsIn from './WhoIsIn';
+const BranchChecklist = React.lazy(() => import('./BranchChecklist'));
+const LeaveReport = React.lazy(() => import('./LeaveReport'));
+const Deductions = React.lazy(() => import('./Deductions'));
+const HRReport = React.lazy(() => import('./HRReport'));
+const MyPayslip = React.lazy(() => import('./MyPayslip'));
+const WhoIsIn = React.lazy(() => import('./WhoIsIn'));
 import OutsourceMaintenance, { OutsourceAreasSettings, useOutsourceWaiting } from './OutsourceMaintenance';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
@@ -2302,7 +2305,8 @@ export default function Dashboard({ user, onLogout }) {
       console.warn('Could not load location violations:', err.message);
     });
 
-    const unsubLogs = onSnapshot(collection(db, 'logs'), (snapshot) => {
+    // only the latest 500 entries are kept live (the log only grows; loading all of it slowed every start-up)
+    const unsubLogs = onSnapshot(query(collection(db, 'logs'), orderBy('timestamp', 'desc'), limit(500)), (snapshot) => {
       const logsData = snapshot.docs.map(item => ({ id: item.id, ...item.data() }));
       logsData.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
       setActivityLogs(logsData);
@@ -2757,7 +2761,7 @@ export default function Dashboard({ user, onLogout }) {
 
   // EXPORT TO EXCEL FUNCTION
   const exportAttendanceToExcel = async () => {
-    const workbook = new ExcelJS.Workbook();
+    const workbook = new (await loadExcelJS()).Workbook();
     const worksheet = workbook.addWorksheet('Attendance Report');
 
     worksheet.columns = [
@@ -2805,7 +2809,7 @@ export default function Dashboard({ user, onLogout }) {
   };
 
   const exportLocationViolationsToExcel = async () => {
-    const workbook = new ExcelJS.Workbook();
+    const workbook = new (await loadExcelJS()).Workbook();
     const worksheet = workbook.addWorksheet('Location Violations');
 
     worksheet.columns = [
@@ -3091,6 +3095,7 @@ export default function Dashboard({ user, onLogout }) {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 p-4 md:p-8 font-sans" dir="ltr">
+      <React.Suspense fallback={<p className="text-xs font-bold text-slate-400 p-6">Loading...</p>}>
 
       {/* COMPACT PRINT STYLES */}
       <style>{`
@@ -5928,6 +5933,7 @@ export default function Dashboard({ user, onLogout }) {
           POWERED BY Amr Shata
         </p>
       </footer>
+      </React.Suspense>
 
     </div>
   );

@@ -11,7 +11,8 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import ExcelJS from 'exceljs';
+// loaded only when an Excel file is exported (keeps the big library out of the first load)
+const loadExcelJS = async () => (await import('exceljs')).default;
 import { saveAs } from 'file-saver';
 import MultiSelectFilter from './MultiSelectFilter';
 import { roleLabel } from './permissions';
@@ -114,7 +115,7 @@ function ToneBadge({ category, text }) {
 }
 
 async function saveWorkbook(fileName, sheets) {
-  const wb = new ExcelJS.Workbook();
+  const wb = new (await loadExcelJS()).Workbook();
   sheets.forEach((s) => {
     const ws = wb.addWorksheet(s.name);
     ws.columns = s.columns;
