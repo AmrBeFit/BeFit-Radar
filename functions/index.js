@@ -786,9 +786,11 @@ exports.onRequestUpdatedPush = onDocumentUpdated('requests/{requestId}', async (
   // (a) Someone new was just put in charge of this task - tell THEM directly, not just whoever
   // happens to have the app open. Covers both the assignment modal (handleConfirmAssignment) and
   // reassigning an already-in-progress task to someone else.
-  const assigneeChanged = after.assignedTo && after.assignedTo !== before.assignedTo;
-  if (assigneeChanged) {
-    const assignee = usersByUsername[after.assignedTo];
+  const namesOf = (d) => (Array.isArray(d.assigneeNames) && d.assigneeNames.length ? d.assigneeNames : (d.assignedTo ? [d.assignedTo] : []));
+  const beforeNames = namesOf(before);
+  const newlyAssigned = namesOf(after).filter((n) => !beforeNames.includes(n));
+  for (const name of newlyAssigned) {
+    const assignee = usersByUsername[name];
     if (assignee && Array.isArray(assignee.fcmTokens) && assignee.fcmTokens.length > 0) {
       await sendPushAndCleanup(
         usersSnap,
@@ -863,7 +865,7 @@ exports.onRequestUpdatedPush = onDocumentUpdated('requests/{requestId}', async (
       const isFacilityManager = role === 'FACILITY MANAGER';
       const theirBranches = Array.isArray(u.assignedBranches) ? u.assignedBranches : [];
       const branchMatches = theirBranches.length === 0 || theirBranches.includes(after.branch);
-      const isCurrentAssignee = after.assignedTo && u.username === after.assignedTo;
+      const isCurrentAssignee = (Array.isArray(after.assigneeNames) && after.assigneeNames.length ? after.assigneeNames : (after.assignedTo ? [after.assignedTo] : [])).includes(u.username);
       const shouldNotify = isAdminOrCEO || (isFacilityManager && branchMatches) || isCurrentAssignee;
       if (shouldNotify && Array.isArray(u.fcmTokens) && u.fcmTokens.length > 0) {
         reopenTargets.push(u);
@@ -2202,7 +2204,12 @@ exports.respondOutsourceRequest = onCall(async (request) => {
 //                               requested (approved + still-open ones + this one) cannot pass the allowance within
 //                               any calendar year. Days count per calendar day, weekends included.
 // --------------------------------------------------------------
-const DEFAULT_LEAVE_BALANCE = 3;
+const DEFAULT_LEAVE_BALANCE = 3; // used only until the System Admin / HR set another default (serverSettings/leave)
+const readDefaultLeaveBalance = async () => {
+  const snap = await db.collection('serverSettings').doc('leave').get();
+  const n = snap.exists ? Number(snap.data().defaultBalance) : NaN;
+  return Number.isInteger(n) && n >= 0 && n <= 365 ? n : DEFAULT_LEAVE_BALANCE;
+};
 const cairoYmd = (d = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 const leaveDaysInYear = (startDate, endDate, year) => {
   const s = Math.max(ymdToUtcMs(startDate), Date.UTC(year, 0, 1));
@@ -2239,6 +2246,33 @@ exports.setLeaveBalance = onCall(async (request) => {
   return { balance };
 });
 
+// One number for everybody: the default allowance. Every account WITHOUT its own number follows it right away (new accounts too).
+// With resetCustom, the individual numbers set before are removed too, so literally everyone gets this number.
+exports.setDefaultLeaveBalance = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const snap = await db.collection('users').doc(request.auth.uid).get();
+  const profile = snap.exists ? await withRole({ ...snap.data(), role: snap.data().role || request.auth.token.role }) : {};
+  if (!permAllowed(profile, 'editLeaveBalance', normRoleUpper(profile.role) === 'HR')) {
+    throw new HttpsError('permission-denied', 'You are not allowed to change leave balances.');
+  }
+  const balance = Number(request.data?.balance);
+  if (!Number.isInteger(balance) || balance < 0 || balance > 365) {
+    throw new HttpsError('invalid-argument', 'The leave balance must be a whole number of days from 0 to 365.');
+  }
+  await db.collection('serverSettings').doc('leave').set({ defaultBalance: balance, updatedBy: profile.username || '', updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  let reset = 0;
+  if (request.data?.resetCustom === true) {
+    const all = await db.collection('leaveBalances').get();
+    for (let i = 0; i < all.docs.length; i += 400) {
+      const batch = db.batch();
+      all.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+    }
+    reset = all.size;
+  }
+  return { defaultBalance: balance, reset };
+});
+
 exports.getLeaveBalances = onCall(async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
   const rawCaller = String(request.auth.token.role || '').trim().toUpperCase();
@@ -2250,6 +2284,7 @@ exports.getLeaveBalances = onCall(async (request) => {
   if (!permAllowed(callerProfileGet, 'viewLeaveBalances', callerRole === 'HR' || callerRole === 'BRANCH MANAGER' || isFitness)) {
     throw new HttpsError('permission-denied', 'You are not allowed to see leave balances.');
   }
+  const defaultBalance = await readDefaultLeaveBalance();
   const thisYear = Number(cairoYmd().slice(0, 4));
   const year = Number(request.data?.year) || thisYear;
   if (!Number.isInteger(year) || year < 2020 || year > thisYear + 1) throw new HttpsError('invalid-argument', 'Choose a valid year.');
@@ -2292,15 +2327,16 @@ exports.getLeaveBalances = onCall(async (request) => {
       if (isFitness && u.role !== 'Coach') return;
     }
     const rec = byUser.get(key) || { taken: 0, waiting: 0, leaves: [] };
-    const balance = Number.isFinite(balances.get(docSnap.id)) ? balances.get(docSnap.id) : DEFAULT_LEAVE_BALANCE;
+    const custom = Number.isFinite(balances.get(docSnap.id));
+    const balance = custom ? balances.get(docSnap.id) : defaultBalance;
     rows.push({
-      userId: docSnap.id, username: u.username, role: u.role || 'User', branches: theirBranches,
+      userId: docSnap.id, custom, username: u.username, role: u.role || 'User', branches: theirBranches,
       balance, taken: rec.taken, waiting: rec.waiting, remaining: balance - rec.taken,
       leaves: wanted ? [] : rec.leaves.sort((a, b) => a.startDate.localeCompare(b.startDate))
     });
   });
   rows.sort((a, b) => a.username.localeCompare(b.username));
-  return { year, defaultBalance: DEFAULT_LEAVE_BALANCE, rows };
+  return { year, defaultBalance, rows };
 });
 
 exports.createLeaveRequest = onCall(async (request) => {
@@ -2335,7 +2371,7 @@ exports.createLeaveRequest = onCall(async (request) => {
   }
   if (normRoleUpper(caller.role) !== 'CEO') {
     const balSnap = await db.collection('leaveBalances').doc(request.auth.uid).get();
-    const balance = balSnap.exists && Number.isFinite(Number(balSnap.data().balance)) ? Number(balSnap.data().balance) : DEFAULT_LEAVE_BALANCE;
+    const balance = balSnap.exists && Number.isFinite(Number(balSnap.data().balance)) ? Number(balSnap.data().balance) : await readDefaultLeaveBalance();
     for (const year of leaveYearsOf(startDate, endDate)) {
       const already = mine.reduce((sum, l) => sum + leaveDaysInYear(l.startDate, l.endDate, year), 0);
       const now = leaveDaysInYear(startDate, endDate, year);
@@ -2377,6 +2413,7 @@ exports.createLeaveRequest = onCall(async (request) => {
      the System Admin can still cancel it. A cancelled deduction stays in the record (status 'Cancelled').
    ===================================================================== */
 const DEDUCTION_CATEGORIES = ['Late', 'Absence', 'Violation', 'Damage / loss', 'Other'];
+const BONUS_CATEGORIES = ['Performance', 'Overtime', 'Holiday work', 'Attendance reward', 'Sales', 'Other'];
 const DEDUCTION_MANAGER_TARGETS = new Set(['Supervisor', 'User', 'Staff', 'Coach', 'Fitness Manager', 'Facility Member', 'QA']);
 
 const loadDeductionCaller = async (request) => {
@@ -2389,6 +2426,7 @@ const loadDeductionCaller = async (request) => {
   return {
     uid: request.auth.uid, profile, role, isFull,
     canGive: permAllowed(profile, 'giveDeduction', false),
+    canGiveBonus: permAllowed(profile, 'giveBonus', false),
     canView: permAllowed(profile, 'viewDeductions', role === 'HR'),
     branches: Array.isArray(profile.assignedBranches) ? profile.assignedBranches : []
   };
@@ -2396,43 +2434,44 @@ const loadDeductionCaller = async (request) => {
 
 exports.createDeduction = onCall(async (request) => {
   const c = await loadDeductionCaller(request);
-  if (!c.canGive) throw new HttpsError('permission-denied', 'You are not allowed to record salary deductions.');
+  const isBonus = request.data?.type === 'bonus'; // a salary BONUS is stored next to the deductions, same rules, opposite sign
+  if (isBonus ? !c.canGiveBonus : !c.canGive) throw new HttpsError('permission-denied', isBonus ? 'You are not allowed to record salary bonuses.' : 'You are not allowed to record salary deductions.');
   const d = request.data || {};
   const targetUserId = String(d.targetUserId || '');
   const kind = d.kind === 'days' ? 'days' : 'amount';
   const value = Math.round(Number(d.value) * 100) / 100;
   const reason = String(d.reason || '').trim().slice(0, 500);
-  const category = DEDUCTION_CATEGORIES.includes(d.category) ? d.category : 'Other';
+  const category = (isBonus ? BONUS_CATEGORIES : DEDUCTION_CATEGORIES).includes(d.category) ? d.category : 'Other';
   const date = String(d.date || '').trim();
   if (!targetUserId) throw new HttpsError('invalid-argument', 'Please choose the employee.');
   if (kind === 'amount' && (!Number.isFinite(value) || value <= 0 || value > 100000)) throw new HttpsError('invalid-argument', 'Enter a valid amount (more than 0, up to 100000 EGP).');
   if (kind === 'days' && (!Number.isFinite(value) || value <= 0 || value > 31 || Math.round(value * 4) !== value * 4)) throw new HttpsError('invalid-argument', 'Enter a number of days between 0.25 and 31 (steps of a quarter day).');
-  if (reason.length < 3) throw new HttpsError('invalid-argument', 'Please write the reason of the deduction.');
-  if (!isRealYmd(date) || date > cairoYmd()) throw new HttpsError('invalid-argument', 'Choose the date of the deduction (not in the future).');
-  if (targetUserId === c.uid) throw new HttpsError('permission-denied', 'You cannot record a deduction on yourself.');
+  if (reason.length < 3) throw new HttpsError('invalid-argument', 'Please write the reason.');
+  if (!isRealYmd(date) || date > cairoYmd()) throw new HttpsError('invalid-argument', 'Choose the date (not in the future).');
+  if (targetUserId === c.uid) throw new HttpsError('permission-denied', 'You cannot record this on yourself.');
 
   const tSnap = await db.collection('users').doc(targetUserId).get();
   if (!tSnap.exists) throw new HttpsError('not-found', 'That employee does not exist.');
   const t = tSnap.data();
   const tRole = normRoleUpper(t.role);
-  if (tRole === 'ADMIN' || tRole === 'CEO') throw new HttpsError('permission-denied', 'A deduction cannot be recorded on this account.');
+  if (tRole === 'ADMIN' || tRole === 'CEO') throw new HttpsError('permission-denied', 'This cannot be recorded on this account.');
   const tBranches = Array.isArray(t.assignedBranches) ? t.assignedBranches : [];
   if (!c.isFull) {
-    if (!DEDUCTION_MANAGER_TARGETS.has(t.role)) throw new HttpsError('permission-denied', 'You cannot record a deduction on this type of account.');
-    if (!tBranches.some((b) => c.branches.includes(b))) throw new HttpsError('permission-denied', 'You can only record deductions on staff of your own branches.');
+    if (!DEDUCTION_MANAGER_TARGETS.has(t.role)) throw new HttpsError('permission-denied', 'You cannot record this on this type of account.');
+    if (!tBranches.some((b) => c.branches.includes(b))) throw new HttpsError('permission-denied', 'You can only record this on staff of your own branches.');
   }
 
   const ref = await db.collection('deductions').add({
     targetUserId, username: t.username || '', role: t.role || 'User', branches: tBranches,
     kind, value, amount: kind === 'amount' ? value : null, days: kind === 'days' ? value : null, reason, category, date,
-    status: 'Active',
+    status: 'Active', type: isBonus ? 'bonus' : 'deduction',
     createdById: c.uid, createdBy: c.profile.username || '', createdAt: FieldValue.serverTimestamp()
   });
 
   try {
     const usersSnap = await db.collection('users').get();
     const tokens = Array.isArray(t.fcmTokens) ? t.fcmTokens : [];
-    await sendPushAndCleanup(usersSnap, tokens, '💸 Salary deduction recorded',
+    await sendPushAndCleanup(usersSnap, tokens, isBonus ? '🎁 Salary bonus recorded' : '💸 Salary deduction recorded',
       `${kind === 'days' ? `${value} day(s) of salary` : `${value} EGP`} - ${category}: ${reason.slice(0, 100)} (${date})`, { requestId: ref.id, type: 'DEDUCTION' });
   } catch (err) { console.error('deduction push failed', err); }
   return { id: ref.id };
@@ -2449,22 +2488,23 @@ exports.getDeductions = onCall(async (request) => {
     if (month && !String(x.date || '').startsWith(month)) return;
     const isMine = x.targetUserId === c.uid;
     const branchMatch = (x.branches || []).some((b) => c.branches.includes(b)) || x.createdById === c.uid;
-    const visible = isMine || ((c.canGive || c.canView || c.isFull) && (c.isFull || branchMatch));
+    const visible = isMine || ((c.canGive || c.canGiveBonus || c.canView || c.isFull) && (c.isFull || branchMatch));
     if (!visible) return;
     rows.push({
       id: doc.id, targetUserId: x.targetUserId, username: x.username, role: x.role, branches: x.branches || [],
+      type: x.type === 'bonus' ? 'bonus' : 'deduction',
       kind: x.kind || 'amount', value: x.value != null ? x.value : x.amount, reason: x.reason, category: x.category, date: x.date, status: x.status || 'Active',
       createdBy: x.createdBy, mine: isMine,
       createdAtMs: x.createdAt && x.createdAt.toMillis ? x.createdAt.toMillis() : 0,
       cancelledBy: x.cancelledBy || '',
-      canCancel: (x.status || 'Active') === 'Active' && (c.isFull || x.createdById === c.uid) && (c.canGive || c.isFull)
+      canCancel: (x.status || 'Active') === 'Active' && (c.isFull || x.createdById === c.uid) && ((x.type === 'bonus' ? c.canGiveBonus : c.canGive) || c.isFull)
         && (c.role === 'ADMIN' || (!!x.createdAt && x.createdAt.toMillis && Date.now() - x.createdAt.toMillis() <= 24 * 3600 * 1000))
     });
   });
 
   // people this account may record a deduction on (for the form)
   let employees = [];
-  if (c.canGive) {
+  if (c.canGive || c.canGiveBonus) {
     const usersSnap = await db.collection('users').get();
     usersSnap.forEach((u) => {
       const v = u.data();
@@ -2476,7 +2516,7 @@ exports.getDeductions = onCall(async (request) => {
     });
     employees.sort((a, b) => a.username.localeCompare(b.username));
   }
-  return { rows, employees, canGive: c.canGive, canViewAll: c.canView, categories: DEDUCTION_CATEGORIES, isAdmin: c.role === 'ADMIN' };
+  return { rows, employees, canGive: c.canGive, canGiveBonus: c.canGiveBonus, canViewAll: c.canView, categories: DEDUCTION_CATEGORIES, bonusCategories: BONUS_CATEGORIES, isAdmin: c.role === 'ADMIN' };
 });
 
 exports.cancelDeduction = onCall(async (request) => {
@@ -2488,7 +2528,7 @@ exports.cancelDeduction = onCall(async (request) => {
   if (!snap.exists) throw new HttpsError('not-found', 'That deduction does not exist.');
   const x = snap.data();
   if ((x.status || 'Active') !== 'Active') throw new HttpsError('failed-precondition', 'This deduction is already cancelled.');
-  if (!(c.isFull || (x.createdById === c.uid && c.canGive))) throw new HttpsError('permission-denied', 'You cannot cancel this deduction.');
+  if (!(c.isFull || (x.createdById === c.uid && (x.type === 'bonus' ? c.canGiveBonus : c.canGive)))) throw new HttpsError('permission-denied', 'You cannot cancel this record.');
   const created = x.createdAt && x.createdAt.toMillis ? x.createdAt.toMillis() : 0;
   if (c.role !== 'ADMIN' && (!created || Date.now() - created > 24 * 3600 * 1000)) throw new HttpsError('failed-precondition', 'A deduction cannot be cancelled after 24 hours.');
   await ref.update({ status: 'Cancelled', cancelledBy: c.profile.username || '', cancelledAt: FieldValue.serverTimestamp() });
@@ -2872,15 +2912,22 @@ const computePayrollRows = async (month, onlyUserIds) => {
     attDeduction = payrollRound(attDeduction);
     const attDeductionCapped = Math.min(attDeduction, cap);
 
-    const manual = (dedBy.get(u.id) || []).map((x) => ({
+    const bonusRecords = (dedBy.get(u.id) || []).filter((x) => x.type === 'bonus');
+    const manual = (dedBy.get(u.id) || []).filter((x) => x.type !== 'bonus').map((x) => ({
       id: x.id, date: x.date, category: x.category, reason: x.reason, kind: x.kind || 'amount', value: x.value != null ? x.value : x.amount,
       amount: payrollRound((x.kind === 'days') ? Number(x.value) * daily : Number(x.value != null ? x.value : x.amount))
     }));
     const manualTotal = payrollRound(manual.reduce((s, x) => s + x.amount, 0));
+    // bonuses recorded in "Salary deductions & bonuses": added to the salary
+    const manualBonuses = bonusRecords.map((x) => ({
+      id: x.id, date: x.date, category: x.category, reason: x.reason, kind: x.kind || 'amount', value: x.value != null ? x.value : x.amount,
+      amount: payrollRound((x.kind === 'days') ? Number(x.value) * daily : Number(x.value != null ? x.value : x.amount))
+    }));
+    const manualBonusTotal = payrollRound(manualBonuses.reduce((s, x) => s + x.amount, 0));
     const adj = adjs.get(u.id) || {};
     const bonus = payrollRound(adj.bonus || 0);
     const otherDeduction = payrollRound(adj.otherDeduction || 0);
-    const gross = payrollRound(base + allowancesTotal + bonus);
+    const gross = payrollRound(base + allowancesTotal + bonus + manualBonusTotal);
     const insurance = payrollRound(base * (config.insurancePercent / 100));
     const tax = payrollRound(gross * (config.taxPercent / 100));
     const totalDeductions = payrollRound(attDeductionCapped + manualTotal + otherDeduction + insurance + tax);
@@ -2895,7 +2942,7 @@ const computePayrollRows = async (month, onlyUserIds) => {
       daily, ...sum, leaveDays, pendingLeaveDays,
       leaves: myLeaves.filter((l) => overlapDays(l.startDate, l.endDate, start, end) > 0),
       attendanceDeduction: attDeduction, attendanceDeductionApplied: attDeductionCapped, capped: attDeduction > attDeductionCapped,
-      manualDeductions: manual, manualTotal, insurance, tax, gross, totalDeductions, net,
+      manualDeductions: manual, manualTotal, manualBonuses, manualBonusTotal, insurance, tax, gross, totalDeductions, net,
       bank: { bankName: p.bankName || '', accountHolder: p.accountHolder || '', accountNumber: p.accountNumber || '', iban: p.iban || '' },
       days
     });
@@ -2975,6 +3022,9 @@ exports.whoIsIn = onCall(async (request) => {
   const profile = await withRole({ ...me.data(), role: me.data().role || request.auth.token.role });
   if (!permAllowed(profile, 'tab_whoIsIn', true)) throw new HttpsError('permission-denied', 'You are not allowed to see this screen.');
 
+  const isAdminViewer = normRoleUpper(profile.role) === 'ADMIN';
+  const hiddenDoc = await db.collection('serverSettings').doc('whoIsIn').get();
+  const hiddenBranches = hiddenDoc.exists && Array.isArray(hiddenDoc.data().hiddenBranches) ? hiddenDoc.data().hiddenBranches.map(String) : [];
   const hiddenName = 'amr shata';
   const viewerIsHidden = String(profile.username || '').trim().toLowerCase() === hiddenName;
   const [attSnap, usersSnap, privSnap] = await Promise.all([
@@ -2994,10 +3044,31 @@ exports.whoIsIn = onCall(async (request) => {
     if (r.checkOutTime || r.checkOut) return;
     const k = String(r.username || '').trim().toLowerCase();
     if (!k || (!viewerIsHidden && k === hiddenName)) return;
+    if (!isAdminViewer && hiddenBranches.includes(String(r.branch || ''))) return; // hidden branches are for the System Admin's eyes only
     const ms = r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now();
     const info = byName[k] || { role: '', phone: '' };
     rows.push({ username: r.username, role: info.role, branch: r.branch || '', phone: info.phone, checkInMs: ms });
   });
   rows.sort((x, y) => x.branch.localeCompare(y.branch) || x.checkInMs - y.checkInMs);
-  return { rows };
+  const branchSnap = await db.collection('branches').get();
+  const branches = branchSnap.docs.map((b) => String(b.data().name || '')).filter(Boolean)
+    .filter((n) => isAdminViewer || !hiddenBranches.includes(n)).sort((a, b) => a.localeCompare(b));
+  return { rows, branches, hiddenBranches: isAdminViewer ? hiddenBranches : [], isAdmin: isAdminViewer };
+});
+
+// System Admin only: hide / show a branch on the "Who's In" screen for everybody else.
+exports.setWhoIsInBranchHidden = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const me = await db.collection('users').doc(request.auth.uid).get();
+  const profile = me.exists ? await withRole({ ...me.data(), role: me.data().role || request.auth.token.role }) : null;
+  if (!profile || normRoleUpper(profile.role) !== 'ADMIN') throw new HttpsError('permission-denied', 'Only the System Admin can hide or show branches.');
+  const branch = String(request.data?.branch || '').trim();
+  if (!branch || branch.length > 80) throw new HttpsError('invalid-argument', 'Branch is required.');
+  const hidden = !!request.data?.hidden;
+  const ref = db.collection('serverSettings').doc('whoIsIn');
+  const snap = await ref.get();
+  const list = new Set(snap.exists && Array.isArray(snap.data().hiddenBranches) ? snap.data().hiddenBranches.map(String) : []);
+  if (hidden) list.add(branch); else list.delete(branch);
+  await ref.set({ hiddenBranches: Array.from(list), updatedAt: FieldValue.serverTimestamp(), updatedBy: profile.username || '' });
+  return { ok: true, hiddenBranches: Array.from(list) };
 });
