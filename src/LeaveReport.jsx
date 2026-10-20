@@ -26,6 +26,9 @@ export default function LeaveReport({ canEdit = false, hideUser = () => false })
   const [savingId, setSavingId] = useState('');
   const [openId, setOpenId] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
+  const [bulk, setBulk] = useState('');        // the number typed in the "for everyone" box
+  const [resetCustom, setResetCustom] = useState(false);
+  const [applying, setApplying] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,6 +68,27 @@ export default function LeaveReport({ canEdit = false, hideUser = () => false })
     }
   };
 
+  const applyToEveryone = async () => {
+    const text = (bulk === '' ? String(defaultBalance) : bulk).trim();
+    const value = parseInt(text, 10);
+    if (!/^[0-9]{1,3}$/.test(text) || value > 365) return alert('Enter a whole number of days (0 to 365).');
+    const customCount = rows.filter((r) => r.custom).length;
+    const msg = resetCustom
+      ? `Give EVERY employee ${value} days?\n\nThis also replaces the ${customCount} balance(s) you set one by one.`
+      : `Give every employee ${value} days?\n\nThe ${customCount} balance(s) you set one by one stay as they are.`;
+    if (!window.confirm(msg)) return;
+    setApplying(true);
+    try {
+      await httpsCallable(functions, 'setDefaultLeaveBalance')({ balance: value, resetCustom });
+      setBulk('');
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      alert(err.message || 'Could not apply the balance.');
+    } finally {
+      setApplying(false);
+    }
+  };
+
   const exportCsv = () => {
     const head = ['Username', 'Role', 'Branches', 'Balance', 'Taken (approved)', 'Waiting', 'Remaining'];
     const lines = shown.map((r) => [r.username, roleLabel(r.role), (r.branches || []).join(' / '), r.balance, r.taken, r.waiting, r.remaining]);
@@ -94,6 +118,28 @@ export default function LeaveReport({ canEdit = false, hideUser = () => false })
         Every account (except the CEO) has a yearly leave balance - {defaultBalance} days unless changed. A request cannot take a person past it.
         {canEdit ? ' You can change a balance here.' : ' Only a System Admin or HR can change a balance.'} The employee never sees these numbers.
       </p>
+      {canEdit && (
+        <div className="border border-indigo-200 bg-indigo-50/50 rounded-2xl p-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-[10px] font-extrabold uppercase text-slate-500 mb-1">Leave days for everyone</label>
+            <input
+              type="text" inputMode="numeric" value={bulk} placeholder={String(defaultBalance)}
+              onChange={(e) => setBulk(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+              className="w-24 p-2 border border-slate-200 rounded-xl text-sm font-mono font-black text-center bg-white text-slate-900"
+            />
+          </div>
+          <button type="button" onClick={applyToEveryone} disabled={applying} className="px-4 py-2.5 rounded-xl text-xs font-black text-white border-0 cursor-pointer disabled:opacity-50" style={{ backgroundColor: '#4f46e5' }}>
+            {applying ? 'Applying...' : '✅ Apply to everyone'}
+          </button>
+          <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600 pb-2 cursor-pointer">
+            <input type="checkbox" checked={resetCustom} onChange={(e) => setResetCustom(e.target.checked)} />
+            Also replace the balances I set one by one
+          </label>
+          <p className="basis-full text-[10px] text-slate-500">
+            Today's default: <b>{defaultBalance}</b> days. Everyone without a personal number follows it (new accounts too). After that, change any person below and press Save - a person with their own number is marked <b>custom</b>.
+          </p>
+        </div>
+      )}
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search a name or branch..." className={field} />
 
       {loading && <p className="text-xs text-slate-400 italic">Loading...</p>}
@@ -125,6 +171,7 @@ export default function LeaveReport({ canEdit = false, hideUser = () => false })
                         <button type="button" onClick={() => setOpenId(openId === r.userId ? '' : r.userId)} className="text-left bg-transparent border-0 cursor-pointer p-0">
                           <span className="font-black text-slate-800">{r.username}</span>
                           <span className="ml-1.5 px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-700 text-[10px] font-extrabold">{roleLabel(r.role)}</span>
+                          {r.custom && <span className="ml-1.5 px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-extrabold">custom</span>}
                           <span className="block text-[10px] text-slate-400">{(r.branches || []).join(' / ') || '-'}</span>
                         </button>
                       </td>

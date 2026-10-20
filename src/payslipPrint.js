@@ -13,6 +13,7 @@ export function payslipBodyHtml({ slip, period, month }) {
   const earnings = [['Basic salary', money(slip.base)]];
   (slip.allowances || []).forEach((a) => earnings.push([a.name, money(a.amount)]));
   if (slip.bonus > 0) earnings.push([`Bonus${slip.bonusNote ? ` - ${slip.bonusNote}` : ''}`, money(slip.bonus)]);
+  (slip.manualBonuses || []).forEach((m) => earnings.push([`${m.date} - ${m.category}: ${m.reason}`, money(m.amount)]));
   earnings.push(['Total earnings', money(slip.gross), true]);
 
   const ded = [];

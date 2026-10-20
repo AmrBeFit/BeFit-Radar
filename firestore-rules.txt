@@ -307,7 +307,8 @@ service cloud.firestore {
         || hasPerm('manageRequestStatus', myRole() == 'facility manager')
         // "Action Taken" - only the Facility Member this request is assigned to may write it.
         || (changesOnly(['actionTaken', 'actionTakenBy', 'actionTakenAt'])
-            && resource.data.get('assignedTo', '') == myProfile().username)
+            && (resource.data.get('assignedTo', '') == myProfile().username
+                || myProfile().username in resource.data.get('assigneeNames', [])))
         // "Notes" - Facility Manager only (Admin already covered above).
         || (changesOnly(['notes', 'notesBy', 'notesAt']) && hasPerm('editNotes', myRole() == 'facility manager'))
         // "Category" - Admin and Facility Manager (or anyone granted it) may fix a wrongly chosen category.

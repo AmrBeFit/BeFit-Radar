@@ -248,7 +248,7 @@ function EmployeeDetail({ r, month, canManage, onChanged }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-1 text-xs">
           <p className="font-black text-slate-900 uppercase text-[10px]">Salary of the period</p>
-          <p>Base {money(r.base)} + allowances {money(r.allowancesTotal)} + bonus {money(r.bonus)} = <b>{money(r.gross)}</b></p>
+          <p>Base {money(r.base)} + allowances {money(r.allowancesTotal)} + bonus {money(r.bonus)}{r.manualBonusTotal ? ` + recorded bonuses ${money(r.manualBonusTotal)}` : ''} = <b>{money(r.gross)}</b></p>
           <p>One day of salary: <b>{money(r.daily)}</b></p>
           <p>Deductions: attendance {money(r.attendanceDeductionApplied)}{r.capped ? ' (capped)' : ''} · penalties {money(r.manualTotal)} · other {money(r.otherDeduction)} · insurance {money(r.insurance)} · tax {money(r.tax)} = <b>{money(r.totalDeductions)}</b></p>
           <p className="text-sm font-black">Net: {money(r.net)} EGP</p>
@@ -294,7 +294,11 @@ function EmployeeDetail({ r, month, canManage, onChanged }) {
           ))}
         </div>
         <div>
-          <p className="font-black text-slate-900 uppercase text-[10px] mb-1">Leaves in this period</p>
+          <p className="font-black text-slate-900 uppercase text-[10px] mb-1">Bonuses (recorded)</p>
+          {(r.manualBonuses || []).length === 0 ? <p className="text-slate-400 italic">None.</p> : r.manualBonuses.map((m) => (
+            <p key={m.id} className="border-b border-slate-100 py-1">{m.date} · <b>{m.kind === 'days' ? `${m.value} day(s)` : `${money(m.value)} EGP`}</b> = {money(m.amount)} · {m.category} · {m.reason}</p>
+          ))}
+          <p className="font-black text-slate-900 uppercase text-[10px] mb-1 mt-3">Leaves in this period</p>
           {r.leaves.length === 0 ? <p className="text-slate-400 italic">None.</p> : r.leaves.map((l, i) => (
             <p key={i} className="border-b border-slate-100 py-1">{l.startDate} → {l.endDate} · <b style={{ color: l.status === 'Approved' ? '#047857' : '#b45309' }}>{l.status}</b></p>
           ))}
@@ -328,9 +332,9 @@ function PayrollPanel({ data, rows, month, canManage, onChanged }) {
     ws.views = [{ state: 'frozen', ySplit: 1 }];
     payable.forEach((r, i) => ws.addRow({
       n: i + 1, u: r.username, role: roleLabel(r.role), br: (r.branches || []).join(' / '), bank: r.bank.bankName, holder: r.bank.accountHolder, acc: r.bank.accountNumber, iban: r.bank.iban,
-      base: r.base, al: r.allowancesTotal, bonus: r.bonus, gross: r.gross, att: r.attendanceDeductionApplied, pen: r.manualTotal, oth: r.otherDeduction, ins: r.insurance, tax: r.tax, ded: r.totalDeductions, net: r.net
+      base: r.base, al: r.allowancesTotal, bonus: r.bonus + (r.manualBonusTotal || 0), gross: r.gross, att: r.attendanceDeductionApplied, pen: r.manualTotal, oth: r.otherDeduction, ins: r.insurance, tax: r.tax, ded: r.totalDeductions, net: r.net
     }));
-    const t = ws.addRow({ u: 'TOTAL', base: payable.reduce((s, r) => s + r.base, 0), al: payable.reduce((s, r) => s + r.allowancesTotal, 0), bonus: payable.reduce((s, r) => s + r.bonus, 0), gross: payable.reduce((s, r) => s + r.gross, 0),
+    const t = ws.addRow({ u: 'TOTAL', base: payable.reduce((s, r) => s + r.base, 0), al: payable.reduce((s, r) => s + r.allowancesTotal, 0), bonus: payable.reduce((s, r) => s + r.bonus + (r.manualBonusTotal || 0), 0), gross: payable.reduce((s, r) => s + r.gross, 0),
       att: payable.reduce((s, r) => s + r.attendanceDeductionApplied, 0), pen: payable.reduce((s, r) => s + r.manualTotal, 0), oth: payable.reduce((s, r) => s + r.otherDeduction, 0), ins: payable.reduce((s, r) => s + r.insurance, 0),
       tax: payable.reduce((s, r) => s + r.tax, 0), ded: payable.reduce((s, r) => s + r.totalDeductions, 0), net: payable.reduce((s, r) => s + r.net, 0) });
     t.font = { bold: true };
@@ -346,6 +350,10 @@ function PayrollPanel({ data, rows, month, canManage, onChanged }) {
     wp.columns = [{ header: 'Employee', key: 'u', width: 24 }, { header: 'Date', key: 'd', width: 12 }, { header: 'Category', key: 'c', width: 16 }, { header: 'Type', key: 't', width: 10 }, { header: 'Value', key: 'v', width: 10 }, { header: 'Amount (EGP)', key: 'a', width: 14 }, { header: 'Reason', key: 'r', width: 50 }];
     wp.getRow(1).font = { bold: true };
     payable.forEach((r) => r.manualDeductions.forEach((m) => wp.addRow({ u: r.username, d: m.date, c: m.category, t: m.kind === 'days' ? 'Days' : 'Amount', v: m.value, a: m.amount, r: m.reason })));
+    const wbn = wb.addWorksheet('Bonuses');
+    wbn.columns = [{ header: 'Employee', key: 'u', width: 24 }, { header: 'Date', key: 'd', width: 12 }, { header: 'Category', key: 'c', width: 16 }, { header: 'Type', key: 't', width: 10 }, { header: 'Value', key: 'v', width: 10 }, { header: 'Amount (EGP)', key: 'a', width: 14 }, { header: 'Reason', key: 'r', width: 50 }];
+    wbn.getRow(1).font = { bold: true };
+    payable.forEach((r) => (r.manualBonuses || []).forEach((m) => wbn.addRow({ u: r.username, d: m.date, c: m.category, t: m.kind === 'days' ? 'Days' : 'Amount', v: m.value, a: m.amount, r: m.reason })));
 
     const buf = await wb.xlsx.writeBuffer();
     saveAs(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `Payroll_${month}.xlsx`);

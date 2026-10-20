@@ -84,6 +84,7 @@ export const PERMISSIONS = [
 
   // ---- Salary deductions ----
   { key: 'giveDeduction', group: 'payroll', label: 'Record salary deductions', desc: 'Record a deduction (an amount in EGP or a number of days) on staff of own branches (System Admin / HR: anyone). Can be cancelled only within 24 hours (the System Admin can cancel any time). Off for every type unless you switch it on.', def: () => false, grantable: true, server: true },
+  { key: 'giveBonus', group: 'payroll', label: 'Record salary bonuses', desc: 'Record a bonus (an amount in EGP or a number of days) for staff of own branches (System Admin / HR: anyone). It is added to the salary in the HR Report and the payslip. Can be cancelled only within 24 hours (the System Admin can cancel any time). Bonuses are listed with the deductions (see "See all salary deductions").', def: () => false, grantable: true, server: false },
   { key: 'viewDeductions', group: 'payroll', label: 'See all salary deductions', desc: 'The salary deductions report of every branch. Whoever may record deductions sees those of their own branches; everybody sees their own.', def: (r) => r === 'HR', grantable: true, server: true },
 
   // ---- Integrity ----
