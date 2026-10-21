@@ -3141,6 +3141,7 @@ exports.createLostItem = onCall(async (request) => {
   if (!branch || !lostBranchOk(c, branch)) throw new HttpsError('permission-denied', 'Choose one of your own branches.');
   if (!category) throw new HttpsError('invalid-argument', 'Choose the category.');
   if (description.length < 3) throw new HttpsError('invalid-argument', 'Describe the item (colour, brand, anything that identifies it).');
+  if (place.length < 2) throw new HttpsError('invalid-argument', 'Write where the item was left.');
   if (photos.length < 1) throw new HttpsError('invalid-argument', 'Take a photo of the item first.');
   if (!foundByMe && (fromName.length < 2 || fromJob.length < 2)) throw new HttpsError('invalid-argument', 'Write the name and the job of the person who handed it in.');
   if (category === 'Cash' && !(Number.isFinite(amount) && amount > 0 && amount <= 1000000)) throw new HttpsError('invalid-argument', 'Write the cash amount counted in front of the person who handed it in.');
@@ -3199,6 +3200,7 @@ exports.returnLostItem = onCall(async (request) => {
   const customerPhone = String(request.data?.customerPhone || '').trim().slice(0, 30);
   const note = String(request.data?.note || '').trim().slice(0, 300);
   if (customerName.length < 2) throw new HttpsError('invalid-argument', 'Write the name of the person who took it.');
+  if (customerPhone.replace(/\D/g, '').length < 8) throw new HttpsError('invalid-argument', 'Write the phone number of the person who took it.');
   if (x.status === 'InBranch') {
     if (!(c.canManage && lostBranchOk(c, x.branch))) throw new HttpsError('permission-denied', 'You cannot hand this item over.');
   } else if (x.status === 'InStorage') {
@@ -3238,9 +3240,12 @@ exports.confirmLostItemReceived = onCall(async (request) => {
   const { ref, x } = await loadLostItem(request.data?.id);
   if (x.status !== 'PendingFM') throw new HttpsError('failed-precondition', 'This item is not waiting for your confirmation.');
   const note = String(request.data?.note || '').trim().slice(0, 300);
+  const carrierName = String(request.data?.carrierName || '').trim().slice(0, 100);
+  if (carrierName.length < 2) throw new HttpsError('invalid-argument', 'Write the name of the person who took the item from the branch.');
+  if (note.length < 2) throw new HttpsError('invalid-argument', 'Write where the item is stored in the warehouse.');
   await ref.update({
-    status: 'InStorage', fmReceivedBy: c.username, fmReceivedAtMs: Date.now(), fmReceivedAt: FieldValue.serverTimestamp(), storageNote: note,
-    history: FieldValue.arrayUnion(lostHistory(c, 'received by Facility Manager', note))
+    status: 'InStorage', carriedBy: carrierName, fmReceivedBy: c.username, fmReceivedAtMs: Date.now(), fmReceivedAt: FieldValue.serverTimestamp(), storageNote: note,
+    history: FieldValue.arrayUnion(lostHistory(c, 'received in the main warehouse', `Taken from the branch by ${carrierName}${note ? ` - ${note}` : ''}`))
   });
   return { ok: true };
 });

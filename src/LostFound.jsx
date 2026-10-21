@@ -126,7 +126,7 @@ export default function LostFound() {
         { header: 'Received by', key: 'rb', width: 18 }, { header: 'Received at', key: 'ra', width: 20 }, { header: 'Handed in by (name)', key: 'fn', width: 22 }, { header: 'Handed in by (job)', key: 'fj', width: 18 },
         { header: 'Days in the branch', key: 'days', width: 14 }, { header: 'Days left (21)', key: 'left', width: 13 },
         { header: 'Given to (customer)', key: 'rt', width: 22 }, { header: 'Customer phone', key: 'rp', width: 16 }, { header: 'Given by', key: 'rby', width: 16 }, { header: 'Given at', key: 'rat', width: 20 }, { header: 'Return note', key: 'rn', width: 30 },
-        { header: 'Sent to warehouse by', key: 'hb', width: 16 }, { header: 'Sent to warehouse at', key: 'ha', width: 20 }, { header: 'FM received by', key: 'fb', width: 16 }, { header: 'FM received at', key: 'fa', width: 20 }, { header: 'Storage note', key: 'sn', width: 24 },
+        { header: 'Sent to warehouse by', key: 'hb', width: 16 }, { header: 'Sent to warehouse at', key: 'ha', width: 20 }, { header: 'Taken from the branch by', key: 'cb', width: 22 }, { header: 'FM received by', key: 'fb', width: 16 }, { header: 'FM received at', key: 'fa', width: 20 }, { header: 'Storage note', key: 'sn', width: 24 },
         { header: 'Photo', key: 'ph', width: 18 }
       ];
       ws.getRow(1).font = { bold: true };
@@ -140,7 +140,7 @@ export default function LostFound() {
           rb: it.receivedBy, ra: fmtDate(it.receivedAtMs), fn: it.foundByReceiver ? 'Found by the receiver' : it.fromName, fj: it.foundByReceiver ? '' : it.fromJob,
           days, left: it.status === 'InBranch' ? daysLeft(it) : '',
           rt: it.returnedTo || '', rp: it.returnedPhone || '', rby: it.returnedBy || '', rat: fmtDate(it.returnedAtMs), rn: it.returnedNote || '',
-          hb: it.handedOverBy || '', ha: fmtDate(it.handedOverAtMs), fb: it.fmReceivedBy || '', fa: fmtDate(it.fmReceivedAtMs), sn: it.storageNote || '',
+          hb: it.handedOverBy || '', ha: fmtDate(it.handedOverAtMs), cb: it.carriedBy || '', fb: it.fmReceivedBy || '', fa: fmtDate(it.fmReceivedAtMs), sn: it.storageNote || '',
           ph: (it.photoUrls || [])[0] ? { text: 'Open photo', hyperlink: it.photoUrls[0] } : ''
         });
         if (it.status === 'InBranch' && daysLeft(it) <= 0) row.getCell('left').font = { bold: true, color: { argb: 'FFB91C1C' } };
@@ -247,7 +247,7 @@ export default function LostFound() {
 
 function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
   const [panel, setPanel] = useState('');   // '' | 'return' | 'confirm' | 'history'
-  const [f, setF] = useState({ name: '', phone: '', note: '' });
+  const [f, setF] = useState({ name: '', phone: '', note: '', carrier: '' });
   const st = STATUS[it.status] || STATUS.InBranch;
   const due = left <= 0;
   const canReturn = (it.status === 'InBranch' && data.canManage) || (it.status === 'InStorage' && data.canConfirm);
@@ -282,6 +282,7 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
         <p>{it.foundByReceiver ? '🔎 Found in the branch by the receiver.' : <>🤝 Handed in by <b>{it.fromName}</b> — {it.fromJob}</>}</p>
         {it.status === 'Returned' && <p>✅ Given to <b>{it.returnedTo}</b>{it.returnedPhone ? ` (${it.returnedPhone})` : ''} by <b>{it.returnedBy}</b> · {fmtDate(it.returnedAtMs)}{it.returnedNote ? ` — ${it.returnedNote}` : ''}</p>}
         {(it.status === 'PendingFM' || it.status === 'InStorage') && <p>📦 Sent to the main warehouse by <b>{it.handedOverBy}</b> · {fmtDate(it.handedOverAtMs)}</p>}
+        {it.status === 'InStorage' && it.carriedBy && <p>🚚 Taken from the branch by <b>{it.carriedBy}</b></p>}
         {it.status === 'InStorage' && <p>✔ Received by <b>{it.fmReceivedBy}</b> · {fmtDate(it.fmReceivedAtMs)}{it.storageNote ? ` — ${it.storageNote}` : ''}</p>}
       </div>
 
@@ -320,15 +321,16 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
       {panel === 'return' && (
         <div className="p-3 rounded-2xl space-y-2" style={{ backgroundColor: '#f0fdf4' }}>
           <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Name of the person who took it *" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
-          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Phone (optional)" value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} />
+          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Phone of the person who took it *" value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} />
           <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Note, e.g. showed his ID (optional)" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} />
-          <button type="button" disabled={busy || f.name.trim().length < 2} onClick={() => run(it.id, () => call('returnLostItem', { id: it.id, customerName: f.name, customerPhone: f.phone, note: f.note }))} className="px-4 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#16a34a', color: '#fff' }}>{busy ? '...' : 'Save: given back'}</button>
+          <button type="button" disabled={busy || f.name.trim().length < 2 || f.phone.replace(/\D/g, '').length < 8} onClick={() => run(it.id, () => call('returnLostItem', { id: it.id, customerName: f.name, customerPhone: f.phone, note: f.note }))} className="px-4 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#16a34a', color: '#fff' }}>{busy ? '...' : 'Save: given back'}</button>
         </div>
       )}
       {panel === 'confirm' && (
         <div className="p-3 rounded-2xl space-y-2" style={{ backgroundColor: '#f5f3ff' }}>
-          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Where is it stored in the warehouse? (optional)" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} />
-          <button type="button" disabled={busy} onClick={() => run(it.id, () => call('confirmLostItemReceived', { id: it.id, note: f.note }))} className="px-4 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#7c3aed', color: '#fff' }}>{busy ? '...' : 'Yes, I received it'}</button>
+          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Name of the person who took it from the branch *" value={f.carrier} onChange={(e) => setF({ ...f, carrier: e.target.value })} />
+          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Where is it stored in the warehouse? *" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} />
+          <button type="button" disabled={busy || f.carrier.trim().length < 2 || f.note.trim().length < 2} onClick={() => run(it.id, () => call('confirmLostItemReceived', { id: it.id, carrierName: f.carrier, note: f.note }))} className="px-4 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#7c3aed', color: '#fff' }}>{busy ? '...' : 'Yes, I received it'}</button>
         </div>
       )}
       {panel === 'history' && (
@@ -401,7 +403,7 @@ function ReceiveForm({ data, onClose, onSaved }) {
   const previews = useMemo(() => files.map((x) => URL.createObjectURL(x)), [files]);
   useEffect(() => () => previews.forEach((u) => URL.revokeObjectURL(u)), [previews]);
 
-  const ready = f.branch && f.category && f.description.trim().length >= 3 && files.length > 0
+  const ready = f.branch && f.category && f.description.trim().length >= 3 && f.place.trim().length >= 2 && files.length > 0
     && (f.category !== 'Cash' || Number(f.amount) > 0)
     && (f.source === 'found' || (f.fromName.trim().length >= 2 && f.fromJob.trim().length >= 2));
 
@@ -444,7 +446,7 @@ function ReceiveForm({ data, onClose, onSaved }) {
         <label className="block text-[11px] font-black text-slate-500">Description * (colour, brand, anything that identifies it)
           <textarea className={inp} rows={2} value={f.description} onChange={set('description')} />
         </label>
-        <label className="block text-[11px] font-black text-slate-500">Where was it left? (optional)
+        <label className="block text-[11px] font-black text-slate-500">Where was it left? *
           <input className={inp} value={f.place} onChange={set('place')} placeholder="e.g. men's locker room" />
         </label>
 
