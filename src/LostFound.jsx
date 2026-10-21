@@ -8,6 +8,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { functions } from './firebase';
 import { httpsCallable } from 'firebase/functions';
+import { saveAs } from 'file-saver';
+const loadExcelJS = async () => (await import('exceljs')).default; // loaded only when someone exports
 
 const DAY = 24 * 3600 * 1000;
 const CLOUD_NAME = 'gwgnpo4v';       // same Cloudinary account the maintenance requests use
@@ -65,6 +67,9 @@ export default function LostFound() {
   const [branchPick, setBranchPick] = useState('');
   const [catPick, setCatPick] = useState('');
   const [search, setSearch] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [exporting, setExporting] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [zoom, setZoom] = useState('');
   const [busyId, setBusyId] = useState('');
@@ -97,14 +102,72 @@ export default function LostFound() {
       if (statusPick === 'Active' ? it.status === 'Returned' : statusPick !== 'All' && it.status !== statusPick) return false;
       if (branchPick && it.branch !== branchPick) return false;
       if (catPick && it.category !== catPick) return false;
+      if (fromDate && Number(it.receivedAtMs) < new Date(`${fromDate}T00:00:00`).getTime()) return false;
+      if (toDate && Number(it.receivedAtMs) > new Date(`${toDate}T23:59:59`).getTime()) return false;
       if (q && !`${it.description} ${it.fromName} ${it.receivedBy} ${it.place} ${it.returnedTo || ''}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [items, statusPick, branchPick, catPick, search]);
+  }, [items, statusPick, branchPick, catPick, search, fromDate, toDate]);
 
   const run = async (id, fn) => {
     setBusyId(id);
     try { await fn(); await load(); } catch (e) { alert(e.message || 'Something went wrong.'); } finally { setBusyId(''); }
+  };
+
+  const exportExcel = async () => {
+    if (shown.length === 0) return alert('Nothing to export with the current filters.');
+    setExporting(true);
+    try {
+      const wb = new (await loadExcelJS()).Workbook();
+      const ws = wb.addWorksheet('Lost items');
+      ws.columns = [
+        { header: '#', key: 'n', width: 5 }, { header: 'Branch', key: 'br', width: 20 }, { header: 'Category', key: 'cat', width: 20 }, { header: 'Description', key: 'desc', width: 40 },
+        { header: 'Cash amount (EGP)', key: 'amt', width: 16 }, { header: 'Where it was left', key: 'pl', width: 22 }, { header: 'Status', key: 'st', width: 30 },
+        { header: 'Received by', key: 'rb', width: 18 }, { header: 'Received at', key: 'ra', width: 20 }, { header: 'Handed in by (name)', key: 'fn', width: 22 }, { header: 'Handed in by (job)', key: 'fj', width: 18 },
+        { header: 'Days in the branch', key: 'days', width: 14 }, { header: 'Days left (21)', key: 'left', width: 13 },
+        { header: 'Given to (customer)', key: 'rt', width: 22 }, { header: 'Customer phone', key: 'rp', width: 16 }, { header: 'Given by', key: 'rby', width: 16 }, { header: 'Given at', key: 'rat', width: 20 }, { header: 'Return note', key: 'rn', width: 30 },
+        { header: 'Handed to FM by', key: 'hb', width: 16 }, { header: 'Handed to FM at', key: 'ha', width: 20 }, { header: 'FM received by', key: 'fb', width: 16 }, { header: 'FM received at', key: 'fa', width: 20 }, { header: 'Storage note', key: 'sn', width: 24 },
+        { header: 'Photo', key: 'ph', width: 18 }
+      ];
+      ws.getRow(1).font = { bold: true };
+      ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E7FF' } };
+      ws.views = [{ state: 'frozen', ySplit: 1 }];
+      shown.forEach((it, i) => {
+        const end = it.status === 'Returned' ? Number(it.returnedAtMs) : now;
+        const days = Math.max(0, Math.floor((end - Number(it.receivedAtMs || now)) / DAY));
+        const row = ws.addRow({
+          n: i + 1, br: it.branch, cat: it.category, desc: it.description, amt: it.category === 'Cash' ? it.amount : '', pl: it.place || '', st: (STATUS[it.status] || {}).label || it.status,
+          rb: it.receivedBy, ra: fmtDate(it.receivedAtMs), fn: it.foundByReceiver ? 'Found by the receiver' : it.fromName, fj: it.foundByReceiver ? '' : it.fromJob,
+          days, left: it.status === 'InBranch' ? daysLeft(it) : '',
+          rt: it.returnedTo || '', rp: it.returnedPhone || '', rby: it.returnedBy || '', rat: fmtDate(it.returnedAtMs), rn: it.returnedNote || '',
+          hb: it.handedOverBy || '', ha: fmtDate(it.handedOverAtMs), fb: it.fmReceivedBy || '', fa: fmtDate(it.fmReceivedAtMs), sn: it.storageNote || '',
+          ph: (it.photoUrls || [])[0] ? { text: 'Open photo', hyperlink: it.photoUrls[0] } : ''
+        });
+        if (it.status === 'InBranch' && daysLeft(it) <= 0) row.getCell('left').font = { bold: true, color: { argb: 'FFB91C1C' } };
+      });
+      ws.getColumn('amt').numFmt = '#,##0.00';
+
+      const sm = wb.addWorksheet('Summary');
+      sm.columns = [{ header: 'Group', key: 'g', width: 26 }, { header: 'Item', key: 'i', width: 36 }, { header: 'Count', key: 'c', width: 10 }, { header: 'Cash (EGP)', key: 'm', width: 14 }];
+      sm.getRow(1).font = { bold: true };
+      const addGroup = (title, keyOf) => {
+        const map = {};
+        shown.forEach((it) => { const k = keyOf(it); map[k] = map[k] || { c: 0, m: 0 }; map[k].c += 1; if (it.category === 'Cash') map[k].m += Number(it.amount) || 0; });
+        Object.entries(map).sort((a, b) => b[1].c - a[1].c).forEach(([k, v]) => sm.addRow({ g: title, i: k, c: v.c, m: v.m || '' }));
+        sm.addRow({});
+      };
+      sm.addRow({ g: 'Items in this report', c: shown.length, m: shown.filter((i) => i.category === 'Cash').reduce((x, i) => x + (Number(i.amount) || 0), 0) });
+      sm.addRow({ g: 'Overdue (in the branch more than 21 days)', c: shown.filter((i) => i.status === 'InBranch' && daysLeft(i) <= 0).length });
+      sm.addRow({});
+      addGroup('By status', (i) => (STATUS[i.status] || {}).label || i.status);
+      addGroup('By branch', (i) => i.branch);
+      addGroup('By category', (i) => i.category);
+      sm.getColumn('m').numFmt = '#,##0.00';
+
+      const buf = await wb.xlsx.writeBuffer();
+      const d = new Date();
+      saveAs(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `Lost_and_Found_${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.xlsx`);
+    } catch (e) { alert(e.message || 'Could not create the Excel file.'); } finally { setExporting(false); }
   };
 
   const chip = (active) => ({ backgroundColor: active ? '#4f46e5' : '#e0e7ff', color: active ? '#fff' : '#3730a3' });
@@ -119,6 +182,7 @@ export default function LostFound() {
           </div>
           <div className="flex items-center gap-2">
             <button type="button" onClick={load} disabled={loading} className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-50" style={{ backgroundColor: '#e2e8f0', color: '#334155' }}>{loading ? '...' : '↻ Refresh'}</button>
+            <button type="button" onClick={exportExcel} disabled={exporting || !data} className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-50" style={{ backgroundColor: '#16a34a', color: '#fff' }}>{exporting ? '...' : '📥 Excel'}</button>
             {data?.canManage && (
               <button type="button" onClick={() => setShowForm(true)} className="px-4 py-2 rounded-xl text-xs font-black border-0 cursor-pointer" style={{ backgroundColor: '#4f46e5', color: '#fff' }}>➕ Receive an item</button>
             )}
@@ -150,7 +214,15 @@ export default function LostFound() {
             <option value="">All categories</option>
             {(data?.categories || []).map((c) => <option key={c} value={c}>{CAT_ICON[c] || '📦'} {c}</option>)}
           </select>
+          <label className="flex items-center gap-1 text-[11px] font-black text-slate-500">From
+            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" />
+          </label>
+          <label className="flex items-center gap-1 text-[11px] font-black text-slate-500">To
+            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="p-2 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" />
+          </label>
+          {(fromDate || toDate) && <button type="button" onClick={() => { setFromDate(''); setToDate(''); }} className="px-3 py-1.5 rounded-xl text-xs font-black border-0 cursor-pointer" style={{ backgroundColor: '#e2e8f0', color: '#334155' }}>Clear dates</button>}
         </div>
+        <p className="text-[11px] text-slate-500">The Excel file contains exactly what is listed below (the filters and dates apply).</p>
       </div>
 
       {!data && <p className="text-xs font-bold text-slate-400 p-4">Loading...</p>}
@@ -268,19 +340,64 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
   );
 }
 
+// Live camera (no gallery / file upload): the photo must be taken right now, in front of the item.
+function CameraCapture({ onShot, onClose }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const [err, setErr] = useState('');
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('This browser cannot open the camera.');
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
+        if (dead) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => {}); }
+        setReady(true);
+      } catch (e) {
+        setErr(e && e.name === 'NotAllowedError' ? 'Camera access was denied. Allow the camera for this site in the browser settings, then try again.' : (e.message || 'Could not open the camera.'));
+      }
+    })();
+    return () => { dead = true; if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop()); };
+  }, []);
+
+  const snap = () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) return;
+    const scale = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(v.videoWidth * scale); c.height = Math.round(v.videoHeight * scale);
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    c.toBlob((b) => { if (b) onShot(b); }, 'image/jpeg', 0.82);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center p-3 gap-3" style={{ backgroundColor: 'rgba(0,0,0,0.92)' }}>
+      {err ? (
+        <p className="text-sm font-black text-center max-w-sm" style={{ color: '#fecaca' }}>{err}</p>
+      ) : (
+        <video ref={videoRef} playsInline muted style={{ maxWidth: '100%', maxHeight: '75vh', borderRadius: 16, backgroundColor: '#000' }} />
+      )}
+      <div className="flex gap-3">
+        {!err && <button type="button" disabled={!ready} onClick={snap} className="px-6 py-3 rounded-2xl text-sm font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#fff', color: '#0f172a' }}>📸 Take photo</button>}
+        <button type="button" onClick={onClose} className="px-6 py-3 rounded-2xl text-sm font-black border-0 cursor-pointer" style={{ backgroundColor: '#334155', color: '#fff' }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function ReceiveForm({ data, onClose, onSaved }) {
   const branches = data?.branches || [];
   const [f, setF] = useState({ branch: branches[0] || '', category: '', description: '', place: '', amount: '', source: 'handed', fromName: '', fromJob: '' });
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
-  const fileRef = useRef(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
 
-  const addFiles = (e) => {
-    const picked = Array.from(e.target.files || []);
-    setFiles((old) => [...old, ...picked].slice(0, 3));
-    e.target.value = '';
-  };
+  const addShot = (blob) => { setFiles((old) => [...old, blob].slice(0, 3)); setCameraOpen(false); };
   const previews = useMemo(() => files.map((x) => URL.createObjectURL(x)), [files]);
   useEffect(() => () => previews.forEach((u) => URL.revokeObjectURL(u)), [previews]);
 
@@ -332,7 +449,7 @@ function ReceiveForm({ data, onClose, onSaved }) {
         </label>
 
         <div>
-          <p className="text-[11px] font-black text-slate-500 mb-1">Photos * (1 to 3)</p>
+          <p className="text-[11px] font-black text-slate-500 mb-1">Photos * (1 to 3) — taken with the camera, not uploaded</p>
           <div className="flex flex-wrap gap-2 items-center">
             {previews.map((u, i) => (
               <div key={i} style={{ position: 'relative' }}>
@@ -341,9 +458,8 @@ function ReceiveForm({ data, onClose, onSaved }) {
               </div>
             ))}
             {files.length < 3 && (
-              <button type="button" onClick={() => fileRef.current && fileRef.current.click()} className="border-0 cursor-pointer text-xs font-black" style={{ width: 72, height: 72, borderRadius: 12, backgroundColor: '#e0e7ff', color: '#3730a3' }}>📷 Add</button>
+              <button type="button" onClick={() => setCameraOpen(true)} className="border-0 cursor-pointer text-xs font-black" style={{ width: 72, height: 72, borderRadius: 12, backgroundColor: '#e0e7ff', color: '#3730a3' }}>📷 Take photo</button>
             )}
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={addFiles} style={{ display: 'none' }} />
           </div>
         </div>
 
@@ -361,6 +477,7 @@ function ReceiveForm({ data, onClose, onSaved }) {
           )}
         </div>
 
+        {cameraOpen && <CameraCapture onShot={addShot} onClose={() => setCameraOpen(false)} />}
         <p className="text-[11px] text-slate-500">Your name and the time are recorded automatically as the person who received it.</p>
         <button type="button" disabled={!ready || busy} onClick={save} className="w-full py-3 rounded-2xl text-sm font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#4f46e5', color: '#fff' }}>{busy ? 'Saving...' : 'Save: I received it'}</button>
       </div>
