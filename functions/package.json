@@ -2,7 +2,7 @@
   "name": "functions",
   "description": "Cloud Functions for BeFit Eye - sends push notifications for new requests",
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
   "dependencies": {

@@ -591,6 +591,7 @@ const pushTabForType = (type) => {
   if (type === 'EXPECTED_ABSENCE') return 'schedule';
   if (type.startsWith('OUTSOURCE')) return 'outsource';
   if (type === 'DEDUCTION') return 'attendance';
+  if (type === 'LOST_FOUND') return 'lostfound';
   if (type === 'PAYSLIP') return 'payslip';
   return 'requests';
 };
@@ -3075,4 +3076,180 @@ exports.setWhoIsInBranchHidden = onCall(async (request) => {
   if (hidden) list.add(branch); else list.delete(branch);
   await ref.set({ hiddenBranches: Array.from(list), updatedAt: FieldValue.serverTimestamp(), updatedBy: profile.username || '' });
   return { ok: true, hiddenBranches: Array.from(list) };
+});
+
+
+/* ----------------------------------------------------------------------------------------------
+   Lost & Found - things left behind at a branch.
+   Flow: the branch Admin receives an item (photo, who handed it in, their job) -> it waits "In branch" ->
+   either it is handed back to the customer (Returned), or after 21 days it is handed to the Facility Manager
+   (Waiting for FM) who confirms receipt in the app (In storage). The FM can still return it to a customer later.
+   Stored in lostItems/{id}; no Firestore rule exists for it - the browser only ever talks to these functions.
+   ---------------------------------------------------------------------------------------------- */
+const LOST_CATEGORIES = ['Cash', 'Wallet', 'Bank card', 'ID / documents', 'Mobile phone', 'Headphones / earbuds', 'Jewelry / watch', 'Keys', 'Glasses', 'Bag', 'Clothing', 'Water bottle / gym gear', 'Other electronics', 'Other'];
+const LOST_DUE_DAYS = 21;
+const LOST_DAY_MS = 24 * 3600 * 1000;
+
+const loadLostCaller = async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const snap = await db.collection('users').doc(request.auth.uid).get();
+  if (!snap.exists) throw new HttpsError('permission-denied', 'Your account could not be found.');
+  const profile = await withRole({ ...snap.data(), role: snap.data().role || request.auth.token.role });
+  const role = normRoleUpper(profile.role);
+  const isSysAdmin = role === 'ADMIN';
+  const isFM = role === 'FACILITY MANAGER';
+  const limited = ['COACH', 'FITNESS MANAGER'].includes(String(profile.role || '').trim().toUpperCase()); // normRoleUpper maps these to USER, but they get nothing by default
+  const canView = permAllowed(profile, 'tab_lostFound', !limited && ['USER', 'STAFF', 'SUPERVISOR', 'BRANCH MANAGER', 'FACILITY MANAGER', 'FACILITY MEMBER', 'CEO'].includes(role));
+  if (!canView) throw new HttpsError('permission-denied', 'The Lost & Found screen is switched off for your account.');
+  return {
+    uid: request.auth.uid, profile, role, isSysAdmin, isFM,
+    username: profile.username || '',
+    canManage: permAllowed(profile, 'manageLostFound', !limited && (role === 'USER' || role === 'STAFF')),
+    canConfirm: permAllowed(profile, 'receiveLostFound', isFM),
+    branches: Array.isArray(profile.assignedBranches) ? profile.assignedBranches : []
+  };
+};
+const lostBranchOk = (c, branch) => c.isSysAdmin || c.branches.includes(branch);
+const lostHistory = (c, action, note) => ({ at: Date.now(), by: c.username, action, note: String(note || '').slice(0, 300) });
+const lostPhoto = (u) => typeof u === 'string' && /^https:\/\/res\.cloudinary\.com\/[A-Za-z0-9_-]+\/image\/upload\//.test(u) && u.length < 600;
+
+const notifyFacilityManagers = async (title, body, itemId) => {
+  try {
+    const usersSnap = await db.collection('users').get();
+    const tokens = [];
+    usersSnap.forEach((u) => {
+      const v = u.data();
+      if (normRoleUpper(v.role) === 'FACILITY MANAGER' && Array.isArray(v.fcmTokens)) tokens.push(...v.fcmTokens);
+    });
+    await sendPushAndCleanup(usersSnap, tokens, title, body, { requestId: itemId, type: 'LOST_FOUND' });
+  } catch (err) { console.error('lost&found push failed', err); }
+};
+
+exports.createLostItem = onCall(async (request) => {
+  const c = await loadLostCaller(request);
+  if (!c.canManage) throw new HttpsError('permission-denied', 'You are not allowed to record lost items.');
+  const d = request.data || {};
+  const branch = String(d.branch || '').trim();
+  const category = LOST_CATEGORIES.includes(d.category) ? d.category : '';
+  const description = String(d.description || '').trim().slice(0, 600);
+  const place = String(d.place || '').trim().slice(0, 150);
+  const photos = Array.isArray(d.photoUrls) ? d.photoUrls.filter(lostPhoto).slice(0, 3) : [];
+  const foundByMe = d.source === 'found';
+  const fromName = String(d.fromName || '').trim().slice(0, 100);
+  const fromJob = String(d.fromJob || '').trim().slice(0, 100);
+  const amount = d.amount === '' || d.amount == null ? null : Math.round(Number(d.amount) * 100) / 100;
+  if (!branch || !lostBranchOk(c, branch)) throw new HttpsError('permission-denied', 'Choose one of your own branches.');
+  if (!category) throw new HttpsError('invalid-argument', 'Choose the category.');
+  if (description.length < 3) throw new HttpsError('invalid-argument', 'Describe the item (colour, brand, anything that identifies it).');
+  if (photos.length < 1) throw new HttpsError('invalid-argument', 'Take a photo of the item first.');
+  if (!foundByMe && (fromName.length < 2 || fromJob.length < 2)) throw new HttpsError('invalid-argument', 'Write the name and the job of the person who handed it in.');
+  if (category === 'Cash' && !(Number.isFinite(amount) && amount > 0 && amount <= 1000000)) throw new HttpsError('invalid-argument', 'Write the cash amount counted in front of the person who handed it in.');
+  const now = Date.now();
+  const ref = await db.collection('lostItems').add({
+    branch, category, description, place, photoUrls: photos,
+    amount: category === 'Cash' ? amount : null,
+    fromName: foundByMe ? '' : fromName, fromJob: foundByMe ? '' : fromJob, foundByReceiver: foundByMe,
+    receivedBy: c.username, receivedById: c.uid, receivedAtMs: now, receivedAt: FieldValue.serverTimestamp(),
+    status: 'InBranch',
+    history: [lostHistory(c, 'received', foundByMe ? 'Found by the receiver' : `From ${fromName} (${fromJob})`)]
+  });
+  return { id: ref.id };
+});
+
+exports.getLostItems = onCall(async (request) => {
+  const c = await loadLostCaller(request);
+  const snap = await db.collection('lostItems').orderBy('receivedAtMs', 'desc').limit(600).get();
+  // System Admin and CEO see every branch. Everybody else - whatever role the System Admin switched the tab on for in
+  // Permissions - sees ONLY the branches assigned to their account (no branch assigned = nothing). The one exception: a person
+  // who can confirm receipt (Facility Manager) also sees the items handed over to him, whatever the branch, otherwise he could not confirm them.
+  const seeAll = c.isSysAdmin || c.role === 'CEO';
+  const items = [];
+  snap.forEach((d) => {
+    const x = d.data();
+    const mine = seeAll || c.branches.includes(x.branch);
+    const handedToMe = c.canConfirm && (x.status === 'PendingFM' || x.status === 'InStorage');
+    if (!mine && !handedToMe) return;
+    const row = { id: d.id };
+    Object.keys(x).forEach((k) => { if (!(x[k] && typeof x[k].toMillis === 'function')) row[k] = x[k]; }); // server timestamps stay out; the *Ms fields carry the times
+    items.push(row);
+  });
+  let branches = c.branches;
+  if (c.isSysAdmin) {
+    const b = await db.collection('branches').get();
+    branches = b.docs.map((x) => String(x.data().name || '')).filter(Boolean).sort((a, z) => a.localeCompare(z));
+  }
+  return {
+    items, nowMs: Date.now(), dueDays: LOST_DUE_DAYS, categories: LOST_CATEGORIES, branches,
+    canManage: c.canManage, canConfirm: c.canConfirm, isSysAdmin: c.isSysAdmin
+  };
+});
+
+const loadLostItem = async (id) => {
+  const ref = db.collection('lostItems').doc(String(id || ''));
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError('not-found', 'That item no longer exists.');
+  return { ref, x: snap.data() };
+};
+
+// Returned to its owner. The branch Admin does it while it is in the branch; the Facility Manager once it is in storage.
+exports.returnLostItem = onCall(async (request) => {
+  const c = await loadLostCaller(request);
+  const { ref, x } = await loadLostItem(request.data?.id);
+  const customerName = String(request.data?.customerName || '').trim().slice(0, 100);
+  const customerPhone = String(request.data?.customerPhone || '').trim().slice(0, 30);
+  const note = String(request.data?.note || '').trim().slice(0, 300);
+  if (customerName.length < 2) throw new HttpsError('invalid-argument', 'Write the name of the person who took it.');
+  if (x.status === 'InBranch') {
+    if (!(c.canManage && lostBranchOk(c, x.branch))) throw new HttpsError('permission-denied', 'You cannot hand this item over.');
+  } else if (x.status === 'InStorage') {
+    if (!c.canConfirm) throw new HttpsError('permission-denied', 'Only the Facility Manager can hand over an item that is in storage.');
+  } else {
+    throw new HttpsError('failed-precondition', x.status === 'Returned' ? 'This item was already handed to its owner.' : 'This item is waiting for the Facility Manager to confirm receipt first.');
+  }
+  await ref.update({
+    status: 'Returned', returnedTo: customerName, returnedPhone: customerPhone, returnedNote: note,
+    returnedBy: c.username, returnedAtMs: Date.now(), returnedAt: FieldValue.serverTimestamp(),
+    history: FieldValue.arrayUnion(lostHistory(c, 'returned', `To ${customerName}${note ? ` - ${note}` : ''}`))
+  });
+  return { ok: true };
+});
+
+// Handing it to the Facility Manager: only once the 21 days have passed (the System Admin may do it earlier).
+exports.handoverLostItem = onCall(async (request) => {
+  const c = await loadLostCaller(request);
+  const { ref, x } = await loadLostItem(request.data?.id);
+  if (!(c.canManage && lostBranchOk(c, x.branch))) throw new HttpsError('permission-denied', 'You cannot hand this item over.');
+  if (x.status !== 'InBranch') throw new HttpsError('failed-precondition', 'This item is not in the branch any more.');
+  const age = Date.now() - Number(x.receivedAtMs || 0);
+  if (!c.isSysAdmin && age < LOST_DUE_DAYS * LOST_DAY_MS) {
+    throw new HttpsError('failed-precondition', `It can go to the Facility Manager only after ${LOST_DUE_DAYS} days in the branch (${Math.ceil(LOST_DUE_DAYS - age / LOST_DAY_MS)} day(s) left).`);
+  }
+  await ref.update({
+    status: 'PendingFM', handedOverBy: c.username, handedOverAtMs: Date.now(), handedOverAt: FieldValue.serverTimestamp(),
+    history: FieldValue.arrayUnion(lostHistory(c, 'handed to Facility Manager', ''))
+  });
+  await notifyFacilityManagers('🧳 Lost item handed to you', `${x.category} from ${x.branch} - please confirm receipt in the app.`, ref.id);
+  return { ok: true };
+});
+
+exports.confirmLostItemReceived = onCall(async (request) => {
+  const c = await loadLostCaller(request);
+  if (!c.canConfirm) throw new HttpsError('permission-denied', 'Only the Facility Manager can confirm receipt.');
+  const { ref, x } = await loadLostItem(request.data?.id);
+  if (x.status !== 'PendingFM') throw new HttpsError('failed-precondition', 'This item is not waiting for your confirmation.');
+  const note = String(request.data?.note || '').trim().slice(0, 300);
+  await ref.update({
+    status: 'InStorage', fmReceivedBy: c.username, fmReceivedAtMs: Date.now(), fmReceivedAt: FieldValue.serverTimestamp(), storageNote: note,
+    history: FieldValue.arrayUnion(lostHistory(c, 'received by Facility Manager', note))
+  });
+  return { ok: true };
+});
+
+// System Admin only: remove a wrongly entered item.
+exports.deleteLostItem = onCall(async (request) => {
+  const c = await loadLostCaller(request);
+  if (!c.isSysAdmin) throw new HttpsError('permission-denied', 'Only the System Admin can delete an item.');
+  const { ref } = await loadLostItem(request.data?.id);
+  await ref.delete();
+  return { ok: true };
 });

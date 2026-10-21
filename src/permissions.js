@@ -27,7 +27,8 @@ export const PERMISSION_GROUPS = [
   { id: 'maintenance', label: 'Facility Management' },
   { id: 'integrity', label: 'Integrity Reports' },
   { id: 'users', label: 'Users & Schedule' },
-  { id: 'payroll', label: 'Payroll & Deductions' }
+  { id: 'payroll', label: 'Payroll & Deductions' },
+  { id: 'lostfound', label: 'Lost & Found' }
 ];
 
 // Role aliases: Branch Manager+ behaves as Branch Manager, QA Manager as QA (a "def" below receives the
@@ -45,6 +46,9 @@ export const PERMISSIONS = [
   { key: 'tab_schedule', group: 'tabs', label: 'Schedule tab', desc: 'See the shift schedule (planning follows the role).', def: (r) => ['CEO', 'HR', 'Branch Manager', 'Supervisor'].includes(r), grantable: false, server: false },
   { key: 'tab_checklist', group: 'tabs', label: 'Checklist tab', desc: 'See the branch checklist.', def: ALL_BUT('Coach'), grantable: true, server: false },
   { key: 'tab_whoIsIn', group: 'tabs', label: "Who's In tab", desc: 'See who is checked in at each branch right now, with phone numbers (no photos).', def: ALL_BUT(), grantable: true, server: false },
+  { key: 'tab_lostFound', group: 'lostfound', label: 'Lost & Found tab', desc: 'See the lost items of own branches (System Admin and CEO: every branch).', def: (r) => ['User', 'Staff', 'Supervisor', 'Branch Manager', 'Facility Manager', 'Facility Member', 'CEO'].includes(r), grantable: true, server: true },
+  { key: 'manageLostFound', group: 'lostfound', label: 'Record and hand over lost items', desc: 'Receive a lost item (photo, who handed it in), give it back to its owner, and hand it to the Facility Manager after 21 days. Own branches only.', def: (r) => ['User', 'Staff'].includes(r), grantable: true, server: true },
+  { key: 'receiveLostFound', group: 'lostfound', label: 'Confirm receiving lost items (storage)', desc: 'Confirm that a lost item handed over by a branch was received, and give stored items back to their owners.', def: (r) => r === 'Facility Manager', grantable: true, server: true },
   { key: 'tab_outsource', group: 'tabs', label: 'Outsource Maintenance tab', desc: 'Request, approve and escort outside maintenance technicians (what each role may do follows the account role).', def: ALL_BUT('HR', 'Coach', 'Fitness Manager', 'Finance and Administration'), grantable: false, server: false },
   { key: 'tab_users', group: 'tabs', label: 'Users tab', desc: 'Manage accounts (which roles follows the account role).', def: (r, raw) => ['Branch Manager', 'Facility Manager', 'Supervisor'].includes(r) || raw === 'QA Manager' || raw === 'Fitness Manager', grantable: false, server: false },
   { key: 'facilityPerformance', group: 'maintenance', label: 'Facility team performance', desc: 'Response rate, response speed and average time to finish requests.', def: (r) => ['Facility Member', 'Facility Manager', 'CEO'].includes(r), grantable: true, server: false },

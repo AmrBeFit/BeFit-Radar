@@ -43,6 +43,7 @@ const Deductions = React.lazy(() => import('./Deductions'));
 const HRReport = React.lazy(() => import('./HRReport'));
 const MyPayslip = React.lazy(() => import('./MyPayslip'));
 const WhoIsIn = React.lazy(() => import('./WhoIsIn'));
+const LostFound = React.lazy(() => import('./LostFound'));
 import OutsourceMaintenance, { OutsourceAreasSettings, useOutsourceWaiting } from './OutsourceMaintenance';
 
 // value used by the "Assigned to" filter for requests nobody has been assigned to
@@ -611,6 +612,7 @@ export default function Dashboard({ user, onLogout }) {
   const canSeeHRReport = perm('tab_hrReport');
   const canSeePayslip = perm('tab_payslip');
   const canSeeWhoIsIn = perm('tab_whoIsIn');
+  const canSeeLostFound = perm('tab_lostFound');
   // The Schedule tab (planned shifts + plan-vs-actual report): those who plan it or need to see it
   const canSeeSchedule = perm('tab_schedule');
   // The CEO can no longer add, edit or delete users - Admin, Branch Manager and Facility Manager can create,
@@ -2920,7 +2922,8 @@ export default function Dashboard({ user, onLogout }) {
         attendance: canSeeAttendance,
         schedule: canSeeSchedule,
         outsource: canSeeOutsource,
-        payslip: canSeePayslip
+        payslip: canSeePayslip,
+        lostfound: canSeeLostFound
       };
       if (tab && allowed[tab]) {
         setActiveTab(tab);
@@ -2930,7 +2933,7 @@ export default function Dashboard({ user, onLogout }) {
     };
     window.addEventListener('befit-push-navigate', onPushNavigate);
     return () => window.removeEventListener('befit-push-navigate', onPushNavigate);
-  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule, canSeeOutsource, canSeePayslip]);
+  }, [canSeeCeoServices, canSeeAttendance, canSeeSchedule, canSeeOutsource, canSeePayslip, canSeeLostFound]);
 
   const handleAddRequest = async (e) => {
     e.preventDefault();
@@ -3407,6 +3410,15 @@ export default function Dashboard({ user, onLogout }) {
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'whoisin' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
               📍 Who's In
+            </button>
+          )}
+
+          {canSeeLostFound && (
+            <button
+              onClick={() => setActiveTab('lostfound')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === 'lostfound' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              🧳 Lost & Found
             </button>
           )}
 
@@ -4615,6 +4627,7 @@ export default function Dashboard({ user, onLogout }) {
 
       {activeTab === 'payslip' && canSeePayslip && <MyPayslip />}
       {activeTab === 'whoisin' && canSeeWhoIsIn && <WhoIsIn />}
+      {activeTab === 'lostfound' && canSeeLostFound && <LostFound />}
 
       {activeTab === 'reports' && canViewReports && (
         <>
