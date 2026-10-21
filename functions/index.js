@@ -3028,14 +3028,17 @@ exports.whoIsIn = onCall(async (request) => {
   const hiddenName = 'amr shata';
   const viewerIsHidden = String(profile.username || '').trim().toLowerCase() === hiddenName;
   const [attSnap, usersSnap, privSnap] = await Promise.all([
-    db.collection('attendance').where('dateStr', '==', cairoYmd()).get(),
+    // today AND yesterday: someone who checked in before midnight and is still working must not vanish at 00:00
+    db.collection('attendance').where('dateStr', 'in', [cairoYmd(), cairoYmd(new Date(Date.now() - 24 * 3600 * 1000))]).get(),
     db.collection('users').get(),
     db.collection('userPrivate').get()
   ]);
+  const phoneById = new Map();
+  privSnap.forEach((p) => phoneById.set(p.id, p.data().phone));
   const byName = {};
   usersSnap.forEach((u) => {
     const d = u.data();
-    const phone = (privSnap.docs.find((p) => p.id === u.id)?.data().phone) || '';
+    const phone = phoneById.get(u.id) || '';
     byName[String(d.username || '').trim().toLowerCase()] = { role: d.role || '', phone: String(phone || '') };
   });
   const rows = [];
@@ -3046,6 +3049,7 @@ exports.whoIsIn = onCall(async (request) => {
     if (!k || (!viewerIsHidden && k === hiddenName)) return;
     if (!isAdminViewer && hiddenBranches.includes(String(r.branch || ''))) return; // hidden branches are for the System Admin's eyes only
     const ms = r.checkInTime?.toMillis ? r.checkInTime.toMillis() : Date.now();
+    if (Date.now() - ms > 20 * 3600 * 1000) return; // a forgotten check-out from a past shift is not "in" any more
     const info = byName[k] || { role: '', phone: '' };
     rows.push({ username: r.username, role: info.role, branch: r.branch || '', phone: info.phone, checkInMs: ms });
   });
