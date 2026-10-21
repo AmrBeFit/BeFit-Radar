@@ -1,7 +1,7 @@
 /* =====================================================================
    LostFound - "🧳 Lost & Found".
    The branch Admin receives an item (photo, who handed it in and their job) and keeps it for 21 days while a
-   counter shows the days left. It is then either given back to its owner, or handed to the Facility Manager, who must
+   counter shows the days left. It is then either given back to its owner, or sent to the main warehouse, where the Facility Manager must
    confirm receiving it in the app (it then sits "In storage"). Everything goes through the Cloud Functions
    (createLostItem, getLostItems, returnLostItem, handoverLostItem, confirmLostItemReceived, deleteLostItem).
    ===================================================================== */
@@ -22,8 +22,8 @@ const CAT_ICON = {
 };
 const STATUS = {
   InBranch: { label: 'In the branch', bg: '#dbeafe', fg: '#1d4ed8' },
-  PendingFM: { label: 'Waiting for Facility Manager to confirm', bg: '#fef3c7', fg: '#b45309' },
-  InStorage: { label: 'In storage (Facility Manager)', bg: '#ede9fe', fg: '#6d28d9' },
+  PendingFM: { label: 'Sent to the main warehouse - waiting for Facility Manager to confirm', bg: '#fef3c7', fg: '#b45309' },
+  InStorage: { label: 'In the main warehouse', bg: '#ede9fe', fg: '#6d28d9' },
   Returned: { label: 'Given back to its owner', bg: '#dcfce7', fg: '#15803d' }
 };
 
@@ -126,7 +126,7 @@ export default function LostFound() {
         { header: 'Received by', key: 'rb', width: 18 }, { header: 'Received at', key: 'ra', width: 20 }, { header: 'Handed in by (name)', key: 'fn', width: 22 }, { header: 'Handed in by (job)', key: 'fj', width: 18 },
         { header: 'Days in the branch', key: 'days', width: 14 }, { header: 'Days left (21)', key: 'left', width: 13 },
         { header: 'Given to (customer)', key: 'rt', width: 22 }, { header: 'Customer phone', key: 'rp', width: 16 }, { header: 'Given by', key: 'rby', width: 16 }, { header: 'Given at', key: 'rat', width: 20 }, { header: 'Return note', key: 'rn', width: 30 },
-        { header: 'Handed to FM by', key: 'hb', width: 16 }, { header: 'Handed to FM at', key: 'ha', width: 20 }, { header: 'FM received by', key: 'fb', width: 16 }, { header: 'FM received at', key: 'fa', width: 20 }, { header: 'Storage note', key: 'sn', width: 24 },
+        { header: 'Sent to warehouse by', key: 'hb', width: 16 }, { header: 'Sent to warehouse at', key: 'ha', width: 20 }, { header: 'FM received by', key: 'fb', width: 16 }, { header: 'FM received at', key: 'fa', width: 20 }, { header: 'Storage note', key: 'sn', width: 24 },
         { header: 'Photo', key: 'ph', width: 18 }
       ];
       ws.getRow(1).font = { bold: true };
@@ -178,7 +178,7 @@ export default function LostFound() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-black text-slate-900 tracking-tight">🧳 Lost & Found</h2>
-            <p className="text-xs text-slate-500">Items left in the branches. Each one stays {dueDays} days in the branch, then goes to the Facility Manager.</p>
+            <p className="text-xs text-slate-500">Items left in the branches. Each one stays {dueDays} days in the branch, then goes to the main warehouse.</p>
           </div>
           <div className="flex items-center gap-2">
             <button type="button" onClick={load} disabled={loading} className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-50" style={{ backgroundColor: '#e2e8f0', color: '#334155' }}>{loading ? '...' : '↻ Refresh'}</button>
@@ -194,15 +194,15 @@ export default function LostFound() {
         <div className="flex flex-wrap gap-2">
           {[['Active', `Not returned yet · ${counts.InBranch + counts.PendingFM + counts.InStorage}`],
             ['InBranch', `In the branch · ${counts.InBranch}`],
-            ['PendingFM', `Waiting for FM · ${counts.PendingFM}`],
-            ['InStorage', `In storage · ${counts.InStorage}`],
+            ['PendingFM', `Sent to warehouse · ${counts.PendingFM}`],
+            ['InStorage', `In the warehouse · ${counts.InStorage}`],
             ['Returned', `Given back · ${counts.Returned}`],
             ['All', `All · ${items.length}`]].map(([k, label]) => (
             <button key={k} type="button" onClick={() => setStatusPick(k)} className="px-3 py-1.5 rounded-xl text-xs font-black border-0 cursor-pointer" style={chip(statusPick === k)}>{label}</button>
           ))}
         </div>
         {counts.overdue > 0 && (
-          <p className="text-xs font-black p-2.5 rounded-xl" style={{ backgroundColor: '#fee2e2', color: '#b91c1c' }}>⚠️ {counts.overdue} item(s) passed {dueDays} days in the branch and must be handed to the Facility Manager.</p>
+          <p className="text-xs font-black p-2.5 rounded-xl" style={{ backgroundColor: '#fee2e2', color: '#b91c1c' }}>⚠️ {counts.overdue} item(s) passed {dueDays} days in the branch and must go to the main warehouse.</p>
         )}
         <div className="flex flex-wrap gap-2">
           <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="🔍 Description, name..." className="p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold w-56" />
@@ -281,14 +281,14 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
         <p>📥 Received by <b>{it.receivedBy}</b> · {fmtDate(it.receivedAtMs)}</p>
         <p>{it.foundByReceiver ? '🔎 Found in the branch by the receiver.' : <>🤝 Handed in by <b>{it.fromName}</b> — {it.fromJob}</>}</p>
         {it.status === 'Returned' && <p>✅ Given to <b>{it.returnedTo}</b>{it.returnedPhone ? ` (${it.returnedPhone})` : ''} by <b>{it.returnedBy}</b> · {fmtDate(it.returnedAtMs)}{it.returnedNote ? ` — ${it.returnedNote}` : ''}</p>}
-        {(it.status === 'PendingFM' || it.status === 'InStorage') && <p>📦 Handed to the Facility Manager by <b>{it.handedOverBy}</b> · {fmtDate(it.handedOverAtMs)}</p>}
+        {(it.status === 'PendingFM' || it.status === 'InStorage') && <p>📦 Sent to the main warehouse by <b>{it.handedOverBy}</b> · {fmtDate(it.handedOverAtMs)}</p>}
         {it.status === 'InStorage' && <p>✔ Received by <b>{it.fmReceivedBy}</b> · {fmtDate(it.fmReceivedAtMs)}{it.storageNote ? ` — ${it.storageNote}` : ''}</p>}
       </div>
 
       {it.status === 'InBranch' && (
         <div>
           <div className="flex items-center justify-between text-xs font-black" style={{ color: counterColor }}>
-            <span>{due ? `⏰ ${Math.abs(left)} day(s) overdue — hand it to the Facility Manager` : `⏳ ${left} day(s) left before it goes to the Facility Manager`}</span>
+            <span>{due ? `⏰ ${Math.abs(left)} day(s) overdue — send it to the main warehouse` : `⏳ ${left} day(s) left before it goes to the main warehouse`}</span>
             <span>{Math.min(dueDays, dueDays - Math.max(left, 0))}/{dueDays}</span>
           </div>
           <div style={{ height: 8, borderRadius: 8, backgroundColor: '#e2e8f0', overflow: 'hidden', marginTop: 4 }}>
@@ -303,9 +303,9 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
         )}
         {canHand && (
           <button type="button" disabled={busy || !canHandNow}
-            onClick={() => { if (window.confirm('Hand this item to the Facility Manager? He must confirm receiving it in the app.')) run(it.id, () => call('handoverLostItem', { id: it.id })); }}
+            onClick={() => { if (window.confirm('Send this item to the main warehouse? The Facility Manager must confirm receiving it in the app.')) run(it.id, () => call('handoverLostItem', { id: it.id })); }}
             title={canHandNow ? '' : `Available after ${dueDays} days`}
-            className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#f59e0b', color: '#fff' }}>📦 Hand to Facility Manager</button>
+            className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#f59e0b', color: '#fff' }}>📦 Send to the main warehouse</button>
         )}
         {it.status === 'PendingFM' && data.canConfirm && (
           <button type="button" disabled={busy} onClick={() => setPanel(panel === 'confirm' ? '' : 'confirm')} className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-50" style={{ backgroundColor: '#7c3aed', color: '#fff' }}>✔ Confirm I received it</button>
@@ -315,7 +315,7 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
           <button type="button" disabled={busy} onClick={() => { if (window.confirm('Delete this item for good? Use this only for a wrong entry.')) run(it.id, () => call('deleteLostItem', { id: it.id })); }} className="px-3 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-50" style={{ backgroundColor: '#fee2e2', color: '#b91c1c' }}>🗑 Delete</button>
         )}
       </div>
-      {it.status === 'InBranch' && data.canManage && !canHandNow && <p className="text-[11px] text-slate-500">The hand-over button opens after {dueDays} days in the branch.</p>}
+      {it.status === 'InBranch' && data.canManage && !canHandNow && <p className="text-[11px] text-slate-500">The "send to the main warehouse" button opens after {dueDays} days in the branch.</p>}
 
       {panel === 'return' && (
         <div className="p-3 rounded-2xl space-y-2" style={{ backgroundColor: '#f0fdf4' }}>
@@ -327,7 +327,7 @@ function ItemCard({ it, data, left, dueDays, busy, onZoom, run }) {
       )}
       {panel === 'confirm' && (
         <div className="p-3 rounded-2xl space-y-2" style={{ backgroundColor: '#f5f3ff' }}>
-          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Where is it stored? (optional)" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} />
+          <input className="w-full p-2.5 bg-white text-slate-900 border border-slate-200 rounded-xl text-xs font-bold" placeholder="Where is it stored in the warehouse? (optional)" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} />
           <button type="button" disabled={busy} onClick={() => run(it.id, () => call('confirmLostItemReceived', { id: it.id, note: f.note }))} className="px-4 py-2 rounded-xl text-xs font-black border-0 cursor-pointer disabled:opacity-40" style={{ backgroundColor: '#7c3aed', color: '#fff' }}>{busy ? '...' : 'Yes, I received it'}</button>
         </div>
       )}
@@ -391,7 +391,7 @@ function CameraCapture({ onShot, onClose }) {
 
 function ReceiveForm({ data, onClose, onSaved }) {
   const branches = data?.branches || [];
-  const [f, setF] = useState({ branch: branches[0] || '', category: '', description: '', place: '', amount: '', source: 'handed', fromName: '', fromJob: '' });
+  const [f, setF] = useState({ branch: '', category: '', description: '', place: '', amount: '', source: 'handed', fromName: '', fromJob: '' });
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -426,7 +426,7 @@ function ReceiveForm({ data, onClose, onSaved }) {
 
         <label className="block text-[11px] font-black text-slate-500">Branch *
           <select className={inp} value={f.branch} onChange={set('branch')}>
-            {branches.length === 0 && <option value="">No branch assigned to you</option>}
+            <option value="">{branches.length === 0 ? 'No branch assigned to you' : 'Choose the branch...'}</option>
             {branches.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </label>

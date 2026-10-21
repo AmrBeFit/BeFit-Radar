@@ -3222,13 +3222,13 @@ exports.handoverLostItem = onCall(async (request) => {
   if (x.status !== 'InBranch') throw new HttpsError('failed-precondition', 'This item is not in the branch any more.');
   const age = Date.now() - Number(x.receivedAtMs || 0);
   if (!c.isSysAdmin && age < LOST_DUE_DAYS * LOST_DAY_MS) {
-    throw new HttpsError('failed-precondition', `It can go to the Facility Manager only after ${LOST_DUE_DAYS} days in the branch (${Math.ceil(LOST_DUE_DAYS - age / LOST_DAY_MS)} day(s) left).`);
+    throw new HttpsError('failed-precondition', `It can go to the main warehouse only after ${LOST_DUE_DAYS} days in the branch (${Math.ceil(LOST_DUE_DAYS - age / LOST_DAY_MS)} day(s) left).`);
   }
   await ref.update({
     status: 'PendingFM', handedOverBy: c.username, handedOverAtMs: Date.now(), handedOverAt: FieldValue.serverTimestamp(),
-    history: FieldValue.arrayUnion(lostHistory(c, 'handed to Facility Manager', ''))
+    history: FieldValue.arrayUnion(lostHistory(c, 'sent to the main warehouse', ''))
   });
-  await notifyFacilityManagers('🧳 Lost item handed to you', `${x.category} from ${x.branch} - please confirm receipt in the app.`, ref.id);
+  await notifyFacilityManagers('🧳 Lost item sent to the main warehouse', `${x.category} from ${x.branch} - please confirm receipt in the app.`, ref.id);
   return { ok: true };
 });
 
